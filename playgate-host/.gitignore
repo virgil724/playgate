@@ -1,0 +1,10 @@
+# Build artifacts
+/playgate-host
+/playgate-host.exe
+*.exe
+
+# Local runtime config (copy from config.example.yaml)
+/config.yaml
+
+# Logs
+*.log

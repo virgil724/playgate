@@ -1,0 +1,32 @@
+# PlayGate Host example configuration.
+# Copy to config.yaml and adjust for your machine, then run:
+#   go run ./cmd/host -config config.yaml
+
+# Video capture source (T2: v4l2 capture card on the streamer's machine).
+capture:
+  device: /dev/video0   # V4L2 device node of the capture card
+  width: 1280
+  height: 720
+  fps: 30
+  format: YUYV          # YUYV | MJPEG
+
+# H.264 encoder (T3: ffmpeg subprocess).
+encoder:
+  bitrate: 6000000      # bits per second
+  preset: ultrafast     # x264 preset (favour latency over size)
+  keyframe_interval: 60 # GOP size in frames
+  ffmpeg_path: ffmpeg   # path to the ffmpeg binary
+
+# Pion WebRTC peer connection (T4).
+webrtc:
+  ice_servers:
+    - stun:stun.l.google.com:19302
+
+# Controller input target (T5: NXBT Unix-socket bridge to a virtual Switch controller).
+input:
+  socket_path: /run/nxbt/nxbt.sock
+
+# Signaling server connection.
+signaling:
+  url: ws://localhost:8080/ws
+  room_id: default
