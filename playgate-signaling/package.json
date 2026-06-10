@@ -1,0 +1,20 @@
+{
+  "name": "playgate-signaling",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PlayGate WebRTC signaling Worker + TURN credential endpoint",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240529.0",
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.0",
+    "wrangler": "^3.57.0"
+  }
+}
