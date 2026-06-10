@@ -34,8 +34,19 @@ func New(database *db.DB, keys *auth.KeyPair) *Server {
 	return s
 }
 
-// ServeHTTP implements http.Handler.
+// ServeHTTP implements http.Handler. It applies permissive CORS so the
+// browser frontend (playgate-web) can call the API cross-origin, and answers
+// preflight OPTIONS requests directly.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	h.Set("Access-Control-Max-Age", "86400")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -47,10 +58,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/hosts/register", s.handleRegisterHost)
 
 	// Room management (host auth required)
+	s.mux.HandleFunc("GET /api/rooms", s.handleListRooms)
 	s.mux.HandleFunc("POST /api/rooms", s.handleCreateRoom)
 	s.mux.HandleFunc("GET /api/rooms/{id}", s.handleGetRoom)
 	s.mux.HandleFunc("POST /api/rooms/{id}/heartbeat", s.handleHeartbeat)
+	s.mux.HandleFunc("POST /api/rooms/{id}/kick", s.handleKick)
 	s.mux.HandleFunc("POST /api/rooms/{id}/tokens", s.handleIssueTokens)
+	s.mux.HandleFunc("GET /api/rooms/{id}/tokens", s.handleListTokens)
 
 	// Token management
 	s.mux.HandleFunc("DELETE /api/tokens/{code}", s.handleRevokeToken)
@@ -152,6 +166,35 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---- GET /api/rooms?host=me ----
+
+func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
+	host, ok := s.requireHost(w, r)
+	if !ok {
+		return
+	}
+
+	rooms, err := s.db.ListRoomsByHostID(host.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	out := make([]roomResponse, 0, len(rooms))
+	for _, room := range rooms {
+		depth, _ := s.db.CountActiveSessionsInRoom(room.ID)
+		out = append(out, roomResponse{
+			ID:             room.ID,
+			Name:           room.Name,
+			SessionSeconds: room.SessionSeconds,
+			Online:         room.Online,
+			CurrentViewer:  room.CurrentViewer,
+			QueueDepth:     depth,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})
+}
+
 // ---- GET /api/rooms/{id} ----
 
 func (s *Server) handleGetRoom(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +226,11 @@ type heartbeatRequest struct {
 	CurrentViewer *string `json:"current_viewer"`
 }
 
+type heartbeatResponse struct {
+	Status        string `json:"status"`
+	KickRequested bool   `json:"kick_requested"`
+}
+
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	host, ok := s.requireHost(w, r)
 	if !ok {
@@ -191,7 +239,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	// Verify room belongs to this host.
-	_, err := s.db.GetRoomByIDAndHostID(id, host.ID)
+	room, err := s.db.GetRoomByIDAndHostID(id, host.ID)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "room not found")
 		return
@@ -211,7 +259,42 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "update failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+
+	// Report any pending kick request to the host, then clear it (consume-once).
+	kick := room.KickRequested
+	if kick {
+		if err := s.db.SetRoomKickRequested(id, false); err != nil {
+			writeError(w, http.StatusInternalServerError, "clear kick failed")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, heartbeatResponse{Status: "ok", KickRequested: kick})
+}
+
+// ---- POST /api/rooms/{id}/kick ----
+
+func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
+	host, ok := s.requireHost(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+
+	_, err := s.db.GetRoomByIDAndHostID(id, host.ID)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "room not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	if err := s.db.SetRoomKickRequested(id, true); err != nil {
+		writeError(w, http.StatusInternalServerError, "set kick failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "kick_requested"})
 }
 
 // ---- POST /api/rooms/{id}/tokens ----
@@ -268,6 +351,57 @@ func (s *Server) handleIssueTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, issueTokensResponse{Codes: codes})
+}
+
+// ---- GET /api/rooms/{id}/tokens ----
+
+type tokenInfo struct {
+	Code     string `json:"code"`
+	Status   string `json:"status"` // "issued" | "redeemed" | "revoked"
+	Redeemed bool   `json:"redeemed"`
+	Revoked  bool   `json:"revoked"`
+}
+
+func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	host, ok := s.requireHost(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+
+	_, err := s.db.GetRoomByIDAndHostID(id, host.ID)
+	if err == sql.ErrNoRows {
+		writeError(w, http.StatusNotFound, "room not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	tokens, err := s.db.ListTokensByRoomID(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+
+	out := make([]tokenInfo, 0, len(tokens))
+	for _, t := range tokens {
+		status := "issued"
+		switch {
+		case t.Revoked:
+			status = "revoked"
+		case t.Redeemed:
+			status = "redeemed"
+		}
+		out = append(out, tokenInfo{
+			Code:     t.Code,
+			Status:   status,
+			Redeemed: t.Redeemed,
+			Revoked:  t.Revoked,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": out})
 }
 
 // ---- DELETE /api/tokens/{code} ----

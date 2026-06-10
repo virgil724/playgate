@@ -304,6 +304,166 @@ func TestHeartbeatWrongHost(t *testing.T) {
 	mustStatus(t, rec, http.StatusNotFound)
 }
 
+func TestListRooms(t *testing.T) {
+	srv := setupServer(t)
+
+	rec := post(t, srv, "/api/hosts/register", map[string]any{"name": "h"}, "")
+	mustStatus(t, rec, http.StatusCreated)
+	apiKey := decodeBody(t, rec)["api_key"].(string)
+
+	// No rooms yet.
+	rec = getAuth(t, srv, "/api/rooms?host=me", apiKey)
+	mustStatus(t, rec, http.StatusOK)
+	rooms, _ := decodeBody(t, rec)["rooms"].([]any)
+	if len(rooms) != 0 {
+		t.Fatalf("expected 0 rooms, got %d", len(rooms))
+	}
+
+	// Create two rooms.
+	post(t, srv, "/api/rooms", map[string]any{"name": "R1"}, apiKey)
+	post(t, srv, "/api/rooms", map[string]any{"name": "R2"}, apiKey)
+
+	rec = getAuth(t, srv, "/api/rooms?host=me", apiKey)
+	mustStatus(t, rec, http.StatusOK)
+	rooms, _ = decodeBody(t, rec)["rooms"].([]any)
+	if len(rooms) != 2 {
+		t.Fatalf("expected 2 rooms, got %d", len(rooms))
+	}
+
+	// Unauthorized without key.
+	rec = get(t, srv, "/api/rooms?host=me")
+	mustStatus(t, rec, http.StatusUnauthorized)
+
+	// A different host sees none of these rooms.
+	rec = post(t, srv, "/api/hosts/register", map[string]any{"name": "h2"}, "")
+	apiKey2 := decodeBody(t, rec)["api_key"].(string)
+	rec = getAuth(t, srv, "/api/rooms?host=me", apiKey2)
+	mustStatus(t, rec, http.StatusOK)
+	rooms, _ = decodeBody(t, rec)["rooms"].([]any)
+	if len(rooms) != 0 {
+		t.Fatalf("expected other host to see 0 rooms, got %d", len(rooms))
+	}
+}
+
+func TestListTokens(t *testing.T) {
+	srv := setupServer(t)
+
+	rec := post(t, srv, "/api/hosts/register", map[string]any{"name": "h"}, "")
+	apiKey := decodeBody(t, rec)["api_key"].(string)
+	rec = post(t, srv, "/api/rooms", map[string]any{"name": "R"}, apiKey)
+	roomID := decodeBody(t, rec)["id"].(string)
+
+	// Issue 3 tokens.
+	rec = post(t, srv, "/api/rooms/"+roomID+"/tokens", map[string]any{"count": 3}, apiKey)
+	mustStatus(t, rec, http.StatusCreated)
+	codes, _ := decodeBody(t, rec)["codes"].([]any)
+	c0 := codes[0].(string)
+	c1 := codes[1].(string)
+
+	// Redeem one, revoke another.
+	post(t, srv, "/api/tokens/"+c0+"/redeem", map[string]any{}, "")
+	del(t, srv, "/api/tokens/"+c1, apiKey)
+
+	rec = getAuth(t, srv, "/api/rooms/"+roomID+"/tokens", apiKey)
+	mustStatus(t, rec, http.StatusOK)
+	toks, _ := decodeBody(t, rec)["tokens"].([]any)
+	if len(toks) != 3 {
+		t.Fatalf("expected 3 tokens, got %d", len(toks))
+	}
+
+	statuses := map[string]int{}
+	for _, raw := range toks {
+		m := raw.(map[string]any)
+		statuses[m["status"].(string)]++
+	}
+	if statuses["redeemed"] != 1 || statuses["revoked"] != 1 || statuses["issued"] != 1 {
+		t.Fatalf("unexpected status breakdown: %v", statuses)
+	}
+
+	// Unauthorized.
+	rec = get(t, srv, "/api/rooms/"+roomID+"/tokens")
+	mustStatus(t, rec, http.StatusUnauthorized)
+
+	// Other host cannot list.
+	rec = post(t, srv, "/api/hosts/register", map[string]any{"name": "h2"}, "")
+	apiKey2 := decodeBody(t, rec)["api_key"].(string)
+	rec = getAuth(t, srv, "/api/rooms/"+roomID+"/tokens", apiKey2)
+	mustStatus(t, rec, http.StatusNotFound)
+}
+
+func TestKickFlow(t *testing.T) {
+	srv := setupServer(t)
+
+	rec := post(t, srv, "/api/hosts/register", map[string]any{"name": "h"}, "")
+	apiKey := decodeBody(t, rec)["api_key"].(string)
+	rec = post(t, srv, "/api/rooms", map[string]any{"name": "R"}, apiKey)
+	roomID := decodeBody(t, rec)["id"].(string)
+
+	// First heartbeat: no kick pending.
+	rec = post(t, srv, "/api/rooms/"+roomID+"/heartbeat", map[string]any{"online": true}, apiKey)
+	mustStatus(t, rec, http.StatusOK)
+	if decodeBody(t, rec)["kick_requested"] != false {
+		t.Fatal("expected kick_requested=false initially")
+	}
+
+	// Request a kick.
+	rec = post(t, srv, "/api/rooms/"+roomID+"/kick", map[string]any{}, apiKey)
+	mustStatus(t, rec, http.StatusOK)
+
+	// Next heartbeat reports the kick once.
+	rec = post(t, srv, "/api/rooms/"+roomID+"/heartbeat", map[string]any{"online": true}, apiKey)
+	mustStatus(t, rec, http.StatusOK)
+	if decodeBody(t, rec)["kick_requested"] != true {
+		t.Fatal("expected kick_requested=true after kick")
+	}
+
+	// Subsequent heartbeat: flag cleared (consume-once).
+	rec = post(t, srv, "/api/rooms/"+roomID+"/heartbeat", map[string]any{"online": true}, apiKey)
+	mustStatus(t, rec, http.StatusOK)
+	if decodeBody(t, rec)["kick_requested"] != false {
+		t.Fatal("expected kick_requested=false after consumption")
+	}
+
+	// Unauthorized kick.
+	rec = post(t, srv, "/api/rooms/"+roomID+"/kick", map[string]any{}, "")
+	mustStatus(t, rec, http.StatusUnauthorized)
+
+	// Kick on unknown / not-owned room.
+	rec = post(t, srv, "/api/rooms/nope/kick", map[string]any{}, apiKey)
+	mustStatus(t, rec, http.StatusNotFound)
+}
+
+func TestCORS(t *testing.T) {
+	srv := setupServer(t)
+
+	// Preflight OPTIONS returns 204 with CORS headers.
+	req := httptest.NewRequest(http.MethodOptions, "/api/rooms", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	mustStatus(t, rec, http.StatusNoContent)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatal("expected CORS allow-origin header")
+	}
+
+	// Normal requests also carry the header.
+	rec = get(t, srv, "/api/public-key")
+	if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatal("expected CORS header on normal request")
+	}
+}
+
+// getAuth is like get but with a Bearer API key.
+func getAuth(t *testing.T, srv http.Handler, path string, authKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if authKey != "" {
+		req.Header.Set("Authorization", "Bearer "+authKey)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
 // Ensure the test file doesn't have import issues with os/strings.
 var _ = os.Getenv
 var _ = strings.Contains

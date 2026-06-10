@@ -63,6 +63,10 @@ The `playgate-host` verifies: signature, `exp` not past, `room_id` matches local
 
 All request/response bodies are JSON. Host-authenticated endpoints require `Authorization: Bearer <api_key>`.
 
+The server sends permissive CORS headers (`Access-Control-Allow-Origin: *`) and
+answers preflight `OPTIONS` with `204`, so the browser frontend (playgate-web)
+can call the API cross-origin.
+
 ---
 
 ### `GET /api/public-key`
@@ -126,6 +130,31 @@ Create a room. **Requires host API key.**
 
 ---
 
+### `GET /api/rooms?host=me`
+
+List all rooms owned by the authenticated host. **Requires host API key.** The
+`host=me` query parameter is conventional/cosmetic — ownership is determined by
+the API key, not the parameter.
+
+**Response 200**
+```json
+{
+  "rooms": [
+    {
+      "id": "790a7ace91eb4e4315ddb3e04e614739",
+      "name": "Zelda Stream",
+      "session_seconds": 90,
+      "online": true,
+      "current_viewer": "9e601e2806bf2663d0b54e85ec9f6dff",
+      "queue_depth": 2
+    }
+  ]
+}
+```
+Rooms are ordered newest-first. `current_viewer` is `null` when nobody controls.
+
+---
+
 ### `GET /api/rooms/{id}`
 
 Query room status. **Public.**
@@ -161,8 +190,57 @@ Set `current_viewer` to `null` when nobody is controlling.
 
 **Response 200**
 ```json
-{"status": "ok"}
+{"status": "ok", "kick_requested": false}
 ```
+
+`kick_requested` is `true` when a `POST /api/rooms/{id}/kick` has been received
+since the previous heartbeat. The flag is **consumed once**: it is reported in
+exactly one heartbeat response and then cleared server-side. The host must, on
+seeing `kick_requested: true`, terminate the current controller's session
+(disconnect/expire it). See `POST /api/rooms/{id}/kick` below.
+
+---
+
+### `POST /api/rooms/{id}/kick`
+
+Streamer requests that the current controller be forcibly removed. **Requires
+host API key.** This only *marks* the request; the host actually performs the
+kick when it observes `kick_requested: true` in its next heartbeat response.
+
+**Request** (empty body OK)
+```json
+{}
+```
+
+**Response 200**
+```json
+{"status": "kick_requested"}
+```
+
+| Status | Meaning |
+|--------|---------|
+| 200 | Kick request recorded |
+| 401 | Missing/invalid API key |
+| 404 | Room not found or not owned by this host |
+
+---
+
+### `GET /api/rooms/{id}/tokens`
+
+List all token codes issued for a room, with their lifecycle status. **Requires
+host API key** (must own the room).
+
+**Response 200**
+```json
+{
+  "tokens": [
+    {"code": "5b5f6121949637010021", "status": "issued",   "redeemed": false, "revoked": false},
+    {"code": "8258d5d837809625b053", "status": "redeemed", "redeemed": true,  "revoked": false},
+    {"code": "be1d3ff29bc3985d6475", "status": "revoked",  "redeemed": false, "revoked": true}
+  ]
+}
+```
+`status` is one of `issued`, `redeemed`, `revoked`. Tokens are ordered newest-first.
 
 ---
 

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     session_seconds INTEGER NOT NULL DEFAULT 60,
     online          INTEGER NOT NULL DEFAULT 0,
     current_viewer  TEXT,
+    kick_requested  INTEGER NOT NULL DEFAULT 0,
     created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
 );

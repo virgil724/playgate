@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,8 +37,16 @@ func Open(path string) (*DB, error) {
 }
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	// Additive column migrations for databases created before the column existed.
+	// SQLite has no "ADD COLUMN IF NOT EXISTS"; ignore the duplicate-column error.
+	if _, err := db.Exec(`ALTER TABLE rooms ADD COLUMN kick_requested INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
 
 // ---- Host ----
@@ -75,6 +84,7 @@ type Room struct {
 	SessionSeconds int
 	Online         bool
 	CurrentViewer  *string
+	KickRequested  bool
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -91,7 +101,7 @@ func (d *DB) CreateRoom(r *Room) error {
 
 func (d *DB) GetRoom(id string) (*Room, error) {
 	row := d.QueryRow(
-		`SELECT id, host_id, name, session_seconds, online, current_viewer, created_at, updated_at
+		`SELECT id, host_id, name, session_seconds, online, current_viewer, kick_requested, created_at, updated_at
 		 FROM rooms WHERE id=?`, id,
 	)
 	return scanRoom(row)
@@ -99,10 +109,38 @@ func (d *DB) GetRoom(id string) (*Room, error) {
 
 func (d *DB) GetRoomByIDAndHostID(id, hostID string) (*Room, error) {
 	row := d.QueryRow(
-		`SELECT id, host_id, name, session_seconds, online, current_viewer, created_at, updated_at
+		`SELECT id, host_id, name, session_seconds, online, current_viewer, kick_requested, created_at, updated_at
 		 FROM rooms WHERE id=? AND host_id=?`, id, hostID,
 	)
 	return scanRoom(row)
+}
+
+// ListRoomsByHostID returns all rooms owned by a host, newest first.
+func (d *DB) ListRoomsByHostID(hostID string) ([]*Room, error) {
+	rows, err := d.Query(
+		`SELECT id, host_id, name, session_seconds, online, current_viewer, kick_requested, created_at, updated_at
+		 FROM rooms WHERE host_id=? ORDER BY created_at DESC`, hostID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []*Room
+	for rows.Next() {
+		r := &Room{}
+		var onlineInt, kickInt int
+		if err := rows.Scan(
+			&r.ID, &r.HostID, &r.Name, &r.SessionSeconds,
+			&onlineInt, &r.CurrentViewer, &kickInt, &r.CreatedAt, &r.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		r.Online = onlineInt != 0
+		r.KickRequested = kickInt != 0
+		rooms = append(rooms, r)
+	}
+	return rooms, rows.Err()
 }
 
 func (d *DB) UpdateRoomHeartbeat(id string, online bool, currentViewer *string) error {
@@ -113,16 +151,28 @@ func (d *DB) UpdateRoomHeartbeat(id string, online bool, currentViewer *string) 
 	return err
 }
 
+// SetRoomKickRequested marks (or clears) a pending request to kick the current
+// controller. The host observes this flag in its heartbeat response and acts
+// on it, then it is cleared by the heartbeat handler.
+func (d *DB) SetRoomKickRequested(id string, requested bool) error {
+	_, err := d.Exec(
+		`UPDATE rooms SET kick_requested=?, updated_at=datetime('now') WHERE id=?`,
+		boolToInt(requested), id,
+	)
+	return err
+}
+
 func scanRoom(row *sql.Row) (*Room, error) {
 	r := &Room{}
-	var onlineInt int
+	var onlineInt, kickInt int
 	if err := row.Scan(
 		&r.ID, &r.HostID, &r.Name, &r.SessionSeconds,
-		&onlineInt, &r.CurrentViewer, &r.CreatedAt, &r.UpdatedAt,
+		&onlineInt, &r.CurrentViewer, &kickInt, &r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	r.Online = onlineInt != 0
+	r.KickRequested = kickInt != 0
 	return r, nil
 }
 
@@ -182,6 +232,35 @@ func (d *DB) RevokeToken(code string) error {
 		code,
 	)
 	return err
+}
+
+// ListTokensByRoomID returns all tokens issued for a room, newest first.
+func (d *DB) ListTokensByRoomID(roomID string) ([]*Token, error) {
+	rows, err := d.Query(
+		`SELECT code, room_id, host_id, redeemed, revoked, viewer_id, created_at, redeemed_at
+		 FROM tokens WHERE room_id=? ORDER BY created_at DESC`, roomID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []*Token
+	for rows.Next() {
+		t := &Token{}
+		var redeemedInt, revokedInt int
+		if err := rows.Scan(
+			&t.Code, &t.RoomID, &t.HostID,
+			&redeemedInt, &revokedInt, &t.ViewerID,
+			&t.CreatedAt, &t.RedeemedAt,
+		); err != nil {
+			return nil, err
+		}
+		t.Redeemed = redeemedInt != 0
+		t.Revoked = revokedInt != 0
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
 }
 
 // GetTokenByCodeAndHostID returns a token if it belongs to the given host.
