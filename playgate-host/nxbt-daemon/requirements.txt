@@ -1,0 +1,12 @@
+# PlayGate NXBT daemon dependencies
+#
+# NOTE: nxbt only runs on Linux with BlueZ ≥ 5.50 and Python 3.8+.
+# Do NOT install on macOS or Windows — it requires DBus, BlueZ, and
+# a kernel with the uhid driver available.
+#
+# Install on Raspberry Pi / Debian / Ubuntu:
+#   sudo pip3 install -r requirements.txt
+# or in a virtualenv:
+#   python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+
+nxbt>=0.1.5  # Linux only — Bluetooth Nintendo Switch Pro Controller emulation

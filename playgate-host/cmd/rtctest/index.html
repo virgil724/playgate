@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<!--
+  cmd/rtctest/index.html — Browser side of the rtctest manual-signaling harness.
+
+  Flow:
+    1. Run `go run ./cmd/rtctest` on the host — it prints a base64 OFFER on stdout.
+    2. Open this file in a browser, paste the offer into the textarea, click "Start".
+    3. The page creates an answer and displays it — copy it.
+    4. Paste the answer back into the terminal and press Enter.
+    5. Video plays in the <video> element; keyboard events are sent at 60 Hz
+       over the "input" DataChannel using the InputCommand binary wire format
+       (see internal/rtc/input_codec.go).
+    6. Messages received on the "control" DataChannel are shown in the log.
+
+  InputCommand wire format (13 bytes, little-endian):
+    offset  size  field    description
+    0       1     version  always 0x01 (InputWireVersion)
+    1       4     buttons  uint32 button bitmask (little-endian)
+    5       2     lx       int16  left stick X  × 32767 (little-endian)
+    7       2     ly       int16  left stick Y  × 32767 (little-endian)
+    9       2     rx       int16  right stick X × 32767 (little-endian)
+    11      2     ry       int16  right stick Y × 32767 (little-endian)
+
+  Button bitmask (matches core.Button* constants in internal/core/types.go):
+    bit 0  (0x000001) A
+    bit 1  (0x000002) B
+    bit 2  (0x000004) X
+    bit 3  (0x000008) Y
+    bit 4  (0x000010) L
+    bit 5  (0x000020) R
+    bit 6  (0x000040) ZL
+    bit 7  (0x000080) ZR
+    bit 8  (0x000100) Plus
+    bit 9  (0x000200) Minus
+    bit 10 (0x000400) Home
+    bit 11 (0x000800) Capture
+    bit 12 (0x001000) L-Stick click
+    bit 13 (0x002000) R-Stick click
+    bit 14 (0x004000) D-pad Up
+    bit 15 (0x008000) D-pad Down
+    bit 16 (0x010000) D-pad Left
+    bit 17 (0x020000) D-pad Right
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PlayGate rtctest</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      margin: 0;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    h1 { margin: 0; font-size: 1.2rem; color: #7dd3fc; }
+    label { font-size: 0.85rem; color: #a0aec0; }
+    textarea {
+      width: 100%;
+      height: 5rem;
+      background: #0f172a;
+      color: #7dd3fc;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 0.4rem;
+      font-family: monospace;
+      font-size: 0.8rem;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    button {
+      padding: 0.4rem 1.2rem;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: monospace;
+    }
+    button:disabled { background: #374151; cursor: default; }
+    #answer-section { display: none; }
+    video {
+      width: 100%;
+      max-width: 960px;
+      background: #000;
+      border: 1px solid #334155;
+      border-radius: 4px;
+    }
+    #log {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 0.5rem;
+      height: 8rem;
+      overflow-y: auto;
+      font-size: 0.78rem;
+    }
+    .log-entry { margin: 0; padding: 0; }
+    .log-info  { color: #86efac; }
+    .log-warn  { color: #fde68a; }
+    .log-error { color: #f87171; }
+    .log-ctrl  { color: #c4b5fd; }
+    #status {
+      font-size: 0.85rem;
+      color: #94a3b8;
+    }
+    #keymap {
+      font-size: 0.75rem;
+      color: #64748b;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <h1>PlayGate rtctest — manual WebRTC harness</h1>
+
+  <!-- Step 1: paste offer from the host terminal -->
+  <div>
+    <label for="offer-input">1. Paste base64 OFFER from host terminal:</label><br/>
+    <textarea id="offer-input" placeholder="Paste base64 SDP offer here…"></textarea>
+    <button id="start-btn">Start (create answer)</button>
+  </div>
+
+  <!-- Step 2: copy answer back to terminal -->
+  <div id="answer-section">
+    <label for="answer-output">2. Copy this base64 ANSWER and paste it into the terminal:</label><br/>
+    <textarea id="answer-output" readonly></textarea>
+  </div>
+
+  <div id="status">Status: idle</div>
+
+  <!-- Video element — autoplay muted is required for Chrome to play without gesture -->
+  <video id="video" playsinline autoplay muted></video>
+
+  <!-- Control channel messages and connection log -->
+  <div>
+    <label>Log / control channel messages:</label>
+    <div id="log"></div>
+  </div>
+
+  <div id="keymap">
+    <strong>Keyboard mapping (60 Hz):</strong><br/>
+    Z=A &nbsp; X=B &nbsp; A=X &nbsp; S=Y &nbsp; Q=L &nbsp; E=R &nbsp; 1=ZL &nbsp; 3=ZR<br/>
+    Enter=Plus &nbsp; Backspace=Minus &nbsp; H=Home &nbsp; G=Capture<br/>
+    ArrowUp/Down/Left/Right = D-pad &nbsp; F=L-Stick &nbsp; J=R-Stick
+  </div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Constants — mirror internal/rtc/input_codec.go
+// ---------------------------------------------------------------------------
+
+const INPUT_WIRE_VERSION = 1;
+const INPUT_WIRE_SIZE    = 13;    // bytes
+const AXIS_SCALE         = 32767; // int16 fixed-point multiplier
+
+// Button bitmask — mirrors internal/core/types.go Button* constants
+const BTN = {
+  A:       0x000001,
+  B:       0x000002,
+  X:       0x000004,
+  Y:       0x000008,
+  L:       0x000010,
+  R:       0x000020,
+  ZL:      0x000040,
+  ZR:      0x000080,
+  PLUS:    0x000100,
+  MINUS:   0x000200,
+  HOME:    0x000400,
+  CAPTURE: 0x000800,
+  LSTICK:  0x001000,
+  RSTICK:  0x002000,
+  DPAD_U:  0x004000,
+  DPAD_D:  0x008000,
+  DPAD_L:  0x010000,
+  DPAD_R:  0x020000,
+};
+
+// Keyboard → button mapping
+const KEY_MAP = {
+  'KeyZ':        BTN.A,
+  'KeyX':        BTN.B,
+  'KeyA':        BTN.X,
+  'KeyS':        BTN.Y,
+  'KeyQ':        BTN.L,
+  'KeyE':        BTN.R,
+  'Digit1':      BTN.ZL,
+  'Digit3':      BTN.ZR,
+  'Enter':       BTN.PLUS,
+  'Backspace':   BTN.MINUS,
+  'KeyH':        BTN.HOME,
+  'KeyG':        BTN.CAPTURE,
+  'KeyF':        BTN.LSTICK,
+  'KeyJ':        BTN.RSTICK,
+  'ArrowUp':     BTN.DPAD_U,
+  'ArrowDown':   BTN.DPAD_D,
+  'ArrowLeft':   BTN.DPAD_L,
+  'ArrowRight':  BTN.DPAD_R,
+};
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+let pressedButtons = 0; // bitmask of currently held keys
+let pc = null;
+let inputChannel = null;
+let sendInterval = null; // 60 Hz interval handle
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+const logEl = document.getElementById('log');
+
+function addLog(msg, cls) {
+  const p = document.createElement('p');
+  p.className = 'log-entry ' + (cls || 'log-info');
+  p.textContent = new Date().toISOString().slice(11, 23) + ' ' + msg;
+  logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------
+// InputCommand encoder — must match EncodeInputCommand in input_codec.go
+//
+// Arguments:
+//   buttons : uint32 bitmask
+//   lx, ly  : float in [-1, 1] (left stick)
+//   rx, ry  : float in [-1, 1] (right stick)
+//
+// Returns a 13-byte ArrayBuffer.
+// ---------------------------------------------------------------------------
+
+function encodeInputCommand(buttons, lx, ly, rx, ry) {
+  const buf = new ArrayBuffer(INPUT_WIRE_SIZE);
+  const view = new DataView(buf);
+
+  view.setUint8(0, INPUT_WIRE_VERSION);                           // byte 0: version
+  view.setUint32(1, buttons >>> 0, /* littleEndian= */ true);     // bytes 1-4: buttons
+
+  // axis → int16: multiply by AXIS_SCALE, round, clamp to [-32767, 32767]
+  function axisToInt16(v) {
+    let s = v * AXIS_SCALE;
+    if (s >  AXIS_SCALE) s =  AXIS_SCALE;
+    if (s < -AXIS_SCALE) s = -AXIS_SCALE;
+    return Math.round(s); // rounds to nearest; ties away from zero via JS Math.round
+  }
+
+  view.setInt16(5,  axisToInt16(lx), true); // bytes 5-6: lx
+  view.setInt16(7,  axisToInt16(ly), true); // bytes 7-8: ly
+  view.setInt16(9,  axisToInt16(rx), true); // bytes 9-10: rx
+  view.setInt16(11, axisToInt16(ry), true); // bytes 11-12: ry
+
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// 60 Hz input sender
+// ---------------------------------------------------------------------------
+
+function startInputLoop() {
+  if (sendInterval !== null) return;
+  sendInterval = setInterval(() => {
+    if (!inputChannel || inputChannel.readyState !== 'open') return;
+    const frame = encodeInputCommand(pressedButtons, 0, 0, 0, 0);
+    try {
+      inputChannel.send(frame);
+    } catch (e) {
+      // DataChannel may be closed transiently; ignore.
+    }
+  }, Math.round(1000 / 60)); // ~16.67 ms
+}
+
+function stopInputLoop() {
+  if (sendInterval !== null) {
+    clearInterval(sendInterval);
+    sendInterval = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard event handlers
+// ---------------------------------------------------------------------------
+
+document.addEventListener('keydown', (e) => {
+  const bit = KEY_MAP[e.code];
+  if (bit !== undefined) {
+    e.preventDefault();
+    pressedButtons |= bit;
+  }
+});
+
+document.addEventListener('keyup', (e) => {
+  const bit = KEY_MAP[e.code];
+  if (bit !== undefined) {
+    e.preventDefault();
+    pressedButtons &= ~bit;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SDP helpers (base64 ↔ JSON-wrapped SDP)
+// ---------------------------------------------------------------------------
+
+function encodeSDP(desc) {
+  const json = JSON.stringify({ type: desc.type, sdp: desc.sdp });
+  return btoa(json);
+}
+
+function decodeSDP(b64) {
+  let json;
+  try {
+    json = atob(b64.trim());
+  } catch(e) {
+    throw new Error('base64 decode failed: ' + e.message);
+  }
+  let obj;
+  try {
+    obj = JSON.parse(json);
+  } catch(e) {
+    throw new Error('JSON parse failed: ' + e.message);
+  }
+  return new RTCSessionDescription({ type: obj.type, sdp: obj.sdp });
+}
+
+// ---------------------------------------------------------------------------
+// WebRTC setup
+// ---------------------------------------------------------------------------
+
+const startBtn   = document.getElementById('start-btn');
+const offerInput = document.getElementById('offer-input');
+const answerOut  = document.getElementById('answer-output');
+const statusEl   = document.getElementById('status');
+const videoEl    = document.getElementById('video');
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  const offerB64 = offerInput.value.trim();
+  if (!offerB64) {
+    addLog('ERROR: paste the base64 offer first', 'log-error');
+    startBtn.disabled = false;
+    return;
+  }
+
+  try {
+    await startWebRTC(offerB64);
+  } catch (err) {
+    addLog('ERROR: ' + err.message, 'log-error');
+    startBtn.disabled = false;
+  }
+});
+
+async function startWebRTC(offerB64) {
+  // Close any existing peer connection.
+  if (pc) {
+    pc.close();
+    stopInputLoop();
+  }
+
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  // Connection state logging.
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    addLog('connection state: ' + s, s === 'connected' ? 'log-info' : 'log-warn');
+    statusEl.textContent = 'Status: ' + s;
+    if (s === 'connected') {
+      startInputLoop();
+    } else if (s === 'disconnected' || s === 'failed' || s === 'closed') {
+      stopInputLoop();
+    }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    addLog('ICE state: ' + pc.iceConnectionState);
+  };
+
+  // The host (offerer) creates the DataChannels; the browser receives them here.
+  pc.ondatachannel = (event) => {
+    const dc = event.channel;
+    addLog('DataChannel received: ' + dc.label);
+
+    if (dc.label === 'input') {
+      // This is our send-only unreliable channel; the host created it.
+      // We keep a reference so the 60 Hz loop can send on it.
+      inputChannel = dc;
+      dc.onopen  = () => addLog('input channel open');
+      dc.onclose = () => { addLog('input channel closed', 'log-warn'); inputChannel = null; };
+      dc.onerror = (e) => addLog('input channel error: ' + e, 'log-error');
+
+    } else if (dc.label === 'control') {
+      // Reliable channel — display received session events.
+      dc.onopen  = () => addLog('control channel open', 'log-info');
+      dc.onclose = () => addLog('control channel closed', 'log-warn');
+      dc.onerror = (e) => addLog('control channel error: ' + e, 'log-error');
+      dc.onmessage = (ev) => {
+        let text = typeof ev.data === 'string' ? ev.data : '(binary)';
+        addLog('CTRL ← ' + text, 'log-ctrl');
+      };
+
+    } else {
+      addLog('unknown DataChannel: ' + dc.label, 'log-warn');
+    }
+  };
+
+  // Video track — attach to the <video> element.
+  pc.ontrack = (event) => {
+    addLog('track received: ' + event.track.kind);
+    if (event.track.kind === 'video') {
+      videoEl.srcObject = event.streams[0] || new MediaStream([event.track]);
+      videoEl.play().catch((e) => addLog('video play error: ' + e, 'log-error'));
+    }
+  };
+
+  // Decode and apply the offer.
+  const offer = decodeSDP(offerB64);
+  await pc.setRemoteDescription(offer);
+  addLog('remote description (offer) applied');
+
+  // Create answer.
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  addLog('local description (answer) set, waiting for ICE gathering…');
+
+  // Wait for ICE gathering to complete (non-trickle, matching the host side).
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') { resolve(); return; }
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState === 'complete') resolve();
+    };
+  });
+
+  addLog('ICE gathering complete');
+
+  // Encode the final local description (with ICE candidates) and display it.
+  const answerB64 = encodeSDP(pc.localDescription);
+  answerOut.value = answerB64;
+  document.getElementById('answer-section').style.display = 'block';
+  addLog('ANSWER ready — copy it to the terminal', 'log-info');
+}
+</script>
+</body>
+</html>
