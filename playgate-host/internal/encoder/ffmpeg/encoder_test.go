@@ -101,6 +101,49 @@ func TestEnqueueFrameDropOldest(t *testing.T) {
 	}
 }
 
+// TestSetBitrateUpdatesArgsAndSignals verifies SetBitrate mutates the encoder's
+// options (so the next launch uses the new -b:v) and enqueues a restart request,
+// and that a no-op SetBitrate (same value) does neither.
+func TestSetBitrateUpdatesArgsAndSignals(t *testing.T) {
+	in := make(chan core.VideoFrame)
+	opts := DefaultOptions(640, 480, 30, core.PixelFormatYUYV)
+	opts.Bitrate = 4_000_000
+	enc, err := New(quietLogger(), opts, in)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A changed bitrate updates currentArgs and posts exactly one restart.
+	enc.SetBitrate(2_000_000)
+	args, err := enc.currentArgs()
+	if err != nil {
+		t.Fatalf("currentArgs: %v", err)
+	}
+	if !hasPair(args, "-b:v", "2000000") {
+		t.Errorf("currentArgs did not reflect new bitrate; args: %v", args)
+	}
+	select {
+	case <-enc.restart:
+	default:
+		t.Error("SetBitrate with a new value should enqueue a restart")
+	}
+
+	// Same value again: no change, no restart enqueued.
+	enc.SetBitrate(2_000_000)
+	select {
+	case <-enc.restart:
+		t.Error("SetBitrate with the same value should not enqueue a restart")
+	default:
+	}
+
+	// Non-positive is ignored.
+	enc.SetBitrate(0)
+	args, _ = enc.currentArgs()
+	if !hasPair(args, "-b:v", "2000000") {
+		t.Error("SetBitrate(0) should be ignored")
+	}
+}
+
 // TestSubprocessDeathReportedOnErrors points the encoder at a fake ffmpeg (a
 // re-exec of the test binary) that exits non-zero immediately. Run must report
 // the unexpected exit on Errors() and return nil (clean module shutdown), never

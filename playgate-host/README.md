@@ -82,6 +82,27 @@ write) p50/p95 every `metrics.report_interval_seconds`. The control channel
 echoes `{"kind":"ping","ts":N}` as `pong`, so the test page shows live
 application-level RTT.
 
+### Hardware encoding (T13) & adaptive bitrate (T14)
+
+`encoder.codec` selects the H.264 encoder: `libx264` (software, default),
+`h264_v4l2m2m` (Raspberry Pi), `h264_vaapi` (Intel/AMD GPU; set
+`encoder.vaapi_device`) or `h264_nvenc` (NVIDIA). Each codec gets low-latency
+parameters appropriate to it (x264 has `preset`/`tune`; v4l2m2m/vaapi/nvenc use
+their own equivalents) but the same short GOP, no-B-frames and bitrate rate
+control. At startup the host probes `ffmpeg -encoders`; a missing codec is logged
+as an actionable error (install a suitable ffmpeg or fall back to `libx264`) — it
+never silently downgrades.
+
+`abr.enabled` turns on adaptive bitrate: `internal/abr` runs an AIMD control loop
+fed by WebRTC stats (`PeerConnection.GetStats()` remote-inbound loss/RTT, sampled
+every `abr.sample_interval_ms`). Loss above `abr.loss_threshold` triggers a
+multiplicative decrease; a sustained clean link triggers an additive increase;
+the target is clamped to `[abr.min_bitrate, abr.max_bitrate]` and changes are
+debounced by `abr.cooldown_seconds`. Because ffmpeg cannot retune a running
+subprocess, a bitrate change restarts the encoder; the fresh IDR plus the rtc
+layer's keyframe gating hides the restart so a struggling viewer's quality drops
+instead of the stream stalling.
+
 Full glass-to-glass latency must be measured on real hardware: film the Switch
 screen and the browser window side by side with a millisecond clock overlay and
 compare frames. Record baselines here:

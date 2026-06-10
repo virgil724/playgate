@@ -11,12 +11,36 @@ capture:
   fps: 30
   format: YUYV          # YUYV | MJPEG
 
-# H.264 encoder (T3: ffmpeg subprocess).
+# H.264 encoder (T3: ffmpeg subprocess; T13: hardware codec selection).
 encoder:
-  bitrate: 6000000      # bits per second
-  preset: ultrafast     # x264 preset (favour latency over size)
+  bitrate: 6000000      # bits per second (ABR start bitrate when abr.enabled)
+  preset: ultrafast     # x264 preset (libx264 only; favour latency over size)
   keyframe_interval: 60 # GOP size in frames
   ffmpeg_path: ffmpeg   # path to the ffmpeg binary
+  # H.264 encoder (T13). Default libx264 (software) keeps the original behaviour.
+  #   libx264        software / CPU (default, always available)
+  #   h264_v4l2m2m   Raspberry Pi hardware encoder (Linux + v4l2 m2m device)
+  #   h264_vaapi     Intel/AMD GPU via VA-API (set vaapi_device below)
+  #   h264_nvenc     NVIDIA GPU
+  # At startup the host probes `ffmpeg -encoders`; if the chosen codec is missing
+  # it logs an error telling you to install a suitable ffmpeg or fall back to
+  # libx264 (it never silently downgrades).
+  codec: libx264
+  vaapi_device: /dev/dri/renderD128   # DRM render node (h264_vaapi only)
+
+# Adaptive bitrate (T14). When enabled the host samples WebRTC stats (packet
+# loss, RTT) and adjusts the encoder bitrate within [min_bitrate, max_bitrate]
+# using AIMD: loss above loss_threshold -> multiplicative decrease; a sustained
+# clean link -> additive increase. Changes are debounced by cooldown_seconds and
+# applied by restarting the ffmpeg subprocess (keyframe gating hides the blip).
+# Disabled by default: the encoder runs at the fixed encoder.bitrate.
+abr:
+  enabled: false
+  min_bitrate: 1000000    # floor (bits/sec) — bad network degrades to this, never stalls
+  max_bitrate: 8000000    # ceiling (bits/sec)
+  loss_threshold: 0.05    # packet-loss fraction (0..1) that triggers a decrease
+  sample_interval_ms: 2000 # how often WebRTC stats are sampled
+  cooldown_seconds: 10    # minimum time between two bitrate changes
 
 # Pion WebRTC peer connection (T4). Static ICE servers; used as-is when
 # signaling.use_turn is false, and as the fallback when TURN fetch fails.

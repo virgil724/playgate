@@ -122,17 +122,13 @@ func (LibX264) Name() string { return "libx264" }
 // OutputArgs implements Codec for software x264 with low-latency tuning.
 func (LibX264) OutputArgs(o Options) []string {
 	args := []string{
-		"-c:v", "libx264",
+		"-c:v", CodecLibX264,
 		"-preset", o.Preset,
 		"-tune", o.Tune,
-		"-b:v", strconv.Itoa(o.Bitrate),
-		"-maxrate", strconv.Itoa(o.Bitrate),
-		"-bufsize", strconv.Itoa(o.Bitrate / 2), // small buffer = low latency
-		"-g", strconv.Itoa(o.GOPSize),
-		"-keyint_min", strconv.Itoa(o.GOPSize),
-		"-bf", "0", // no B-frames: lower latency, simpler AU boundaries
-		"-pix_fmt", "yuv420p", // 4:2:0 is what H.264/WebRTC decoders expect
 	}
+	args = append(args, rateControlArgs(o)...)
+	args = append(args, gopArgs(o)...)
+	args = append(args, "-pix_fmt", "yuv420p") // 4:2:0 is what H.264/WebRTC decoders expect
 	return args
 }
 
@@ -175,11 +171,23 @@ func BuildArgs(o Options) ([]string, error) {
 		"-fflags", "nobuffer", // don't buffer input: minimise latency
 	}
 
+	// Hardware codecs (e.g. VA-API) need device-init flags BEFORE the input and a
+	// hwupload filter AFTER it. Software codecs implement neither and contribute
+	// nothing here.
+	hw, isHW := o.Codec.(hwInitArgs)
+	if isHW {
+		args = append(args, hw.InitArgs(o)...)
+	}
+
 	in, err := o.inputArgs()
 	if err != nil {
 		return nil, err
 	}
 	args = append(args, in...)
+
+	if isHW {
+		args = append(args, hw.FilterArgs(o)...)
+	}
 
 	args = append(args, o.Codec.OutputArgs(o)...)
 

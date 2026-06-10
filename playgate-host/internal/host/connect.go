@@ -25,7 +25,7 @@ var errTimeoutNoAnswer = errors.New("host: timed out waiting for viewer answer")
 // posts an offer, polls for the viewer's answer + ICE candidates, wires the peer
 // to the router and input sink, and tears down on disconnect so the next viewer
 // can connect.
-func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Collector) ConnectFunc {
+func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Collector, enc BitrateController) ConnectFunc {
 	return func(ctx context.Context, router *VideoRouter, sink InputSink) error {
 		client, err := signaling.New(signaling.Config{
 			BaseURL: cfg.Signaling.URL,
@@ -47,6 +47,7 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			log:    log.With("module", "conn-manager"),
 			cfg:    cfg,
 			mc:     mc,
+			enc:    enc,
 			client: client,
 			router: router,
 			sink:   sink.(*inputSink),
@@ -93,6 +94,7 @@ type connManager struct {
 	log    *slog.Logger
 	cfg    config.Config
 	mc     *metrics.Collector
+	enc    BitrateController // ABR target; nil disables adaptive bitrate
 	client *signaling.Client
 	router *VideoRouter
 	sink   *inputSink
@@ -147,6 +149,12 @@ func (c *connManager) serveOne(ctx context.Context) error {
 
 	if err := c.pollForAnswer(connCtx, peer); err != nil {
 		return err
+	}
+
+	// --- T14: adaptive bitrate. Sample this peer's WebRTC stats and drive the
+	// encoder bitrate for the connection lifetime. nil runner = ABR disabled. ---
+	if runner := newABRRunner(c.log, c.cfg, peer, c.enc); runner != nil {
+		go runner.run(connCtx)
 	}
 
 	// --- wait for the connection to terminate ---

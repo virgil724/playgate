@@ -41,6 +41,18 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	encOpts.Bitrate = cfg.Encoder.Bitrate
 	encOpts.Preset = cfg.Encoder.Preset
 	encOpts.GOPSize = cfg.Encoder.KeyframeInterval
+
+	// T13: select the configured codec (libx264 / v4l2m2m / vaapi / nvenc).
+	codec, err := ffmpeg.CodecFromName(cfg.EncoderCodecKind(), cfg.Encoder.VAAPIDevice)
+	if err != nil {
+		return Deps{}, fmt.Errorf("host: encoder codec: %w", err)
+	}
+	encOpts.Codec = codec
+
+	// T13: best-effort detection — probe `ffmpeg -encoders` and fail with an
+	// actionable error (no silent downgrade) if the chosen codec is missing.
+	detectCodec(log, cfg.Encoder.FFmpegPath, cfg.EncoderCodecKind())
+
 	enc, err := ffmpeg.New(log, encOpts, tap.out())
 	if err != nil {
 		return Deps{}, fmt.Errorf("host: build encoder: %w", err)
@@ -67,8 +79,29 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 		Encoder: encWrap,
 		Input:   input,
 		Session: mgr,
-		Connect: makeSignalingConnect(log, cfg, mc),
+		Connect: makeSignalingConnect(log, cfg, mc, encWrap),
 	}, nil
+}
+
+// detectCodec runs the best-effort `ffmpeg -encoders` probe and logs a clear,
+// actionable error if the configured codec is not present. It deliberately does
+// NOT abort startup or silently downgrade: a probe failure (e.g. ffmpeg not yet
+// on PATH in a container) must not block the host, and an operator who set a
+// hardware codec should see exactly why it won't work and which fallback to use.
+func detectCodec(log *slog.Logger, ffmpegPath, codecName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	avail, err := ffmpeg.EncoderList(ctx, ffmpegPath)
+	if err != nil {
+		log.Warn("encoder detection skipped (could not probe ffmpeg -encoders)",
+			"err", err, "codec", codecName)
+		return
+	}
+	if derr := ffmpeg.DetectCodec(codecName, avail); derr != nil {
+		log.Error("encoder codec not available", "err", derr)
+		return
+	}
+	log.Info("encoder codec available", "codec", codecName)
 }
 
 // buildCapture selects the configured capture backend.
@@ -214,6 +247,10 @@ func (w *encoderWrapper) Name() string { return "encoder" }
 
 // Packets returns the instrumented encoded-packet output.
 func (w *encoderWrapper) Packets() <-chan core.EncodedPacket { return w.outCh }
+
+// SetBitrate forwards an ABR bitrate decision to the underlying ffmpeg encoder,
+// which restarts the subprocess to apply it (T14).
+func (w *encoderWrapper) SetBitrate(bps int) { w.enc.SetBitrate(bps) }
 
 // Run starts the tap and encoder, and re-emits packets with encode-stage latency
 // recorded. The capture source itself is run by the host's main group; the tap

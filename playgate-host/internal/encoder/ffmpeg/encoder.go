@@ -43,6 +43,15 @@ type Encoder struct {
 	errs    chan error
 
 	start time.Time // stream start, for PTS computation
+
+	// restart signals the Run loop to tear down the current ffmpeg subprocess and
+	// relaunch it with the latest options (used by SetBitrate). Buffered size 1
+	// with coalescing so rapid requests collapse into one restart.
+	restart chan struct{}
+
+	// mu guards bitrate (the only field mutated after construction). The encoder
+	// args are rebuilt from opts on each (re)launch under this lock.
+	mu sync.Mutex
 }
 
 // Ensure Encoder satisfies core.Module at compile time.
@@ -64,7 +73,47 @@ func New(log *slog.Logger, opts Options, in <-chan core.VideoFrame) (*Encoder, e
 		in:      in,
 		packets: make(chan core.EncodedPacket, packetBufferSize),
 		errs:    make(chan error, 1),
+		restart: make(chan struct{}, 1),
 	}, nil
+}
+
+// SetBitrate updates the target bitrate (bits per second) and, if it differs
+// from the current value, requests a subprocess restart so the new rate takes
+// effect. ffmpeg cannot change an encoder's bitrate on a running subprocess, so
+// the bitrate-apply strategy is: rebuild args and relaunch ffmpeg. The fresh
+// subprocess emits an IDR immediately, and the rtc layer's keyframe gating drops
+// any inter frames until that IDR arrives, so the restart does not show as
+// corruption on the viewer. Restart frequency is bounded upstream by the ABR
+// controller's cooldown. SetBitrate is safe for concurrent use and non-blocking.
+func (e *Encoder) SetBitrate(bps int) {
+	if bps <= 0 {
+		return
+	}
+	e.mu.Lock()
+	changed := e.opts.Bitrate != bps
+	if changed {
+		e.opts.Bitrate = bps
+	}
+	e.mu.Unlock()
+	if !changed {
+		return
+	}
+	e.log.Info("bitrate change requested; will restart encoder", "bitrate", bps)
+	// Coalesce: a full channel already has a pending restart that will pick up the
+	// latest opts.Bitrate when it fires.
+	select {
+	case e.restart <- struct{}{}:
+	default:
+	}
+}
+
+// currentArgs builds the ffmpeg arg vector from the current options under the
+// lock so a concurrent SetBitrate cannot tear the read.
+func (e *Encoder) currentArgs() ([]string, error) {
+	e.mu.Lock()
+	opts := e.opts
+	e.mu.Unlock()
+	return BuildArgs(opts)
 }
 
 // Name implements core.Module.
@@ -81,43 +130,72 @@ func (e *Encoder) Errors() <-chan error { return e.errs }
 
 // Run implements core.Module. It launches ffmpeg, pumps frames in and packets
 // out, and tears everything down when the context is cancelled, the input
-// closes, or the subprocess exits. A subprocess failure is reported on Errors()
-// and ends the module cleanly (returns nil) so the supervisor — not the
-// errgroup — decides whether to restart.
+// closes, or the subprocess exits.
+//
+// Run is a supervision loop around a single ffmpeg subprocess: a SetBitrate call
+// requests a restart, on which Run cleanly stops the current subprocess and
+// relaunches it with the new bitrate. The module-lifetime packets/errs channels
+// are owned by Run and closed once when it returns (the per-subprocess pipes are
+// distinct and closed each iteration). A subprocess that exits on its own (not a
+// restart) is reported on Errors() and ends the module cleanly (returns nil) so
+// the supervisor — not the errgroup — decides whether to restart.
 func (e *Encoder) Run(ctx context.Context) error {
 	defer close(e.packets)
 	defer close(e.errs)
 	defer e.log.Info("encoder stopped")
 
-	args, err := BuildArgs(e.opts)
+	for {
+		restartRequested, err := e.runSubprocess(ctx)
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !restartRequested {
+			// ffmpeg exited on its own (already reported); end the module.
+			return nil
+		}
+		e.log.Info("restarting ffmpeg with updated options")
+	}
+}
+
+// runSubprocess launches one ffmpeg subprocess and pumps frames until ctx is
+// cancelled, a restart is requested (SetBitrate), or the subprocess exits. It
+// returns restartRequested=true only when a restart was explicitly requested;
+// any setup error is returned as a fatal err (ends the module).
+func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err error) {
+	args, err := e.currentArgs()
 	if err != nil {
-		return fmt.Errorf("encoder: build args: %w", err)
+		return false, fmt.Errorf("encoder: build args: %w", err)
 	}
 
 	// A child context so we can stop the writer/reader without depending on the
-	// parent being cancelled (e.g. when ffmpeg dies on its own).
+	// parent being cancelled (e.g. when ffmpeg dies on its own or we restart).
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, e.opts.FFmpegPath, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("encoder: stdin pipe: %w", err)
+		return false, fmt.Errorf("encoder: stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("encoder: stdout pipe: %w", err)
+		return false, fmt.Errorf("encoder: stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("encoder: stderr pipe: %w", err)
+		return false, fmt.Errorf("encoder: stderr pipe: %w", err)
 	}
 
 	e.log.Info("starting ffmpeg", "path", e.opts.FFmpegPath, "args", args)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("encoder: start ffmpeg: %w", err)
+		return false, fmt.Errorf("encoder: start ffmpeg: %w", err)
 	}
-	e.start = time.Now()
+	if e.start.IsZero() {
+		e.start = time.Now() // PTS clock spans restarts so timestamps stay monotonic
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -154,15 +232,23 @@ func (e *Encoder) Run(ctx context.Context) error {
 		cancel()
 		<-waitErr
 		wg.Wait()
-		return nil
+		return false, nil
 
-	case err := <-waitErr:
+	case <-e.restart:
+		// Bitrate change: stop this subprocess, then loop to relaunch with new args.
+		e.log.Info("stopping ffmpeg for restart")
+		cancel()
+		<-waitErr
+		wg.Wait()
+		return true, nil
+
+	case werr := <-waitErr:
 		// ffmpeg exited on its own. This is unexpected during normal operation.
 		cancel()
 		wg.Wait()
 		rerr := <-readErr
-		e.reportSubprocessExit(ctx, err, rerr)
-		return nil
+		e.reportSubprocessExit(ctx, werr, rerr)
+		return false, nil
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Capture   CaptureConfig   `yaml:"capture"`
 	Encoder   EncoderConfig   `yaml:"encoder"`
+	ABR       ABRConfig       `yaml:"abr"`
 	WebRTC    WebRTCConfig    `yaml:"webrtc"`
 	Input     InputConfig     `yaml:"input"`
 	Session   SessionConfig   `yaml:"session"`
@@ -51,16 +52,53 @@ type CaptureConfig struct {
 	Format string `yaml:"format"`
 }
 
-// EncoderConfig configures the H.264 encoder (T3: ffmpeg subprocess).
+// EncoderConfig configures the H.264 encoder (T3: ffmpeg subprocess; T13: codec).
 type EncoderConfig struct {
-	// Bitrate is the target video bitrate in bits per second.
+	// Bitrate is the target video bitrate in bits per second. When ABR is enabled
+	// this is the starting bitrate; the controller adjusts it within [abr.min,
+	// abr.max].
 	Bitrate int `yaml:"bitrate"`
-	// Preset is the ffmpeg x264 preset, e.g. "ultrafast".
+	// Preset is the ffmpeg x264 preset, e.g. "ultrafast". Used by the libx264
+	// codec only; hardware codecs use their own equivalents.
 	Preset string `yaml:"preset"`
 	// KeyframeInterval is the GOP size in frames.
 	KeyframeInterval int `yaml:"keyframe_interval"`
 	// FFmpegPath is the path to the ffmpeg binary.
 	FFmpegPath string `yaml:"ffmpeg_path"`
+	// Codec selects the H.264 encoder (T13): "libx264" (software, default),
+	// "h264_v4l2m2m" (Raspberry Pi), "h264_vaapi" (Intel/AMD GPU) or
+	// "h264_nvenc" (NVIDIA GPU).
+	Codec string `yaml:"codec"`
+	// VAAPIDevice is the DRM render node for the h264_vaapi codec, e.g.
+	// /dev/dri/renderD128. Ignored by other codecs; empty uses the default node.
+	VAAPIDevice string `yaml:"vaapi_device"`
+}
+
+// Encoder codec kinds (T13). These mirror ffmpeg encoder names.
+const (
+	CodecLibX264 = "libx264"
+	CodecV4L2M2M = "h264_v4l2m2m"
+	CodecVAAPI   = "h264_vaapi"
+	CodecNVENC   = "h264_nvenc"
+)
+
+// ABRConfig configures the adaptive-bitrate controller (T14). When disabled the
+// encoder runs at the fixed encoder.bitrate.
+type ABRConfig struct {
+	// Enabled turns on adaptive bitrate. Off by default (fixed bitrate).
+	Enabled bool `yaml:"enabled"`
+	// MinBitrate / MaxBitrate bound the adapted bitrate in bits per second.
+	MinBitrate int `yaml:"min_bitrate"`
+	MaxBitrate int `yaml:"max_bitrate"`
+	// LossThreshold is the packet-loss fraction (0..1) above which the controller
+	// decreases the bitrate. e.g. 0.05 = 5%.
+	LossThreshold float64 `yaml:"loss_threshold"`
+	// SampleIntervalMS is how often WebRTC stats are sampled and fed to the
+	// controller. 0 uses a 2s default.
+	SampleIntervalMS int `yaml:"sample_interval_ms"`
+	// CooldownSeconds is the minimum time between two bitrate changes (debounces
+	// the encoder restart). 0 uses a 10s default.
+	CooldownSeconds int `yaml:"cooldown_seconds"`
 }
 
 // WebRTCConfig configures the Pion WebRTC peer connection (T4).
@@ -138,6 +176,15 @@ func Default() Config {
 			Preset:           "ultrafast",
 			KeyframeInterval: 60,
 			FFmpegPath:       "ffmpeg",
+			Codec:            CodecLibX264,
+		},
+		ABR: ABRConfig{
+			Enabled:          false,
+			MinBitrate:       1_000_000,
+			MaxBitrate:       8_000_000,
+			LossThreshold:    0.05,
+			SampleIntervalMS: 2000,
+			CooldownSeconds:  10,
 		},
 		WebRTC: WebRTCConfig{
 			ICEServers: []string{"stun:stun.l.google.com:19302"},
@@ -201,6 +248,23 @@ func (c Config) Validate() error {
 	if c.Encoder.Bitrate <= 0 {
 		return fmt.Errorf("encoder bitrate must be positive, got %d", c.Encoder.Bitrate)
 	}
+	switch c.Encoder.Codec {
+	case "", CodecLibX264, CodecV4L2M2M, CodecVAAPI, CodecNVENC:
+	default:
+		return fmt.Errorf("encoder codec must be one of %q/%q/%q/%q, got %q",
+			CodecLibX264, CodecV4L2M2M, CodecVAAPI, CodecNVENC, c.Encoder.Codec)
+	}
+	if c.ABR.Enabled {
+		if c.ABR.MinBitrate <= 0 || c.ABR.MaxBitrate <= 0 {
+			return fmt.Errorf("abr min/max bitrate must be positive when enabled (min=%d max=%d)", c.ABR.MinBitrate, c.ABR.MaxBitrate)
+		}
+		if c.ABR.MaxBitrate < c.ABR.MinBitrate {
+			return fmt.Errorf("abr max_bitrate %d < min_bitrate %d", c.ABR.MaxBitrate, c.ABR.MinBitrate)
+		}
+		if c.ABR.LossThreshold < 0 || c.ABR.LossThreshold >= 1 {
+			return fmt.Errorf("abr loss_threshold must be in [0,1), got %v", c.ABR.LossThreshold)
+		}
+	}
 	switch c.Input.Target {
 	case "", InputNXBT, InputLog:
 	default:
@@ -232,4 +296,12 @@ func (c Config) InputTargetKind() string {
 		return InputNXBT
 	}
 	return c.Input.Target
+}
+
+// EncoderCodecKind returns the effective encoder codec, defaulting to libx264.
+func (c Config) EncoderCodecKind() string {
+	if c.Encoder.Codec == "" {
+		return CodecLibX264
+	}
+	return c.Encoder.Codec
 }

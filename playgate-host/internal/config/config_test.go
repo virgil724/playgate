@@ -47,3 +47,60 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestValidateCodec(t *testing.T) {
+	cfg := Default()
+	for _, c := range []string{"", CodecLibX264, CodecV4L2M2M, CodecVAAPI, CodecNVENC} {
+		cfg.Encoder.Codec = c
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("codec %q should validate: %v", c, err)
+		}
+	}
+	cfg.Encoder.Codec = "h265_bogus"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unknown codec")
+	}
+}
+
+func TestEncoderCodecKindDefault(t *testing.T) {
+	cfg := Default()
+	cfg.Encoder.Codec = ""
+	if cfg.EncoderCodecKind() != CodecLibX264 {
+		t.Errorf("empty codec should default to libx264, got %q", cfg.EncoderCodecKind())
+	}
+	cfg.Encoder.Codec = CodecNVENC
+	if cfg.EncoderCodecKind() != CodecNVENC {
+		t.Errorf("codec kind = %q, want nvenc", cfg.EncoderCodecKind())
+	}
+}
+
+func TestValidateABR(t *testing.T) {
+	cfg := Default()
+	cfg.ABR.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("default ABR config should validate when enabled: %v", err)
+	}
+
+	bad := Default()
+	bad.ABR.Enabled = true
+	bad.ABR.MinBitrate = 5_000_000
+	bad.ABR.MaxBitrate = 1_000_000
+	if err := bad.Validate(); err == nil {
+		t.Error("expected error for max<min")
+	}
+
+	bad = Default()
+	bad.ABR.Enabled = true
+	bad.ABR.LossThreshold = 1.5
+	if err := bad.Validate(); err == nil {
+		t.Error("expected error for loss_threshold>=1")
+	}
+
+	// When disabled, bogus ABR values are tolerated (not used).
+	off := Default()
+	off.ABR.Enabled = false
+	off.ABR.MinBitrate = 0
+	if err := off.Validate(); err != nil {
+		t.Errorf("disabled ABR should skip validation: %v", err)
+	}
+}
