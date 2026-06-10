@@ -1,0 +1,8 @@
+﻿*.exe
+*.db
+*.db-shm
+*.db-wal
+*.pem
+*.log
+*.err
+
