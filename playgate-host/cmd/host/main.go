@@ -38,7 +38,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	h := host.New(log, cfg)
+	h, err := host.New(log, cfg)
+	if err != nil {
+		log.Error("failed to build host", "err", err)
+		os.Exit(1)
+	}
 	if err := h.Run(ctx); err != nil {
 		log.Error("host exited with error", "err", err)
 		os.Exit(1)

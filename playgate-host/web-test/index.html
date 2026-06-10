@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<!--
+  PlayGate end-to-end test page (T6).
+
+  Talks to the signaling Worker (playgate-signaling) as the "viewer" peer:
+    POST /rooms/{room}/viewer          push our answer / ICE
+    GET  /rooms/{room}/viewer?since=n  poll the host's offer / ICE
+    POST /turn/credentials             fetch iceServers (fallback: STUN)
+
+  Wire contracts: see playgate-host/docs/protocols.md
+    - input  DataChannel: 13-byte little-endian InputCommand at 60 Hz
+    - control DataChannel: JSON text; {"kind":"auth","token":...} authorizes,
+      {"kind":"ping","ts":N} is echoed back as pong for RTT measurement.
+
+  Serve this file from any static server (or open via file://) — it only needs
+  fetch access to the Worker URL.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlayGate e2e test</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#111; color:#ddd; margin:1rem; }
+  input { background:#222; color:#ddd; border:1px solid #444; padding:.3rem .5rem; margin:.15rem; width: 22rem; }
+  button { padding:.4rem 1rem; margin:.15rem; }
+  video { width:100%; max-width:960px; background:#000; display:block; margin:.5rem 0; }
+  #log { font-family:monospace; font-size:.8rem; white-space:pre-wrap; background:#181818; padding:.5rem; height:14rem; overflow-y:auto; }
+  .stat { font-family:monospace; margin-right:1.5rem; }
+  kbd { background:#333; border-radius:3px; padding:0 .3rem; }
+</style>
+</head>
+<body>
+<h2>PlayGate end-to-end test</h2>
+<div>
+  <input id="url" placeholder="Signaling Worker URL" value="http://localhost:8787">
+  <input id="room" placeholder="room id" value="default">
+  <input id="token" placeholder="session JWT (optional when gate disabled)">
+  <button id="connect">Connect</button>
+</div>
+<div>
+  <span class="stat">state: <b id="state">idle</b></span>
+  <span class="stat">session: <b id="session">-</b></span>
+  <span class="stat">remaining: <b id="remaining">-</b></span>
+  <span class="stat">control RTT: <b id="rtt">-</b></span>
+</div>
+<video id="video" playsinline autoplay muted></video>
+<p>Keys: <kbd>WASD</kbd> left stick · <kbd>arrows</kbd> right stick ·
+<kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd>/<kbd>I</kbd> = A/B/X/Y ·
+<kbd>Q</kbd>/<kbd>E</kbd> = L/R · <kbd>1</kbd>/<kbd>3</kbd> = ZL/ZR ·
+<kbd>T</kbd>/<kbd>F</kbd>/<kbd>G</kbd>/<kbd>H</kbd> = D-pad ·
+<kbd>Enter</kbd>/<kbd>Backspace</kbd> = +/−</p>
+<div id="log"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const log = m => { $("log").textContent += m + "\n"; $("log").scrollTop = 1e9; };
+const setState = s => { $("state").textContent = s; };
+
+// ---- InputCommand codec (docs/protocols.md §1/§2): 13 bytes little-endian ----
+const BTN = { A:0, B:1, X:2, Y:3, L:4, R:5, ZL:6, ZR:7, PLUS:8, MINUS:9,
+              HOME:10, CAPTURE:11, LSTICK:12, RSTICK:13,
+              DUP:14, DDOWN:15, DLEFT:16, DRIGHT:17 };
+const KEYBTN = { KeyJ:BTN.A, KeyK:BTN.B, KeyL:BTN.X, KeyI:BTN.Y,
+                 KeyQ:BTN.L, KeyE:BTN.R, Digit1:BTN.ZL, Digit3:BTN.ZR,
+                 Enter:BTN.PLUS, Backspace:BTN.MINUS,
+                 KeyT:BTN.DUP, KeyG:BTN.DDOWN, KeyF:BTN.DLEFT, KeyH:BTN.DRIGHT };
+const held = new Set();
+addEventListener("keydown", e => { if (!e.repeat) held.add(e.code); });
+addEventListener("keyup",   e => held.delete(e.code));
+
+function axis(neg, pos) { return (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0); }
+function encodeInput() {
+  let buttons = 0;
+  for (const [code, bit] of Object.entries(KEYBTN)) if (held.has(code)) buttons |= (1 << bit);
+  const buf = new ArrayBuffer(13), v = new DataView(buf);
+  v.setUint8(0, 1); // wire version
+  v.setUint32(1, buttons >>> 0, true);
+  const sc = f => Math.max(-32767, Math.min(32767, Math.round(f * 32767)));
+  v.setInt16(5,  sc(axis("KeyA", "KeyD")), true);          // lx
+  v.setInt16(7,  sc(axis("KeyS", "KeyW")), true);          // ly (W = up = +1)
+  v.setInt16(9,  sc(axis("ArrowLeft", "ArrowRight")), true); // rx
+  v.setInt16(11, sc(axis("ArrowDown", "ArrowUp")), true);    // ry
+  return buf;
+}
+
+// ---- signaling (playgate-signaling Worker, viewer peer) ----
+let base, room;
+async function push(payload) {
+  await fetch(`${base}/rooms/${room}/viewer`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+async function iceServers() {
+  try {
+    const r = await fetch(`${base}/turn/credentials`, { method: "POST", body: "{}" });
+    if (r.ok) { const j = await r.json(); if (j.iceServers?.length) return j.iceServers; }
+  } catch { /* fall through */ }
+  return [{ urls: "stun:stun.l.google.com:19302" }];
+}
+
+$("connect").onclick = async () => {
+  base = $("url").value.replace(/\/+$/, "");
+  room = $("room").value.trim();
+  const token = $("token").value.trim();
+  setState("fetching ICE");
+  const pc = new RTCPeerConnection({ iceServers: await iceServers() });
+
+  pc.ontrack = ev => { if (ev.streams[0]) $("video").srcObject = ev.streams[0]; };
+  pc.onconnectionstatechange = () => setState(pc.connectionState);
+
+  let inputCh = null, controlCh = null, granted = !token; // gate disabled => send freely
+  pc.ondatachannel = ev => {
+    const ch = ev.channel;
+    if (ch.label === "input") { ch.binaryType = "arraybuffer"; inputCh = ch; log("input channel"); }
+    if (ch.label === "control") {
+      controlCh = ch;
+      ch.onopen = () => {
+        log("control channel open");
+        if (token) ch.send(JSON.stringify({ kind: "auth", token }));
+        setInterval(() => {
+          if (ch.readyState === "open") ch.send(JSON.stringify({ kind: "ping", ts: performance.now() }));
+        }, 2000);
+      };
+      ch.onmessage = ev2 => {
+        let m; try { m = JSON.parse(ev2.data); } catch { return; }
+        if (m.kind === "pong") { $("rtt").textContent = (performance.now() - m.ts).toFixed(1) + " ms"; return; }
+        $("session").textContent = m.kind;
+        if (m.kind === "tick" || m.kind === "granted") $("remaining").textContent = m.remaining_seconds + "s";
+        if (m.kind === "granted") granted = true;
+        if (m.kind === "expired" || m.kind === "idle_kicked") granted = false;
+        log("control: " + ev2.data);
+      };
+    }
+  };
+
+  // Poll the host's offer (+ICE), answer once.
+  setState("waiting for offer");
+  let since = -1, answered = false;
+  const poll = setInterval(async () => {
+    try {
+      const r = await fetch(`${base}/rooms/${room}/viewer?since=${since}`);
+      if (!r.ok) return;
+      const j = await r.json();
+      since = j.nextSince;
+      for (const msg of j.messages || []) {
+        const p = msg.payload;
+        if (p?.type === "offer" && !answered) {
+          answered = true;
+          clearInterval(poll);
+          setState("answering");
+          await pc.setRemoteDescription(p);
+          await pc.setLocalDescription(await pc.createAnswer());
+          // Host applies a single non-trickle answer: wait for gathering.
+          await new Promise(res => {
+            if (pc.iceGatheringState === "complete") return res();
+            const t = setTimeout(res, 3000);
+            pc.addEventListener("icegatheringstatechange", () => {
+              if (pc.iceGatheringState === "complete") { clearTimeout(t); res(); }
+            });
+          });
+          await push({ type: pc.localDescription.type, sdp: pc.localDescription.sdp });
+          log("answer sent");
+        }
+      }
+    } catch (e) { log("poll error: " + e); }
+  }, 500);
+
+  // 60 Hz input pump: latest state snapshot, only while granted.
+  setInterval(() => {
+    if (granted && inputCh?.readyState === "open") inputCh.send(encodeInput());
+  }, 1000 / 60);
+};
+</script>
+</body>
+</html>

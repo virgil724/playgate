@@ -43,6 +43,24 @@ export interface ViewerConnectionOptions {
   authPayload?: Record<string, unknown>;
 }
 
+/** Resolves when ICE gathering completes, bounded so a stuck STUN lookup
+ * cannot stall the answer forever (the host gives up after 60s). */
+function waitForGathering(pc: RTCPeerConnection, timeoutMs = 3000): Promise<void> {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, timeoutMs);
+    function done() {
+      clearTimeout(timer);
+      pc.removeEventListener("icegatheringstatechange", check);
+      resolve();
+    }
+    function check() {
+      if (pc.iceGatheringState === "complete") done();
+    }
+    pc.addEventListener("icegatheringstatechange", check);
+  });
+}
+
 export class ViewerConnection {
   private signaling: SignalingClient;
   private cb: WebRTCCallbacks;
@@ -166,9 +184,11 @@ export class ViewerConnection {
 
     const answer = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answer);
-    // Include the session JWT (authPayload) with the answer so the host (T6)
-    // can read it from the signaling message.
-    await this.pushWithAuth({ type: answer.type, sdp: answer.sdp });
+    // The host stops polling once it has applied our answer (non-trickle), so
+    // wait for ICE gathering to finish and send the complete SDP.
+    await waitForGathering(this.pc);
+    const local = this.pc.localDescription ?? answer;
+    await this.pushWithAuth({ type: local.type, sdp: local.sdp });
   }
 
   private async addCandidate(cand: RTCIceCandidateInit): Promise<void> {
@@ -185,7 +205,19 @@ export class ViewerConnection {
   }
 
   private attachControlChannel(ch: RTCDataChannel): void {
-    ch.onopen = () => this.cb.onControlOpen?.();
+    ch.onopen = () => {
+      // The host's session gate authorizes viewers via a control-channel auth
+      // message ({"kind":"auth","token":...}), not via signaling payloads.
+      const token = this.authPayload?.token;
+      if (typeof token === "string" && token !== "") {
+        try {
+          ch.send(JSON.stringify({ kind: "auth", token }));
+        } catch {
+          /* channel closed before send; host will never grant control */
+        }
+      }
+      this.cb.onControlOpen?.();
+    };
     ch.onmessage = (ev) => {
       const event = parseControlEvent(ev.data);
       if (event) this.cb.onControlEvent?.(event);

@@ -14,6 +14,7 @@ package rtc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -108,6 +109,11 @@ type Peer struct {
 	// so a freshly-attached decoder starts on an IDR.
 	seenKeyframe bool
 
+	// onControl, if set, is invoked for inbound control-channel text frames that
+	// are not the built-in latency ping (e.g. a viewer auth/token message).
+	// Guarded by mu.
+	onControl func([]byte)
+
 	closeOnce sync.Once
 }
 
@@ -192,12 +198,72 @@ func (p *Peer) setupDataChannels() error {
 	if err != nil {
 		return fmt.Errorf("rtc: create control channel: %w", err)
 	}
-	p.mu.Lock()
-	p.control = control
-	p.mu.Unlock()
-	control.OnOpen(func() { p.log.Info("control channel open") })
+	p.attachControlChannel(control)
 
 	return nil
+}
+
+// attachControlChannel stores the reliable control channel and wires the
+// inbound handler. The control channel carries host→viewer session events (JSON,
+// see docs/protocols.md §4) and a viewer→host latency ping that the host echoes
+// back so the browser can compute an application-level RTT.
+func (p *Peer) attachControlChannel(dc *webrtc.DataChannel) {
+	p.mu.Lock()
+	p.control = dc
+	p.mu.Unlock()
+	dc.OnOpen(func() { p.log.Info("control channel open") })
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if !msg.IsString {
+			return
+		}
+		p.handleControlMessage(msg.Data)
+	})
+}
+
+// handleControlMessage processes an inbound control-channel text frame. The only
+// inbound message the host acts on is the latency ping: {"kind":"ping","ts":N}.
+// The host echoes it verbatim as a pong so the browser can measure RTT against
+// its own clock (no host/browser clock-sync needed).
+func (p *Peer) handleControlMessage(data []byte) {
+	var probe struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		p.log.Debug("ignoring non-JSON control message", "len", len(data))
+		return
+	}
+	if probe.Kind == "ping" {
+		// Echo the original payload back with kind switched to "pong" so the
+		// browser can correlate it with the ts it sent.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err == nil {
+			raw["kind"] = json.RawMessage(`"pong"`)
+			if out, err := json.Marshal(raw); err == nil {
+				if err := p.SendControl(out); err != nil {
+					p.log.Debug("pong send failed", "err", err)
+				}
+				return
+			}
+		}
+	}
+
+	// Hand any other control message to the registered callback (e.g. viewer
+	// auth token for the session gate).
+	p.mu.Lock()
+	cb := p.onControl
+	p.mu.Unlock()
+	if cb != nil {
+		cb(data)
+	}
+}
+
+// OnControlMessage registers a callback for inbound control-channel text frames
+// other than the built-in latency ping. The callback runs on Pion's SCTP read
+// goroutine; it must not block. Passing nil clears the handler.
+func (p *Peer) OnControlMessage(cb func([]byte)) {
+	p.mu.Lock()
+	p.onControl = cb
+	p.mu.Unlock()
 }
 
 // attachInputChannel registers the message handler that decodes controller frames.
@@ -259,10 +325,7 @@ func (p *Peer) wireConnState() {
 		case InputChannelLabel:
 			p.attachInputChannel(dc)
 		case ControlChannelLabel:
-			p.mu.Lock()
-			p.control = dc
-			p.mu.Unlock()
-			dc.OnOpen(func() { p.log.Info("control channel open (remote)") })
+			p.attachControlChannel(dc)
 		default:
 			p.log.Debug("ignoring unknown data channel", "label", dc.Label())
 		}
@@ -289,7 +352,9 @@ func (p *Peer) SendControl(data []byte) error {
 	if dc == nil {
 		return errors.New("rtc: control channel not ready")
 	}
-	return dc.Send(data)
+	// Control messages are UTF-8 JSON (docs/protocols.md §4); browsers and the
+	// test harness filter on the text frame flag, so this must not be binary.
+	return dc.SendText(string(data))
 }
 
 // WriteSample pushes one encoded H.264 packet onto the video track. duration is

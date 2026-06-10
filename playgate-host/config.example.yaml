@@ -2,9 +2,10 @@
 # Copy to config.yaml and adjust for your machine, then run:
 #   go run ./cmd/host -config config.yaml
 
-# Video capture source (T2: v4l2 capture card on the streamer's machine).
+# Video capture source (T2).
 capture:
-  device: /dev/video0   # V4L2 device node of the capture card
+  source: v4l2          # v4l2 (production, Linux) | synthetic (dev test pattern, any OS)
+  device: /dev/video0   # V4L2 device node of the capture card (v4l2 only)
   width: 1280
   height: 720
   fps: 30
@@ -17,16 +18,35 @@ encoder:
   keyframe_interval: 60 # GOP size in frames
   ffmpeg_path: ffmpeg   # path to the ffmpeg binary
 
-# Pion WebRTC peer connection (T4).
+# Pion WebRTC peer connection (T4). Static ICE servers; used as-is when
+# signaling.use_turn is false, and as the fallback when TURN fetch fails.
 webrtc:
   ice_servers:
     - stun:stun.l.google.com:19302
 
-# Controller input target (T5: NXBT Unix-socket bridge to a virtual Switch controller).
+# Controller input target (T5).
 input:
+  target: nxbt                    # nxbt (production, Linux) | log (dev, any OS)
   socket_path: /run/nxbt/nxbt.sock
+  rate_hz: 120                    # max commands/second forwarded; 0 disables limiting
 
-# Signaling server connection.
+# Single-controller session gate (T9). Disabled by default: every viewer may
+# control directly (dev convenience). Enable in production and provide the
+# playgate-server ed25519 public key (GET /api/public-key).
+session:
+  enabled: false
+  public_key_base64: ""           # exactly one of these two
+  public_key_file: ""
+  idle_timeout_seconds: 60        # kick idle controller; 0 disables
+
+# Signaling Worker connection (T7/T8: playgate-signaling on Cloudflare Workers).
 signaling:
-  url: ws://localhost:8080/ws
+  url: http://localhost:8787      # Worker base URL, e.g. https://x.workers.dev
   room_id: default
+  token: ""                       # optional bearer token for the Worker
+  poll_interval_ms: 500
+  use_turn: false                 # fetch TURN credentials from the Worker at startup
+
+# Pipeline latency reporting (capture -> encode -> track, p50/p95 logged).
+metrics:
+  report_interval_seconds: 5
