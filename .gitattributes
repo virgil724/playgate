@@ -1,0 +1,10 @@
+# Files that must keep LF endings or they break on Linux targets,
+# regardless of core.autocrlf on Windows dev machines.
+*.sh        text eol=lf
+*.py        text eol=lf
+*.service   text eol=lf
+Makefile    text eol=lf
+*.Dockerfile text eol=lf
+docker/host-entrypoint.sh text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
