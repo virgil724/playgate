@@ -1,0 +1,75 @@
+# docker/compose.example.yaml — PlayGate Docker Compose example
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this file, rename it to compose.yaml (or docker-compose.yml),
+# fill in the secrets/URLs, then run:
+#   docker compose up -d
+#
+# Architecture assumed: single Linux host (amd64 or arm64) running both
+# server and host on the same machine with a capture card attached.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── playgate-server ────────────────────────────────────────────────────────
+  # Minimal REST API: manages sessions and vends JWT tokens.
+  # Data (SQLite + ed25519 key) lives in the named volume "server-data".
+  server:
+    image: ghcr.io/playgate/playgate-server:latest
+    # Build locally instead of pulling:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/server.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # expose REST API to LAN / reverse proxy
+    volumes:
+      - server-data:/data    # SQLite DB + ed25519 key
+    environment:
+      PLAYGATE_ADDR: ":8080"
+      PLAYGATE_DB: "/data/playgate.db"
+      # PLAYGATE_KEY: "/data/ed25519.pem"   # auto-generated on first run
+    healthcheck:
+      test: ["CMD", "/playgate-server", "-addr", ":0", "-help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── playgate-host ──────────────────────────────────────────────────────────
+  # Captures video from /dev/video0, encodes H.264 via ffmpeg, streams via
+  # WebRTC and accepts Nintendo Switch controller input over Bluetooth.
+  #
+  # SECURITY NOTE:
+  #   --privileged gives full hardware/kernel access — required by nxbt for
+  #   BlueZ DBus operations. If you want least-privilege, replace with:
+  #     cap_add: [NET_ADMIN, SYS_ADMIN]
+  #   and add: security_opt: [apparmor:unconfined]
+  host:
+    image: ghcr.io/playgate/playgate-host:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/host.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - server
+    # --privileged: required for nxbt (BlueZ DBus + uhid kernel module)
+    privileged: true
+    # --network host: lets Pion discover mDNS ICE candidates on the LAN
+    network_mode: host
+    devices:
+      # V4L2 capture card — adjust to your capture device node
+      - /dev/video0:/dev/video0
+    volumes:
+      # DBus socket: nxbt talks to bluetoothd through the host dbus
+      - /var/run/dbus:/var/run/dbus
+      # Shared UNIX socket directory for nxbt daemon ↔ Go host IPC
+      - nxbt-run:/run/nxbt
+      # Mount your config.yaml here (copy from playgate-host/config.example.yaml)
+      - ./config.yaml:/etc/playgate/config.yaml:ro
+    environment:
+      # Override signaling URL if needed; usually set in config.yaml
+      # PLAYGATE_SIGNALING_URL: "https://your-worker.workers.dev"
+      PLAYGATE_CONFIG: "/etc/playgate/config.yaml"
+
+volumes:
+  server-data:    # persistent SQLite + key storage
+  nxbt-run:       # ephemeral UNIX socket shared between nxbt daemon and host

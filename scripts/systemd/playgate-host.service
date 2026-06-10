@@ -1,0 +1,41 @@
+[Unit]
+Description=PlayGate Host — WebRTC game streaming host
+Documentation=https://github.com/playgate/playgate
+After=network-online.target nxbtd.service
+Wants=network-online.target
+# Require nxbtd so the UNIX socket is ready before playgate-host connects.
+Requires=nxbtd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/playgate-host -config /etc/playgate/config.yaml
+
+# Run as the dedicated system user (created by install-host.sh)
+User=playgate
+Group=playgate
+
+# Groups for hardware access:
+#   video     — /dev/video* (V4L2 capture card)
+#   bluetooth — bluetoothd socket (monitoring / future use)
+SupplementaryGroups=video bluetooth
+
+# Automatic restart on failure (e.g. capture card disconnected)
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+# ProtectSystem=strict would block writes; relax if you need writable paths
+ProtectSystem=full
+# Allow reading config and the nxbt socket
+ReadOnlyPaths=/etc/playgate
+ReadWritePaths=/run/nxbt
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=playgate-host
+
+[Install]
+WantedBy=multi-user.target

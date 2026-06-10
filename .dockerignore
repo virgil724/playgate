@@ -1,0 +1,50 @@
+# .dockerignore — exclude files from Docker build context
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Git metadata
+.git/
+.gitignore
+
+# Node modules (large, not needed in Go build)
+playgate-web/node_modules/
+playgate-signaling/node_modules/
+
+# Build outputs
+dist/
+playgate-web/dist/
+playgate-signaling/.wrangler/
+
+# Vite cache
+.vite/
+playgate-web/.vite/
+**/.vite/
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Go build cache (not present in source, but just in case)
+**/*.test
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Claude Code local settings
+.claude/
+
+# Scripts not needed in image
+scripts/
+Makefile
+build.ps1
+
+# Docs
+docs/
+PROGRESS.md
