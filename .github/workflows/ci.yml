@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  host:
+    name: playgate-host (build, vet, race tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playgate-host
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: playgate-host/go.mod
+          cache-dependency-path: playgate-host/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      # Linux runners have gcc, so the race detector is available here even
+      # though it is not on the Windows dev machines.
+      - run: go test -race -count=1 ./...
+
+  host-cross:
+    name: playgate-host cross-compile (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+    defaults:
+      run:
+        working-directory: playgate-host
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: playgate-host/go.mod
+          cache-dependency-path: playgate-host/go.sum
+      - run: go build ./...
+
+  server:
+    name: playgate-server (build, vet, race tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playgate-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: playgate-server/go.mod
+          cache-dependency-path: playgate-server/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  web:
+    name: playgate-web (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playgate-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playgate-web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build # runs tsc --noEmit first
+
+  signaling:
+    name: playgate-signaling (typecheck, tests, dry-run deploy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playgate-signaling
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playgate-signaling/package-lock.json
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm test
+      # Validates wrangler.toml and bundles the Worker without credentials.
+      - run: npm run deploy:dry-run
+
+  nxbt-daemon:
+    name: nxbt-daemon (py_compile, protocol tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playgate-host/nxbt-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile nxbtd.py test_protocol.py
+      # nxbt itself is not installed; the daemon's mock mode keeps the
+      # protocol layer importable and testable without Bluetooth.
+      - run: python test_protocol.py
+
+  shell:
+    name: shell scripts (bash -n, shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n scripts/install-host.sh docker/host-entrypoint.sh
+      # Error severity only: warnings stay visible locally but don't block CI.
+      - run: shellcheck --severity=error scripts/install-host.sh docker/host-entrypoint.sh
+
+  docker:
+    name: docker images (advisory build smoke)
+    runs-on: ubuntu-latest
+    # Advisory until first verified on a machine with Docker: the dev
+    # environment has no daemon, so these Dockerfiles are linted but untested.
+    # Remove continue-on-error once this job has gone green once.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f docker/server.Dockerfile .
+      - run: docker build -f docker/host.Dockerfile .
