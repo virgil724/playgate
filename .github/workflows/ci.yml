@@ -133,12 +133,8 @@ jobs:
       - run: shellcheck --severity=error scripts/install-host.sh docker/host-entrypoint.sh
 
   docker:
-    name: docker images (advisory build smoke)
+    name: docker images (build smoke)
     runs-on: ubuntu-latest
-    # Advisory until first verified on a machine with Docker: the dev
-    # environment has no daemon, so these Dockerfiles are linted but untested.
-    # Remove continue-on-error once this job has gone green once.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f docker/server.Dockerfile .
