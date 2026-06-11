@@ -12,9 +12,12 @@ or:
 
 import io
 import json
+import os
 import socket
 import sys
+import tempfile
 import threading
+import time
 import unittest
 
 # ---------------------------------------------------------------------------
@@ -994,6 +997,79 @@ class TestConnectPaths(unittest.TestCase):
         ev.set()
         ctrl.connect(ev)
         self.assertEqual(nx.inputs, [])
+
+
+# ---------------------------------------------------------------------------
+# Test: socket permissions (root daemon, non-root playgate-host client)
+# ---------------------------------------------------------------------------
+
+class TestSocketPermissions(unittest.TestCase):
+    """Connecting to a UNIX socket needs WRITE permission on its inode, so
+    the daemon must chmod (and optionally chgrp) the socket after bind."""
+
+    def _run_daemon(self, **kwargs):
+        """Start Daemon.run in a thread, wait until it accepts connections.
+
+        Waits for a successful connect, not mere existence of the socket
+        file: the file appears at bind(), but permissions are applied
+        between bind() and listen(), so connectability guarantees
+        _apply_socket_permissions has completed.
+        """
+        path = os.path.join(tempfile.mkdtemp(), "nxbtd.sock")
+        daemon = nxbtd.Daemon(socket_path=path, mock=True, **kwargs)
+        t = threading.Thread(target=daemon.run, daemon=True)
+        t.start()
+        deadline = time.monotonic() + 5
+        while True:
+            self.assertLess(time.monotonic(), deadline, "daemon never listened")
+            try:
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                probe.connect(path)
+                probe.close()
+                break
+            except OSError:
+                time.sleep(0.01)
+        self.addCleanup(t.join, timeout=5)
+        self.addCleanup(daemon.stop)
+        return daemon, path
+
+    def test_default_mode_is_group_writable(self):
+        _, path = self._run_daemon()
+        mode = os.stat(path).st_mode & 0o777
+        self.assertEqual(mode, 0o660)
+
+    def test_custom_mode_applied(self):
+        _, path = self._run_daemon(socket_mode=0o600)
+        mode = os.stat(path).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_socket_group_applied(self):
+        import grp
+        # Pick a group the test user belongs to, so chgrp is permitted
+        # without root. Prefer a supplementary group over the primary one
+        # so the chown is observable; fall back to the primary group.
+        gids = os.getgroups() or [os.getgid()]
+        gid = next((g for g in gids if g != os.getgid()), gids[0])
+        group_name = grp.getgrgid(gid).gr_name
+
+        _, path = self._run_daemon(socket_group=group_name)
+        self.assertEqual(os.stat(path).st_gid, gid)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o660)
+
+    def test_unknown_group_warns_but_serves(self):
+        with self.assertLogs("nxbtd", level="WARNING") as captured:
+            _, path = self._run_daemon(socket_group="no-such-group-xyzzy")
+        self.assertTrue(any("could not set socket group" in line
+                            for line in captured.output))
+        # Daemon still serving: socket exists with the requested mode.
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o660)
+
+    def test_cli_flags_parse(self):
+        args = nxbtd._build_arg_parser().parse_args(
+            ["--socket-group", "playgate", "--socket-mode", "640"]
+        )
+        self.assertEqual(args.socket_group, "playgate")
+        self.assertEqual(args.socket_mode, 0o640)
 
 
 # ---------------------------------------------------------------------------

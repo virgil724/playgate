@@ -230,6 +230,7 @@ info "Creating system user: ${PLAYGATE_USER}"
 if ! id "${PLAYGATE_USER}" &>/dev/null; then
     useradd \
         --system \
+        --user-group \
         --no-create-home \
         --shell /usr/sbin/nologin \
         --comment "PlayGate Host service account" \

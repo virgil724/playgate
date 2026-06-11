@@ -104,10 +104,19 @@ python3 nxbtd.py --mock
 
 # Debug logging
 sudo python3 nxbtd.py --debug
+
+# Let a non-root playgate-host connect to a root-run daemon
+sudo python3 nxbtd.py --socket-group playgate
 ```
 
 The daemon starts listening on `/run/nxbt/nxbt.sock` by default. The Go host
 process connects to this socket as a client.
+
+Connecting to a UNIX socket requires *write* permission on the socket file,
+so a daemon run with `sudo` creates a socket other users cannot use. The
+daemon chmods the socket to `0660` after bind; pass `--socket-group <group>`
+(the systemd unit uses `playgate`) so the Go host's user can connect, or
+override the mode with `--socket-mode`.
 
 ---
 

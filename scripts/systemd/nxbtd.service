@@ -8,7 +8,9 @@ Requires=bluetooth.service
 [Service]
 Type=simple
 # nxbtd.py path is set by install-host.sh; default: /opt/playgate/nxbt-daemon/nxbtd.py
-ExecStart=/usr/bin/python3 /opt/playgate/nxbt-daemon/nxbtd.py
+# --socket-group lets the non-root playgate-host user connect (the socket
+# is created root-owned; connecting needs write permission on it).
+ExecStart=/usr/bin/python3 /opt/playgate/nxbt-daemon/nxbtd.py --socket-group playgate
 WorkingDirectory=/opt/playgate/nxbt-daemon
 
 # nuxbt requires root (or CAP_NET_ADMIN) to talk to bluetoothd via DBus
@@ -19,8 +21,9 @@ User=root
 Restart=on-failure
 RestartSec=5
 
-# Create /run/nxbt at service start (owned by root, world-readable so
-# the playgate user can connect to the UNIX socket).
+# Create /run/nxbt at service start. The directory only needs to be
+# traversable; access control lives on the socket itself, which nxbtd
+# chmods to 0660 root:playgate (see --socket-group above).
 RuntimeDirectory=nxbt
 RuntimeDirectoryMode=0755
 

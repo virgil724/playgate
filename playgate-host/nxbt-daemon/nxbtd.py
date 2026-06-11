@@ -29,6 +29,7 @@ import logging
 import multiprocessing
 import multiprocessing.util
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -473,10 +474,19 @@ class ClientSession:
 
 
 class Daemon:
-    def __init__(self, socket_path: str, mock: bool, skip_bluez_check: bool = False) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        mock: bool,
+        skip_bluez_check: bool = False,
+        socket_group: Optional[str] = None,
+        socket_mode: int = 0o660,
+    ) -> None:
         self._socket_path = socket_path
         self._mock = mock or MOCK_MODE
         self._skip_bluez_check = skip_bluez_check
+        self._socket_group = socket_group
+        self._socket_mode = socket_mode
         self._shutdown = threading.Event()
         self._current_session: Optional[ClientSession] = None
         self._session_lock = threading.Lock()
@@ -575,6 +585,28 @@ class Daemon:
     # Socket server
     # ------------------------------------------------------------------
 
+    def _apply_socket_permissions(self) -> None:
+        """Make the socket connectable by the (non-root) playgate-host user.
+
+        Connecting to a UNIX socket requires WRITE permission on the socket
+        inode; under root with the default umask the socket comes out 0755,
+        which silently locks every other user out. Group + 0660 is the
+        intended deployment: nxbtd runs as root, playgate-host as the
+        'playgate' user, and the socket is root:<group> rw-rw----.
+        """
+        if self._socket_group is not None:
+            try:
+                shutil.chown(self._socket_path, group=self._socket_group)
+            except (LookupError, PermissionError, OSError) as exc:
+                # Deployment problem, not a reason to refuse service to a
+                # root client: report loudly and keep running.
+                log.warning(
+                    "could not set socket group %r on %s: %s — non-root "
+                    "clients will be unable to connect",
+                    self._socket_group, self._socket_path, exc,
+                )
+        os.chmod(self._socket_path, self._socket_mode)
+
     def run(self) -> None:
         # Remove stale socket file.
         try:
@@ -587,6 +619,7 @@ class Daemon:
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(self._socket_path)
+        self._apply_socket_permissions()
         server.listen(1)
         server.settimeout(1.0)  # allow periodic shutdown checks
         log.info("listening on %s (mock=%s)", self._socket_path, self._mock)
@@ -731,6 +764,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
              "installed)",
     )
     parser.add_argument(
+        "--socket-group",
+        default=None,
+        help="Group to own the listening socket (e.g. 'playgate') so a "
+             "non-root playgate-host can connect to a root-run daemon",
+    )
+    parser.add_argument(
+        "--socket-mode",
+        type=lambda s: int(s, 8),
+        default=0o660,
+        help="Octal permissions for the listening socket (default: 660)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
@@ -748,6 +793,8 @@ def main() -> None:
         socket_path=args.socket,
         mock=args.mock,
         skip_bluez_check=args.skip_bluez_check,
+        socket_group=args.socket_group,
+        socket_mode=args.socket_mode,
     )
 
     watchdog_armed = threading.Event()
