@@ -93,8 +93,9 @@ const (
 
 // --- structs (64-bit layout) -----------------------------------------------
 
-// v4l2Capability matches struct v4l2_capability: 4+16+24 = 44 bytes of strings,
-// then four u32. Total 104 bytes.
+// v4l2Capability matches struct v4l2_capability: 16+32+32 = 80 bytes of
+// strings, then six u32 (version, capabilities, device_caps, reserved[3]).
+// Total 104 bytes.
 //
 //	char driver[16]; char card[32]; char bus_info[32];
 //	__u32 version; __u32 capabilities; __u32 device_caps; __u32 reserved[3];
@@ -131,7 +132,7 @@ type v4l2Fmtdesc struct {
 //	      colorspace, priv, flags; union {__u32 ycbcr_enc; __u32 hsv_enc;};
 //	__u32 quantization, xfer_func;
 //
-// 13 x u32 = 52 bytes.
+// 12 x u32 = 48 bytes.
 type v4l2PixFormat struct {
 	Width        uint32
 	Height       uint32
