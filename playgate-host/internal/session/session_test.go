@@ -796,3 +796,85 @@ func TestNoGoroutineLeak(t *testing.T) {
 	for range m.Events() {
 	}
 }
+
+// TestInputGate_PromotedViewerGetsCommands verifies that a viewer's gate that
+// was created while queued is successfully transferred and becomes active
+// (forwards commands) once the viewer is promoted. It also verifies that the
+// gate is closed when the promoted session expires.
+func TestInputGate_PromotedViewerGetsCommands(t *testing.T) {
+	pubB64, priv := testKeyPair(t)
+	t0 := time.Unix(1_718_000_000, 0)
+
+	cfg := Config{
+		PublicKeyBase64: pubB64,
+		RoomID:          "room1",
+		TickInterval:    200 * time.Millisecond,
+		QueuePolicy:     PolicyQueue,
+		now:             func() time.Time { return t0 },
+	}
+	m, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = m.Run(ctx) }()
+
+	// Alice gets a 1-second session. Bob gets 2 seconds.
+	tokA := mintToken(t, priv, "room1", "alice", 1, t0)
+	tokB := mintToken(t, priv, "room1", "bob", 2, t0)
+
+	_, err = m.Claim(tokA)
+	if err != nil {
+		t.Fatalf("Claim A: %v", err)
+	}
+	_, err = m.Claim(tokB)
+	if err != nil {
+		t.Fatalf("Claim B: %v", err)
+	}
+
+	rawBIn := make(chan core.InputCommand, 4)
+	gatedB := m.Gate("bob", rawBIn)
+
+	// Send a command for B (queued, not active). Should not be forwarded.
+	rawBIn <- core.InputCommand{Buttons: core.ButtonB}
+	select {
+	case cmd := <-gatedB:
+		t.Errorf("queued viewer's command was forwarded (buttons=%#x), expected drop", cmd.Buttons)
+	case <-time.After(100 * time.Millisecond):
+		// Good, not forwarded.
+	}
+
+	// Wait for Alice to expire; Bob should be promoted automatically.
+	if !waitEvent(t, m.Events(), func(ev SessionEvent) bool {
+		return ev.Kind == EventGranted && ev.ViewerID == "bob"
+	}, 3*time.Second) {
+		t.Fatal("expected Bob to be promoted/granted")
+	}
+
+	// Send command for Bob now that he is active.
+	rawBIn <- core.InputCommand{Buttons: core.ButtonA}
+	select {
+	case got, ok := <-gatedB:
+		if !ok {
+			t.Fatal("bob's gate closed unexpectedly after promotion")
+		}
+		if got.Buttons != core.ButtonA {
+			t.Errorf("bob forwarded buttons: got %#x, want %#x", got.Buttons, core.ButtonA)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bob's command not forwarded after promotion within timeout")
+	}
+
+	// Wait for Bob to expire; Bob's gate must be closed.
+	select {
+	case _, ok := <-gatedB:
+		if ok {
+			t.Error("expected bob's gate to be closed after session expiry, but received value")
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("bob's gate channel not closed after session expiry")
+	}
+
+	close(rawBIn)
+}

@@ -125,12 +125,18 @@ type sessionEntry struct {
 
 // gateHandle holds a Gate output channel and a once-close guard.
 type gateHandle struct {
-	ch   chan core.InputCommand
-	once sync.Once
+	mu     sync.Mutex
+	ch     chan core.InputCommand
+	closed bool
 }
 
 func (g *gateHandle) close() {
-	g.once.Do(func() { close(g.ch) })
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.closed {
+		close(g.ch)
+		g.closed = true
+	}
 }
 
 // NewManager constructs a Manager. Call Run to start background goroutines.
@@ -234,7 +240,7 @@ func (m *Manager) Gate(viewerID string, rawIn <-chan core.InputCommand) <-chan c
 	m.mu.Unlock()
 
 	go func() {
-		defer handle.close() // safe: sync.Once inside
+		defer handle.close() // safe: mutex-protected inside
 		for cmd := range rawIn {
 			// Refresh idle timer on every incoming command.
 			m.mu.Lock()
@@ -250,11 +256,15 @@ func (m *Manager) Gate(viewerID string, rawIn <-chan core.InputCommand) <-chan c
 			m.mu.Unlock()
 
 			if isActive {
-				select {
-				case outCh <- cmd:
-				default:
-					// Drop: downstream full.
+				handle.mu.Lock()
+				if !handle.closed {
+					select {
+					case outCh <- cmd:
+					default:
+						// Drop: downstream full.
+					}
 				}
+				handle.mu.Unlock()
 			}
 		}
 	}()
@@ -436,7 +446,15 @@ func (m *Manager) endSession(entry *sessionEntry, kind EventKind) {
 		// Cancel the placeholder context the queued entry was holding.
 		next.cancel()
 		// Give it a fresh timed session.
-		m.startSessionLocked(next.claims)
+		nextSess := m.startSessionLocked(next.claims)
+
+		// Transfer registered gates from the queued sessionEntry to the new active sessionEntry.
+		next.gatesMu.Lock()
+		nextSess.gatesMu.Lock()
+		nextSess.gates = next.gates
+		next.gates = nil
+		nextSess.gatesMu.Unlock()
+		next.gatesMu.Unlock()
 	}
 }
 
