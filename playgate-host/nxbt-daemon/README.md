@@ -1,8 +1,13 @@
 # nxbt-daemon
 
 Python daemon that bridges the Go host process to a Nintendo Switch Pro
-Controller emulated via the [nxbt](https://github.com/Brikwerk/nxbt) library
-over Bluetooth.
+Controller emulated via the [nuxbt](https://github.com/hannahbee91/nuxbt)
+library over Bluetooth. nuxbt is an actively maintained fork of NXBT; Switch 2
+controller emulation is on its roadmap (not yet implemented). PlayGate pins
+the `v3.3.6` tag.
+
+The daemon, socket path and unit names keep the historical `nxbt` prefix —
+only the underlying Python library changed.
 
 Communication happens over a Unix domain socket using newline-delimited JSON.
 See `docs/protocols.md` (repo root of playgate-host) for the full wire-format
@@ -12,10 +17,11 @@ specification.
 
 ## Platform requirements
 
-- **Linux only** (nxbt requires BlueZ and the uhid kernel driver).
-- Python 3.8+
+- **Linux only** (nuxbt requires BlueZ and DBus).
+- Python 3.11+
 - BlueZ >= 5.50
-- Root or CAP_NET_ADMIN capability (nxbt uses DBus to talk to bluetoothd)
+- Root or CAP_NET_ADMIN capability (nuxbt uses DBus to talk to bluetoothd)
+- `python3-dbus` and `python3-gi` apt packages (or pip-built equivalents)
 
 ---
 
@@ -23,7 +29,7 @@ specification.
 
 ### 1. Disable the BlueZ input plugin
 
-The stock BlueZ `input` plugin claims HID profiles and prevents nxbt from
+The stock BlueZ `input` plugin claims HID profiles and prevents nuxbt from
 registering the controller. Disable it:
 
 ```
@@ -70,11 +76,14 @@ bluetoothctl show    # should list your adapter
 # Clone playgate-host, then:
 cd playgate-host/nxbt-daemon
 
-# Option A — system-wide (requires root for Bluetooth)
-sudo pip3 install -r requirements.txt
+# System prerequisites (provide the dbus/gi Python bindings without compiling)
+sudo apt install git python3-dbus python3-gi
 
-# Option B — virtualenv
-python3 -m venv venv
+# Option A — system-wide (requires root for Bluetooth)
+sudo pip3 install --break-system-packages -r requirements.txt
+
+# Option B — virtualenv (--system-site-packages exposes apt's dbus/gi modules)
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -120,7 +129,7 @@ Restart=on-failure
 RestartSec=5
 RuntimeDirectory=nxbt
 RuntimeDirectoryMode=0755
-# Root required for nxbt / Bluetooth access
+# Root required for nuxbt / Bluetooth access
 User=root
 
 [Install]
@@ -140,7 +149,7 @@ journalctl -u nxbt-daemon -f
 
 ## Mock mode
 
-If `nxbt` cannot be imported (wrong platform, missing BlueZ, or intentional
+If `nuxbt` cannot be imported (wrong platform, missing BlueZ, or intentional
 `--mock` flag), the daemon falls back to **mock mode** automatically. In mock
 mode:
 
@@ -150,7 +159,7 @@ mode:
 - The Unix socket is still opened and the JSON protocol is fully honoured, so
   the Go host can be tested without a physical Switch.
 
-To force mock mode regardless of whether nxbt is installed:
+To force mock mode regardless of whether nuxbt is installed:
 
 ```bash
 python3 nxbtd.py --mock
@@ -181,7 +190,7 @@ Quick reference:
 
 ## Running tests
 
-The test suite (`test_protocol.py`) does **not** import `nxbt` and runs on any
+The test suite (`test_protocol.py`) does **not** import `nuxbt` and runs on any
 platform (Linux, macOS, Windows):
 
 ```bash

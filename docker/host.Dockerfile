@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Multi-stage build:
 #   Stage 1 (builder)  — cross-compile playgate-host for the target platform
-#   Stage 2 (runtime)  — Debian-slim with ffmpeg, BlueZ, Python3 + nxbt
+#   Stage 2 (runtime)  — Debian-slim with ffmpeg, BlueZ, Python3 + nuxbt
 #
 # Build (multi-arch, from repo root):
 #   docker buildx build \
@@ -24,7 +24,7 @@
 #     ghcr.io/playgate/playgate-host:latest
 #
 # Runtime requirements:
-#   --privileged or --cap-add NET_ADMIN,SYS_ADMIN  → nxbt needs DBus/BlueZ
+#   --privileged or --cap-add NET_ADMIN,SYS_ADMIN  → nuxbt needs DBus/BlueZ
 #   --network host                                  → mDNS ICE candidates
 #   --device /dev/video0                            → V4L2 capture card
 #   -v /var/run/dbus:/var/run/dbus                  → bluetoothd IPC
@@ -68,9 +68,11 @@ COPY playgate-host/nxbt-daemon/ /out/nxbt-daemon/
 # debian:bookworm-slim gives a known-good base with apt.
 # We install:
 #   ffmpeg         — H.264 encoding via ffmpeg subprocess (encoder/ffmpeg)
-#   bluez          — bluetoothd for nxbt Pro Controller emulation
-#   python3-pip    — to install nxbt Python library
-#   python3-dbus   — DBus bindings needed by nxbt
+#   bluez          — bluetoothd for nuxbt Pro Controller emulation
+#   git            — needed by pip to fetch nuxbt from its git tag
+#   python3-pip    — to install the nuxbt Python library
+#   python3-dbus   — DBus bindings (`import dbus`) needed by nuxbt core
+#   python3-gi     — PyGObject (`gi.repository.GLib`) needed by nuxbt's BlueZ agent
 #   dbus           — dbus-daemon (may already be on host, but needed in image)
 #   v4l-utils      — optional, useful for /dev/video0 debugging
 FROM debian:bookworm-slim AS runtime
@@ -83,6 +85,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       bluez \
       bluetooth \
+      git \
       python3 \
       python3-pip \
       python3-dbus \
@@ -91,9 +94,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install nxbt (Linux-only Bluetooth Pro Controller library)
-# nxbt>=0.1.5 requires BlueZ, DBus, and the uhid kernel module on the HOST.
-RUN pip3 install --no-cache-dir --break-system-packages "nxbt>=0.1.5"
+# Install nuxbt (Linux-only Bluetooth Pro Controller library, actively
+# maintained fork of NXBT). Requires BlueZ and DBus on the HOST.
+#
+# --no-deps is deliberate: nuxbt's full dependency set pulls in GUI/web-stack
+# packages (Flask, Flask-SocketIO, blessed, pynput, cryptography, uvicorn,
+# PyGObject-from-pip, …) that the headless nxbtd daemon never imports.
+# The core control path (`import nuxbt` → nuxbt.py / bluez.py / agent.py /
+# controller/) only needs:
+#   - dbus    → provided by apt python3-dbus (avoids compiling dbus-python)
+#   - gi      → provided by apt python3-gi   (avoids compiling PyGObject)
+# Everything else it touches is the Python standard library.
+RUN pip3 install --no-cache-dir --break-system-packages --no-deps \
+      "git+https://github.com/hannahbee91/nuxbt.git@v3.3.6"
 
 # Copy compiled binary + daemon
 COPY --from=builder /out/playgate-host /usr/local/bin/playgate-host

@@ -195,8 +195,9 @@ See `docker/compose.example.yaml` for a full Compose example.
 
 ### Option A — One-click install script (recommended)
 
-The script handles everything: system packages, BlueZ reconfiguration, nxbt,
-binary download, user creation, systemd units.
+The script handles everything: system packages, BlueZ reconfiguration, nuxbt
+(an actively maintained fork of NXBT; Switch 2 controller support is on its
+roadmap, not yet implemented), binary download, user creation, systemd units.
 
 ```bash
 curl -fsSL https://github.com/playgate/playgate/releases/latest/download/install-host.sh \
@@ -226,8 +227,8 @@ sudo bash scripts/install-host.sh --uninstall
 
 | Step | Action |
 |---|---|
-| 1 | `apt-get install` ffmpeg, bluez, bluetooth, python3-pip, python3-dbus, dbus, v4l-utils |
-| 2 | `pip3 install nxbt>=0.1.5` |
+| 1 | `apt-get install` ffmpeg, bluez, bluetooth, git, python3-pip, python3-dbus, python3-gi, dbus, v4l-utils |
+| 2 | `pip3 install "git+https://github.com/hannahbee91/nuxbt.git@v3.3.6"` |
 | 3a | Creates `/etc/systemd/system/bluetooth.service.d/playgate-noplugin.conf` — drops-in `--noplugin=input` onto bluetoothd's ExecStart |
 | 3b | Backs up `/etc/bluetooth/main.conf` → `.playgate-bak`, then sets `Experimental = true` and `AutoEnable = true` |
 | 3c | `systemctl restart bluetooth` |
@@ -249,7 +250,7 @@ ExecStart=/usr/lib/bluetooth/bluetoothd --noplugin=input
 ```
 
 Why: The BlueZ `input` plugin claims HID profiles on startup, which prevents
-nxbt from registering a Nintendo Switch Pro Controller profile. The empty
+nuxbt from registering a Nintendo Switch Pro Controller profile. The empty
 `ExecStart=` clears the inherited value before the new one is set.
 
 **`/etc/bluetooth/main.conf`** additions:
@@ -263,7 +264,7 @@ AutoEnable = true
 ```
 
 Why: Some BlueZ versions (5.53+) require experimental features enabled for the
-DBus interfaces nxbt uses. `AutoEnable=true` ensures the Bluetooth adapter
+DBus interfaces nuxbt uses. `AutoEnable=true` ensures the Bluetooth adapter
 powers on automatically after reboot.
 
 The original file is backed up to `/etc/bluetooth/main.conf.playgate-bak`.
@@ -271,13 +272,13 @@ The original file is backed up to `/etc/bluetooth/main.conf.playgate-bak`.
 
 ### Option B — Docker
 
-The Docker image bundles ffmpeg, BlueZ tools, Python, and nxbt. The container
+The Docker image bundles ffmpeg, BlueZ tools, Python, and nuxbt. The container
 must run with `--privileged` and `--network host` for Bluetooth and mDNS ICE.
 
 **Requirements on the host machine:**
 
 - BlueZ must be running on the host (not inside the container)
-- `/var/run/dbus` must be the host DBus socket (nxbt talks to it)
+- `/var/run/dbus` must be the host DBus socket (nuxbt talks to it)
 - The BlueZ `--noplugin=input` change must still be applied to the host's
   bluetoothd (same as Option A, steps 3a–3c)
 
@@ -487,7 +488,7 @@ npm run deploy   # zero-downtime rollout via Cloudflare
 2. Confirm `signaling.url` in `/etc/playgate/config.yaml` matches the Worker URL.
 3. Test the Worker: `curl https://<worker>/healthz`
 
-### nxbt fails with "DBus connection error"
+### nuxbt fails with "DBus connection error"
 
 - Ensure `bluetoothd` is running: `systemctl status bluetooth`
 - Confirm `--noplugin=input` is active: `systemctl cat bluetooth | grep ExecStart`
@@ -501,7 +502,8 @@ npm run deploy   # zero-downtime rollout via Cloudflare
 
 ### Bluetooth controller not pairing
 
-- After first start of nxbt, pair the Switch: hold Sync button on the controller
+- After first start of nuxbt, pair the Switch: hold Sync button on the controller
   while `nxbtd.service` is running.
 - Check logs: `journalctl -u nxbtd -f`
-- If nxbt is in mock mode (no BlueZ), the logs will say "mock mode".
+- If the daemon is in mock mode (nuxbt not importable / no BlueZ), the logs
+  will say "mock mode".

@@ -1,7 +1,7 @@
 """
 test_protocol.py — Unit tests for the nxbtd protocol layer.
 
-Does NOT import nxbt.  Runs on any platform (Linux, macOS, Windows).
+Does NOT import nuxbt.  Runs on any platform (Linux, macOS, Windows).
 Uses only the Python standard library.
 
 Run with:
@@ -18,8 +18,8 @@ import threading
 import unittest
 
 # ---------------------------------------------------------------------------
-# Import protocol helpers from nxbtd without triggering a real nxbt import.
-# nxbtd already handles `import nxbt` failing gracefully by setting MOCK_MODE,
+# Import protocol helpers from nxbtd without triggering a real nuxbt import.
+# nxbtd already handles `import nuxbt` failing gracefully by setting MOCK_MODE,
 # so a plain `import nxbtd` is safe on non-Linux hosts.
 # ---------------------------------------------------------------------------
 import nxbtd
@@ -214,6 +214,78 @@ class TestAxisToNxbt(unittest.TestCase):
     def test_rounding(self):
         # 0.755 * 100 = 75.5 → should round to 76.
         self.assertEqual(nxbtd.axis_to_nxbt(0.755), 76)
+
+
+# ---------------------------------------------------------------------------
+# Test: fill_input_packet (nuxbt DIRECT_INPUT_PACKET mapping)
+# ---------------------------------------------------------------------------
+
+def _make_packet():
+    """Mirror of nuxbt's DIRECT_INPUT_PACKET template (nuxbt/nuxbt.py).
+
+    Kept local so the tests never import nuxbt.
+    """
+    return {
+        "L_STICK": {"PRESSED": False, "X_VALUE": 0, "Y_VALUE": 0,
+                    "LS_UP": False, "LS_LEFT": False, "LS_RIGHT": False, "LS_DOWN": False},
+        "R_STICK": {"PRESSED": False, "X_VALUE": 0, "Y_VALUE": 0,
+                    "RS_UP": False, "RS_LEFT": False, "RS_RIGHT": False, "RS_DOWN": False},
+        "DPAD_UP": False, "DPAD_LEFT": False, "DPAD_RIGHT": False, "DPAD_DOWN": False,
+        "L": False, "ZL": False, "R": False, "ZR": False,
+        "JCL_SR": False, "JCL_SL": False, "JCR_SR": False, "JCR_SL": False,
+        "PLUS": False, "MINUS": False, "HOME": False, "CAPTURE": False,
+        "Y": False, "X": False, "B": False, "A": False,
+    }
+
+
+class TestFillInputPacket(unittest.TestCase):
+
+    def test_neutral(self):
+        pkt = nxbtd.fill_input_packet(_make_packet(), 0, 0.0, 0.0, 0.0, 0.0)
+        self.assertEqual(pkt, _make_packet())
+
+    def test_face_buttons(self):
+        # A | B | X | Y
+        pkt = nxbtd.fill_input_packet(_make_packet(), 0x0F, 0, 0, 0, 0)
+        for name in ("A", "B", "X", "Y"):
+            self.assertTrue(pkt[name], name)
+        self.assertFalse(pkt["L"])
+
+    def test_stick_clicks_map_to_pressed(self):
+        # ButtonLStick (bit 12) | ButtonRStick (bit 13)
+        pkt = nxbtd.fill_input_packet(_make_packet(), 0x001000 | 0x002000, 0, 0, 0, 0)
+        self.assertTrue(pkt["L_STICK"]["PRESSED"])
+        self.assertTrue(pkt["R_STICK"]["PRESSED"])
+        # Must NOT create stray top-level keys.
+        self.assertNotIn("L_STICK_PRESS", pkt)
+
+    def test_dpad(self):
+        pkt = nxbtd.fill_input_packet(_make_packet(), 0x004000 | 0x020000, 0, 0, 0, 0)
+        self.assertTrue(pkt["DPAD_UP"])
+        self.assertTrue(pkt["DPAD_RIGHT"])
+        self.assertFalse(pkt["DPAD_DOWN"])
+        self.assertFalse(pkt["DPAD_LEFT"])
+
+    def test_axes_scaled_to_nuxbt_range(self):
+        pkt = nxbtd.fill_input_packet(_make_packet(), 0, 0.5, -1.0, 0.25, 2.0)
+        self.assertEqual(pkt["L_STICK"]["X_VALUE"], 50)
+        self.assertEqual(pkt["L_STICK"]["Y_VALUE"], -100)
+        self.assertEqual(pkt["R_STICK"]["X_VALUE"], 25)
+        self.assertEqual(pkt["R_STICK"]["Y_VALUE"], 100)  # clamped
+
+    def test_all_buttons_only_touch_known_keys(self):
+        all_mask = (1 << 18) - 1
+        pkt = nxbtd.fill_input_packet(_make_packet(), all_mask, 0, 0, 0, 0)
+        self.assertEqual(set(pkt.keys()), set(_make_packet().keys()))
+        for name in ("A", "B", "X", "Y", "L", "R", "ZL", "ZR",
+                     "PLUS", "MINUS", "HOME", "CAPTURE",
+                     "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"):
+            self.assertTrue(pkt[name], name)
+        self.assertTrue(pkt["L_STICK"]["PRESSED"])
+        self.assertTrue(pkt["R_STICK"]["PRESSED"])
+        # Joy-Con-only buttons stay untouched on a Pro Controller.
+        for name in ("JCL_SR", "JCL_SL", "JCR_SR", "JCR_SL"):
+            self.assertFalse(pkt[name], name)
 
 
 # ---------------------------------------------------------------------------

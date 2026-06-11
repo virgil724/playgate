@@ -2,8 +2,9 @@
 """
 nxbtd.py — PlayGate NXBT daemon
 
-Manages an NXBT Switch Pro Controller over Bluetooth and exposes it to the
-Go host process via a Unix socket using newline-delimited JSON.
+Manages an emulated Switch Pro Controller over Bluetooth (via the nuxbt
+library, an actively maintained fork of NXBT) and exposes it to the Go host
+process via a Unix socket using newline-delimited JSON.
 
 Protocol (Go ↔ daemon):
   Go → daemon:
@@ -17,9 +18,9 @@ Protocol (Go ↔ daemon):
 Run:
   python3 nxbtd.py [--socket /run/nxbt/nxbt.sock]
 
-In mock mode (NXBT unavailable):
+In mock mode (nuxbt unavailable):
   python3 nxbtd.py --mock
-  or when nxbt cannot be imported the daemon falls back to mock automatically.
+  or when nuxbt cannot be imported the daemon falls back to mock automatically.
 """
 
 import argparse
@@ -78,19 +79,19 @@ BUTTON_MAP: list[tuple[int, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# NXBT import — fall back to mock mode gracefully
+# nuxbt import — fall back to mock mode gracefully
 # ---------------------------------------------------------------------------
 
 MOCK_MODE = False
 
 try:
-    import nxbt  # type: ignore
-    _nxbt_available = True
+    import nuxbt  # type: ignore
+    _nuxbt_available = True
 except ImportError:
-    _nxbt_available = False
+    _nuxbt_available = False
     MOCK_MODE = True
     logging.warning(
-        "nxbt module not found — running in mock mode. "
+        "nuxbt module not found — running in mock mode. "
         "Inputs will be logged but not forwarded to a real Switch."
     )
 
@@ -117,14 +118,48 @@ def send_msg(sock: socket.socket, msg: dict) -> None:
 
 
 def buttons_to_nxbt(buttons: int) -> list[str]:
-    """Convert a button bitmask to the list of NXBT button name strings."""
+    """Convert a button bitmask to the list of nuxbt button name strings."""
     return [name for mask, name in BUTTON_MAP if buttons & mask]
 
 
 def axis_to_nxbt(value: float) -> int:
-    """Convert a normalised axis value [-1, 1] to NXBT's integer range [-100, 100]."""
+    """Convert a normalised axis value [-1, 1] to nuxbt's integer range [-100, 100].
+
+    nuxbt's input parser divides X_VALUE/Y_VALUE by 100 to obtain the stick
+    ratio (see nuxbt/controller/input.py), so the wire range is -100..100.
+    """
     clamped = max(-1.0, min(1.0, float(value)))
     return int(round(clamped * 100))
+
+
+def fill_input_packet(
+    pkt: dict,
+    buttons: int,
+    lx: float,
+    ly: float,
+    rx: float,
+    ry: float,
+) -> dict:
+    """Fill a nuxbt input packet (from Nuxbt.create_input_packet()) in place.
+
+    Packet layout (nuxbt DIRECT_INPUT_PACKET):
+      - face/trigger/meta/dpad buttons are top-level booleans keyed by the
+        same names our BUTTON_MAP uses ("A", "B", …, "DPAD_RIGHT"),
+      - stick clicks live at pkt["L_STICK"]["PRESSED"] / pkt["R_STICK"]["PRESSED"],
+      - stick axes live at pkt[stick]["X_VALUE"/"Y_VALUE"], integers -100..100.
+    """
+    for name in buttons_to_nxbt(buttons):
+        if name == "L_STICK":
+            pkt["L_STICK"]["PRESSED"] = True
+        elif name == "R_STICK":
+            pkt["R_STICK"]["PRESSED"] = True
+        else:
+            pkt[name] = True
+    pkt["L_STICK"]["X_VALUE"] = axis_to_nxbt(lx)
+    pkt["L_STICK"]["Y_VALUE"] = axis_to_nxbt(ly)
+    pkt["R_STICK"]["X_VALUE"] = axis_to_nxbt(rx)
+    pkt["R_STICK"]["Y_VALUE"] = axis_to_nxbt(ry)
+    return pkt
 
 
 # ---------------------------------------------------------------------------
@@ -158,16 +193,16 @@ class MockController:
 
 
 class NxbtController:
-    """Wraps the real NXBT library."""
+    """Wraps the real nuxbt library."""
 
     def __init__(self) -> None:
-        self._nx = nxbt.Nxbt()
+        self._nx = nuxbt.Nuxbt()
         self._index: Optional[int] = None
 
     def connect(self) -> None:
         """Create a Pro Controller and wait for the Switch to pair."""
-        self._index = self._nx.create_controller(nxbt.PRO_CONTROLLER)
-        log.info("NXBT controller index=%d, waiting for Switch…", self._index)
+        self._index = self._nx.create_controller(nuxbt.PRO_CONTROLLER)
+        log.info("nuxbt controller index=%d, waiting for Switch…", self._index)
         self._nx.wait_for_connection(self._index)
         log.info("Switch paired to controller index=%d", self._index)
 
@@ -181,15 +216,12 @@ class NxbtController:
     ) -> None:
         if self._index is None:
             return
-        pressed = buttons_to_nxbt(buttons)
-        self._nx.set_controller_input(
-            self._index,
-            buttons=pressed,
-            lx=axis_to_nxbt(lx),
-            ly=axis_to_nxbt(ly),
-            rx=axis_to_nxbt(rx),
-            ry=axis_to_nxbt(ry),
-        )
+        # A fresh packet must be obtained per input cycle.  create_input_packet()
+        # returns a thread-safe copy of nuxbt's DIRECT_INPUT_PACKET template
+        # (nuxbt deliberately avoids copy.deepcopy — do not deep-copy here).
+        pkt = self._nx.create_input_packet()
+        fill_input_packet(pkt, buttons, lx, ly, rx, ry)
+        self._nx.set_controller_input(self._index, pkt)
 
     def close(self) -> None:
         if self._index is not None:

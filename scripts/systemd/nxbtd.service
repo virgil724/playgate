@@ -1,7 +1,7 @@
 [Unit]
 Description=PlayGate NXBT Bluetooth daemon
 Documentation=https://github.com/playgate/playgate
-# nxbt must start only after bluetoothd is up and running.
+# nuxbt must start only after bluetoothd is up and running.
 After=bluetooth.service
 Requires=bluetooth.service
 
@@ -11,8 +11,8 @@ Type=simple
 ExecStart=/usr/bin/python3 /opt/playgate/nxbt-daemon/nxbtd.py
 WorkingDirectory=/opt/playgate/nxbt-daemon
 
-# nxbt requires root (or CAP_NET_ADMIN) to talk to bluetoothd via DBus
-# and to register a HID profile via the uhid kernel driver.
+# nuxbt requires root (or CAP_NET_ADMIN) to talk to bluetoothd via DBus
+# and to register the controller's HID profile.
 User=root
 
 # Automatic restart on unexpected exit

@@ -53,7 +53,7 @@ only read and must tolerate a closed channel. Lifetime is bounded by the
 | `internal/rtc/` | Pion peer: H.264 sample track, `input` (unreliable) + `control` (reliable) DataChannels. |
 | `internal/signaling/` | stdlib HTTP client for the signaling Worker (offer/answer/ICE + TURN credentials). |
 | `internal/session/` | ed25519-JWT session gate: single controller, expiry, idle kick, FIFO queue. |
-| `internal/input/nxbt/` | Unix-socket bridge to the NXBT Python daemon (`nxbt-daemon/`), rate-limited. |
+| `internal/input/nxbt/` | Unix-socket bridge to the Python controller daemon (`nxbt-daemon/`, backed by the actively maintained [nuxbt](https://github.com/hannahbee91/nuxbt) fork of NXBT), rate-limited. |
 | `internal/metrics/` | Pipeline latency collector (capture→encode→track, p50/p95). |
 
 ## Running

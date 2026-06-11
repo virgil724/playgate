@@ -209,7 +209,7 @@ Sent immediately in response to a `ping`.
 
 - Only one Go client is expected at a time; a new connection closes the previous session.
 - The daemon reconnects to the Switch automatically with exponential back-off.
-- In mock mode (`--mock` flag or if nxbt cannot be imported) the daemon honours
+- In mock mode (`--mock` flag or if nuxbt cannot be imported) the daemon honours
   the full protocol but logs inputs rather than forwarding them to a real Switch.
 
 ---

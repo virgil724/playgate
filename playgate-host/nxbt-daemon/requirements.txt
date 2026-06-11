@@ -1,12 +1,22 @@
 # PlayGate NXBT daemon dependencies
 #
-# NOTE: nxbt only runs on Linux with BlueZ ≥ 5.50 and Python 3.8+.
-# Do NOT install on macOS or Windows — it requires DBus, BlueZ, and
-# a kernel with the uhid driver available.
+# The daemon uses nuxbt — an actively maintained fork of NXBT — pinned to a
+# known-good release tag. Switch 2 controller emulation is on the fork's
+# roadmap but not yet implemented.
+#
+# NOTE: nuxbt only runs on Linux with BlueZ ≥ 5.50 and Python 3.11+.
+# Do NOT install on macOS or Windows — it requires DBus and BlueZ.
+#
+# System prerequisites (Debian/Ubuntu/Raspberry Pi OS):
+#   sudo apt install git python3-dbus python3-gi
+# (python3-dbus provides `dbus`, python3-gi provides `gi` — the only
+# third-party modules nuxbt's headless control path imports. Installing
+# them via apt avoids compiling dbus-python/PyGObject from source.)
 #
 # Install on Raspberry Pi / Debian / Ubuntu:
-#   sudo pip3 install -r requirements.txt
-# or in a virtualenv:
-#   python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+#   sudo pip3 install --break-system-packages -r requirements.txt
+# or in a virtualenv (use --system-site-packages so dbus/gi are visible):
+#   python3 -m venv --system-site-packages venv && source venv/bin/activate
+#   pip install -r requirements.txt
 
-nxbt>=0.1.5  # Linux only — Bluetooth Nintendo Switch Pro Controller emulation
+nuxbt @ git+https://github.com/hannahbee91/nuxbt.git@v3.3.6  # Linux only — Bluetooth Switch Pro Controller emulation

@@ -39,7 +39,7 @@ services:
   # WebRTC and accepts Nintendo Switch controller input over Bluetooth.
   #
   # SECURITY NOTE:
-  #   --privileged gives full hardware/kernel access — required by nxbt for
+  #   --privileged gives full hardware/kernel access — required by nuxbt for
   #   BlueZ DBus operations. If you want least-privilege, replace with:
   #     cap_add: [NET_ADMIN, SYS_ADMIN]
   #   and add: security_opt: [apparmor:unconfined]
@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
     depends_on:
       - server
-    # --privileged: required for nxbt (BlueZ DBus + uhid kernel module)
+    # --privileged: required for nuxbt (BlueZ DBus)
     privileged: true
     # --network host: lets Pion discover mDNS ICE candidates on the LAN
     network_mode: host
@@ -59,7 +59,7 @@ services:
       # V4L2 capture card — adjust to your capture device node
       - /dev/video0:/dev/video0
     volumes:
-      # DBus socket: nxbt talks to bluetoothd through the host dbus
+      # DBus socket: nuxbt talks to bluetoothd through the host dbus
       - /var/run/dbus:/var/run/dbus
       # Shared UNIX socket directory for nxbt daemon ↔ Go host IPC
       - nxbt-run:/run/nxbt
