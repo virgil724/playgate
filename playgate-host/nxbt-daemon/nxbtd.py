@@ -400,7 +400,15 @@ class NxbtController:
 
 
 class ClientSession:
-    """Handles a single connection from the Go host process."""
+    """Handles a single connection from the Go host process.
+
+    `controller` may be the controller object itself or a zero-arg callable
+    returning the CURRENT controller (or None while it is not ready). The
+    callable form is what the daemon uses: a session often gets accepted while
+    the Switch is still pairing, and a snapshot taken at accept time would pin
+    that session to a stale fallback forever — inputs would flow into a mock
+    while the real controller sits idle.
+    """
 
     def __init__(
         self,
@@ -409,9 +417,13 @@ class ClientSession:
         status_event: threading.Event,
     ) -> None:
         self._conn = conn
-        self._controller = controller
+        if callable(controller):
+            self._get_controller = controller
+        else:
+            self._get_controller = lambda: controller
         self._status_event = status_event
         self._running = True
+        self._drop_logged = False
 
     def run(self) -> None:
         log.info("client connected")
@@ -445,7 +457,17 @@ class ClientSession:
 
         msg_type = msg.get("type")
         if msg_type == "input":
-            self._controller.apply_input(
+            ctrl = self._get_controller()
+            if ctrl is None:
+                # Controller still connecting (or between retries): drop the
+                # input rather than route it anywhere misleading. Log once per
+                # outage, not per 60 Hz frame.
+                if not self._drop_logged:
+                    log.warning("input received but controller not ready — dropping")
+                    self._drop_logged = True
+                return
+            self._drop_logged = False
+            ctrl.apply_input(
                 buttons=int(msg.get("buttons", 0)),
                 lx=float(msg.get("lx", 0)),
                 ly=float(msg.get("ly", 0)),
@@ -504,6 +526,16 @@ class Daemon:
         if self._mock:
             return MockController()
         return NxbtController()
+
+    def _get_controller(self):
+        """Current ready controller, or None while (re)connecting.
+
+        Passed to ClientSession so every input is routed through whatever
+        controller is live RIGHT NOW, not whatever existed when the client
+        connected.
+        """
+        with self._session_lock:
+            return self._controller
 
     def _ensure_bluez_plugin(self) -> None:
         """Gate each real-mode connect attempt on the NUXBT BlueZ plugin.
@@ -643,10 +675,11 @@ class Daemon:
                     except OSError:
                         pass
 
-                # Get the active controller reference (either real NxbtController or MockController)
-                with self._session_lock:
-                    session_ctrl = self._controller if self._controller is not None else MockController()
-                session = ClientSession(conn, session_ctrl, self._shutdown)
+                # Hand the session a live getter, NOT a snapshot: the host's
+                # bridge usually reconnects to this socket before the Switch
+                # has finished pairing, and a snapshot would pin the session
+                # to a fallback forever (inputs visibly flowing, Switch dead).
+                session = ClientSession(conn, self._get_controller, self._shutdown)
                 with self._session_lock:
                     self._current_session = session
                     last_state, last_detail = self._last_status

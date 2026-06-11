@@ -1000,6 +1000,82 @@ class TestConnectPaths(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: session routes inputs through the CURRENT controller, not a snapshot
+# ---------------------------------------------------------------------------
+
+class _LiveRoutingController:
+    def __init__(self):
+        self.inputs = []
+
+    def apply_input(self, buttons, lx, ly, rx, ry):
+        self.inputs.append((buttons, lx, ly, rx, ry))
+
+
+class TestSessionLiveControllerRouting(unittest.TestCase):
+    """Regression: the host's bridge reconnects to the socket before the
+    Switch finishes pairing; a controller snapshot taken at accept time would
+    pin the session to a stale fallback forever. The session must resolve the
+    controller per input via the getter."""
+
+    def _session_with_getter(self, getter):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        session = nxbtd.ClientSession(
+            conn=b, controller=getter, status_event=threading.Event()
+        )
+        self.addCleanup(b.close)
+        return session
+
+    def test_input_before_controller_ready_is_dropped_then_routed(self):
+        holder = {"ctrl": None}
+        session = self._session_with_getter(lambda: holder["ctrl"])
+
+        # Not ready: input is dropped, no crash.
+        session._handle_line(b'{"type":"input","buttons":3}')
+
+        # Controller appears (e.g. Switch finished pairing): same session
+        # must start routing to it without reconnecting.
+        ctrl = _LiveRoutingController()
+        holder["ctrl"] = ctrl
+        session._handle_line(b'{"type":"input","buttons":7,"lx":0.5}')
+
+        self.assertEqual(len(ctrl.inputs), 1)
+        self.assertEqual(ctrl.inputs[0][0], 7)
+        self.assertAlmostEqual(ctrl.inputs[0][1], 0.5)
+
+    def test_controller_swap_is_picked_up(self):
+        first, second = _LiveRoutingController(), _LiveRoutingController()
+        holder = {"ctrl": first}
+        session = self._session_with_getter(lambda: holder["ctrl"])
+
+        session._handle_line(b'{"type":"input","buttons":1}')
+        holder["ctrl"] = second  # daemon recycled the controller
+        session._handle_line(b'{"type":"input","buttons":2}')
+
+        self.assertEqual([i[0] for i in first.inputs], [1])
+        self.assertEqual([i[0] for i in second.inputs], [2])
+
+    def test_plain_controller_argument_still_works(self):
+        ctrl = _LiveRoutingController()
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        session = nxbtd.ClientSession(
+            conn=b, controller=ctrl, status_event=threading.Event()
+        )
+        session._handle_line(b'{"type":"input","buttons":9}')
+        self.assertEqual([i[0] for i in ctrl.inputs], [9])
+
+    def test_daemon_get_controller_reflects_current(self):
+        daemon = nxbtd.Daemon(socket_path="/tmp/unused-live.sock", mock=True)
+        self.assertIsNone(daemon._get_controller())
+        ctrl = _LiveRoutingController()
+        with daemon._session_lock:
+            daemon._controller = ctrl
+        self.assertIs(daemon._get_controller(), ctrl)
+
+
+# ---------------------------------------------------------------------------
 # Test: socket permissions (root daemon, non-root playgate-host client)
 # ---------------------------------------------------------------------------
 
