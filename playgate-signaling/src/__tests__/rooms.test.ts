@@ -78,6 +78,94 @@ describe("POST /rooms/:roomId/:peer", () => {
   });
 });
 
+describe("host offer starts a new signaling session", () => {
+  let env: ReturnType<typeof makeEnv>;
+  const post = (peer: string, payload: unknown, room = "fresh") =>
+    worker.fetch(
+      makeRequest("POST", `${BASE}/rooms/${room}/${peer}`, payload),
+      env,
+      {} as ExecutionContext,
+    );
+  const poll = (peer: string, since = -1, room = "fresh") =>
+    worker
+      .fetch(
+        makeRequest("GET", `${BASE}/rooms/${room}/${peer}?since=${since}`),
+        env,
+        {} as ExecutionContext,
+      )
+      .then((r) => r.json() as Promise<MessagesResponse>);
+
+  beforeEach(() => {
+    env = makeEnv();
+  });
+
+  it("clears prior host messages and preserves seq continuity", async () => {
+    await post("host", { type: "offer", sdp: "old-offer" }); // seq 0
+    await post("host", { candidate: "candidate:1 ..." }); // seq 1
+    const res = await post("host", { type: "offer", sdp: "new-offer" });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { seq: number };
+    expect(body.seq).toBe(2); // continuity: (last seq of old queue) + 1
+
+    // A fresh viewer (since=-1) sees ONLY the new offer.
+    const fresh = await poll("viewer");
+    expect(fresh.messages).toHaveLength(1);
+    expect(fresh.messages[0]!.seq).toBe(2);
+    expect(fresh.messages[0]!.payload).toEqual({ type: "offer", sdp: "new-offer" });
+
+    // A viewer that already saw seq 0..1 still sees the new offer.
+    const resumed = await poll("viewer", 1);
+    expect(resumed.messages).toHaveLength(1);
+    expect(resumed.messages[0]!.seq).toBe(2);
+  });
+
+  it("deletes the viewer queue (stale answers do not survive a new offer)", async () => {
+    await post("viewer", { type: "answer", sdp: "stale-answer" });
+    await post("host", { type: "offer", sdp: "new-offer" });
+
+    const kv = env.SIGNALING_KV as unknown as MockKVNamespace;
+    expect(kv.getRaw("room:fresh:viewer")).toBeUndefined();
+
+    // Host polling from -1 sees no stale answer.
+    const hostPoll = await poll("host");
+    expect(hostPoll.messages).toHaveLength(0);
+    expect(hostPoll.nextSince).toBe(-1);
+  });
+
+  it("viewer posts still append, even if typed as offer", async () => {
+    await post("viewer", { type: "answer", sdp: "a1" });
+    await post("viewer", { type: "offer", sdp: "viewer-offer" }); // not a host offer
+    const hostPoll = await poll("host");
+    expect(hostPoll.messages).toHaveLength(2);
+    expect(hostPoll.messages[1]!.seq).toBe(1);
+  });
+
+  it("host non-offer posts still append", async () => {
+    await post("host", { type: "offer", sdp: "o" });
+    await post("host", { candidate: "candidate:1 ..." });
+    await post("host", { candidate: "candidate:2 ..." });
+    const viewerPoll = await poll("viewer");
+    expect(viewerPoll.messages).toHaveLength(3);
+    expect(viewerPoll.nextSince).toBe(2);
+  });
+
+  it("malformed (non-object) host payload appends without crashing", async () => {
+    await post("host", { type: "offer", sdp: "o" });
+    // Valid JSON but not objects — must fall back to plain append.
+    for (const weird of ["just a string", 42, null, ["offer"]]) {
+      const res = await post("host", weird);
+      expect(res.status).toBe(201);
+    }
+    const viewerPoll = await poll("viewer");
+    expect(viewerPoll.messages).toHaveLength(5); // offer + 4 appended
+    // And the viewer queue survives non-offer posts.
+    await post("viewer", { type: "answer", sdp: "a" });
+    await post("host", { candidate: "c" });
+    const hostPoll = await poll("host");
+    expect(hostPoll.messages).toHaveLength(1);
+  });
+});
+
 describe("GET /rooms/:roomId/:peer", () => {
   let env: ReturnType<typeof makeEnv>;
 

@@ -60,8 +60,9 @@ type turnCredentialsResponse struct {
 	TTL        int         `json:"ttl"`
 }
 
-// message is one entry in the GET /rooms poll response.
-type message struct {
+// Message is one entry in the GET /rooms poll response: the Worker's envelope
+// (seq + ISO-8601 timestamp from the Worker's clock) around the raw payload.
+type Message struct {
 	Seq     int             `json:"seq"`
 	Ts      string          `json:"ts"`
 	Payload json.RawMessage `json:"payload"`
@@ -69,8 +70,15 @@ type message struct {
 
 // messagesResponse is the body of GET /rooms/{roomId}/{peer}.
 type messagesResponse struct {
-	Messages  []message `json:"messages"`
+	Messages  []Message `json:"messages"`
 	NextSince int       `json:"nextSince"`
+}
+
+// postResponse is the 201 body of POST /rooms/{roomId}/{peer}:
+// { "seq": <int>, "ts": "<iso>" }. Older workers may send nothing.
+type postResponse struct {
+	Seq int    `json:"seq"`
+	Ts  string `json:"ts"`
 }
 
 // Config configures a signaling Client.
@@ -148,45 +156,58 @@ func (c *Client) TURNCredentials(ctx context.Context) ([]ICEServer, error) {
 	return out.ICEServers, nil
 }
 
-// PostOffer pushes an SDP offer onto the host queue.
-func (c *Client) PostOffer(ctx context.Context, sdp SDPMessage) error {
-	return c.post(ctx, PeerHost, sdp)
+// PostOffer pushes an SDP offer onto the host queue and returns the
+// Worker-assigned timestamp (ISO 8601, from the Worker's clock). An empty or
+// unparseable response body (older Worker) yields a zero-value ts, not an
+// error — callers must treat ts=="" as "unknown" and skip ts comparisons.
+func (c *Client) PostOffer(ctx context.Context, sdp SDPMessage) (ts string, err error) {
+	r, err := c.post(ctx, PeerHost, sdp)
+	return r.Ts, err
 }
 
 // PostMessage pushes an arbitrary JSON payload onto the host queue (used for ICE
 // candidates and any future host→viewer signaling).
 func (c *Client) PostMessage(ctx context.Context, payload any) error {
-	return c.post(ctx, PeerHost, payload)
+	_, err := c.post(ctx, PeerHost, payload)
+	return err
 }
 
-// post marshals payload and pushes it onto the given peer's queue.
-func (c *Client) post(ctx context.Context, peer Peer, payload any) error {
+// post marshals payload and pushes it onto the given peer's queue, returning
+// the Worker's seq/ts assignment (zero values when the body is absent).
+func (c *Client) post(ctx context.Context, peer Peer, payload any) (postResponse, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("signaling: marshal payload: %w", err)
+		return postResponse{}, fmt.Errorf("signaling: marshal payload: %w", err)
 	}
 	url := fmt.Sprintf("%s/rooms/%s/%s", c.base, c.room, peer)
 	req, err := c.newRequest(ctx, http.MethodPost, url, body)
 	if err != nil {
-		return err
+		return postResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("signaling: post to %s: %w", peer, err)
+		return postResponse{}, fmt.Errorf("signaling: post to %s: %w", peer, err)
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("signaling: post to %s: unexpected status %d", peer, resp.StatusCode)
+		return postResponse{}, fmt.Errorf("signaling: post to %s: unexpected status %d", peer, resp.StatusCode)
 	}
-	return nil
+	// Best-effort decode of {"seq":..,"ts":..}; older workers may answer with an
+	// empty or different body, which is tolerated (zero values, no error).
+	var out postResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return postResponse{}, nil
+	}
+	return out, nil
 }
 
 // Poll fetches messages posted by the OTHER peer since the given sequence. The
 // host calls this with PeerHost (the Worker returns the viewer's messages). It
-// returns the raw payloads and the next "since" value to use.
-func (c *Client) Poll(ctx context.Context, self Peer, since int) ([]json.RawMessage, int, error) {
+// returns the messages (envelope incl. seq/ts plus raw payload) and the next
+// "since" value to use.
+func (c *Client) Poll(ctx context.Context, self Peer, since int) ([]Message, int, error) {
 	url := fmt.Sprintf("%s/rooms/%s/%s?since=%d", c.base, c.room, self, since)
 	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -204,11 +225,7 @@ func (c *Client) Poll(ctx context.Context, self Peer, since int) ([]json.RawMess
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, since, fmt.Errorf("signaling: decode poll response: %w", err)
 	}
-	payloads := make([]json.RawMessage, 0, len(out.Messages))
-	for _, m := range out.Messages {
-		payloads = append(payloads, m.Payload)
-	}
-	return payloads, out.NextSince, nil
+	return out.Messages, out.NextSince, nil
 }
 
 // newRequest builds a request with the optional bearer token attached.

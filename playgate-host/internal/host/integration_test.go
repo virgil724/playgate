@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/metrics"
 	"github.com/playgate/playgate-host/internal/rtc"
+	"github.com/playgate/playgate-host/internal/signaling"
 )
 
 // TestEndToEndLoopback wires the real synthetic capture source, a fake encoder,
@@ -190,6 +192,67 @@ func TestEndToEndLoopback(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// TestApplyViewerMessageSkipsStaleAnswer verifies the host ignores answers whose
+// Worker timestamp predates its own offer's (leftovers from a previous attempt
+// against a dead peer) and still applies a fresh one. With offerTs unknown ("",
+// older Worker) the answer is applied unconditionally.
+func TestApplyViewerMessageSkipsStaleAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		offerTs string
+	}{
+		{name: "stale-then-fresh", offerTs: "2026-06-12T00:00:10.000Z"},
+		{name: "no-offer-ts-applies-unconditionally", offerTs: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			peer, err := rtc.NewPeer(rtc.Config{Logger: discardLogger()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer peer.Close()
+
+			// Real browser-side answer so SetRemoteDescription succeeds.
+			browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer browser.Close()
+			offer, err := peer.CreateOffer(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := browser.SetRemoteDescription(offer); err != nil {
+				t.Fatal(err)
+			}
+			answer, err := browser.CreateAnswer(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := browser.SetLocalDescription(answer); err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(signaling.SDPMessage{Type: "answer", SDP: answer.SDP})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cm := &connManager{log: discardLogger()}
+			stale := signaling.Message{Seq: 0, Ts: "2026-06-12T00:00:05.000Z", Payload: payload}
+			fresh := signaling.Message{Seq: 1, Ts: "2026-06-12T00:00:15.000Z", Payload: payload}
+
+			if tc.offerTs != "" {
+				if cm.applyViewerMessage(peer, stale, tc.offerTs) {
+					t.Fatal("stale answer (ts < offerTs) was applied")
+				}
+			}
+			if !cm.applyViewerMessage(peer, fresh, tc.offerTs) {
+				t.Fatal("fresh answer was not applied")
+			}
+		})
 	}
 }
 

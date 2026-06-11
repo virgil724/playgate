@@ -10,19 +10,23 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeWorker is an in-memory stand-in for the signaling Worker that implements
 // the subset of its API the host uses: per-peer message queues plus TURN creds.
 type fakeWorker struct {
 	mu     sync.Mutex
-	queues map[string][]message // key: roomID/peer (the POSTER's peer)
+	queues map[string][]Message // key: roomID/peer (the POSTER's peer)
 	srv    *httptest.Server
 }
 
+// fakeTs mimics the Worker's ISO-8601 timestamps.
+func fakeTs() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
 func newFakeWorker(t *testing.T) *fakeWorker {
 	t.Helper()
-	w := &fakeWorker{queues: map[string][]message{}}
+	w := &fakeWorker{queues: map[string][]Message{}}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/turn/credentials", func(rw http.ResponseWriter, r *http.Request) {
@@ -54,10 +58,11 @@ func newFakeWorker(t *testing.T) *fakeWorker {
 			body, _ := io.ReadAll(r.Body)
 			w.mu.Lock()
 			seq := len(w.queues[key])
-			w.queues[key] = append(w.queues[key], message{Seq: seq, Payload: json.RawMessage(body)})
+			ts := fakeTs()
+			w.queues[key] = append(w.queues[key], Message{Seq: seq, Ts: ts, Payload: json.RawMessage(body)})
 			w.mu.Unlock()
 			rw.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(rw).Encode(map[string]any{"seq": seq})
+			_ = json.NewEncoder(rw).Encode(map[string]any{"seq": seq, "ts": ts})
 		case http.MethodGet:
 			// GET returns the OTHER peer's messages.
 			other := "viewer"
@@ -73,7 +78,7 @@ func newFakeWorker(t *testing.T) *fakeWorker {
 			}
 			w.mu.Lock()
 			all := w.queues[otherKey]
-			var out []message
+			var out []Message
 			next := since
 			for _, m := range all {
 				if m.Seq > since {
@@ -99,7 +104,7 @@ func (w *fakeWorker) postAsViewer(room string, payload any) {
 	key := room + "/viewer"
 	w.mu.Lock()
 	seq := len(w.queues[key])
-	w.queues[key] = append(w.queues[key], message{Seq: seq, Payload: json.RawMessage(body)})
+	w.queues[key] = append(w.queues[key], Message{Seq: seq, Ts: fakeTs(), Payload: json.RawMessage(body)})
 	w.mu.Unlock()
 }
 
@@ -135,22 +140,29 @@ func TestPostOfferAndPollAnswer(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := c.PostOffer(ctx, SDPMessage{Type: "offer", SDP: "v=0..."}); err != nil {
+	offerTs, err := c.PostOffer(ctx, SDPMessage{Type: "offer", SDP: "v=0..."})
+	if err != nil {
 		t.Fatalf("PostOffer: %v", err)
+	}
+	if offerTs == "" {
+		t.Error("PostOffer returned empty ts from a worker that sends one")
 	}
 
 	// Viewer posts an answer.
 	w.postAsViewer("room42", SDPMessage{Type: "answer", SDP: "v=0-answer"})
 
-	payloads, next, err := c.Poll(ctx, PeerHost, -1)
+	msgs, next, err := c.Poll(ctx, PeerHost, -1)
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if len(payloads) != 1 {
-		t.Fatalf("want 1 payload, got %d", len(payloads))
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	if msgs[0].Ts == "" {
+		t.Error("Poll dropped the message ts")
 	}
 	var sdp SDPMessage
-	if err := json.Unmarshal(payloads[0], &sdp); err != nil {
+	if err := json.Unmarshal(msgs[0].Payload, &sdp); err != nil {
 		t.Fatal(err)
 	}
 	if sdp.Type != "answer" || sdp.SDP != "v=0-answer" {
@@ -161,12 +173,33 @@ func TestPostOfferAndPollAnswer(t *testing.T) {
 	}
 
 	// Polling again from next yields nothing new.
-	payloads2, _, err := c.Poll(ctx, PeerHost, next)
+	msgs2, _, err := c.Poll(ctx, PeerHost, next)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(payloads2) != 0 {
-		t.Errorf("expected no new messages, got %d", len(payloads2))
+	if len(msgs2) != 0 {
+		t.Errorf("expected no new messages, got %d", len(msgs2))
+	}
+}
+
+// TestPostOfferToleratesEmptyBody ensures an older Worker that answers 201 with
+// no body yields zero values, not an error.
+func TestPostOfferToleratesEmptyBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusCreated) // no body
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{BaseURL: srv.URL, RoomID: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, err := c.PostOffer(context.Background(), SDPMessage{Type: "offer", SDP: "v=0"})
+	if err != nil {
+		t.Fatalf("PostOffer with empty body: %v", err)
+	}
+	if ts != "" {
+		t.Errorf("ts = %q, want empty", ts)
 	}
 }
 

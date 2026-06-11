@@ -31,9 +31,24 @@ function otherPeer(peer: string): string {
 }
 
 /**
+ * True when the payload is a JSON object with type === "offer".
+ * Defensive: a malformed / non-object payload must never crash handlePost and
+ * falls back to the plain append path.
+ */
+function isOfferPayload(payload: unknown): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as { type?: unknown }).type === "offer"
+  );
+}
+
+/**
  * POST /rooms/:roomId/:peer
  * Body: any JSON object (SDP offer/answer or ICE candidate)
- * Appends the message to the sending peer's KV queue.
+ * Appends the message to the sending peer's KV queue. A host SDP offer instead
+ * starts a fresh signaling session: it replaces the host queue (seq-continuous)
+ * and deletes the viewer queue — see inline comments below.
  */
 export async function handlePost(
   request: Request,
@@ -69,7 +84,22 @@ export async function handlePost(
     ts: new Date().toISOString(),
     payload,
   };
-  queue.messages.push(msg);
+
+  if (peer === "host" && isOfferPayload(payload)) {
+    // A host offer starts a NEW signaling session: every previously queued
+    // host message belongs to a dead peer (stale ICE ufrag/pwd + DTLS
+    // fingerprint), so keep only the new offer. Seq continuity is preserved
+    // (msg.seq above is last-old-seq + 1): a browser that was already polling
+    // holds a large `since`, and if seq restarted at 0 the `seq > since`
+    // filter in handleGet would hide the new offer from it forever.
+    queue.messages = [msg];
+    // Stale viewer answers must not survive a new offer either — they answer
+    // a dead peer. Delete the viewer queue entirely; the host always starts
+    // polling from since=-1 per connection, so its seq restarting at 0 is fine.
+    await env.SIGNALING_KV.delete(kvKey(roomId, otherPeer(peer)));
+  } else {
+    queue.messages.push(msg);
+  }
 
   await env.SIGNALING_KV.put(key, JSON.stringify(queue), {
     expirationTtl: MESSAGE_TTL_SECONDS,

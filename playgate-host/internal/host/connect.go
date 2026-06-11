@@ -142,12 +142,13 @@ func (c *connManager) serveOne(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c.client.PostOffer(ctx, signaling.SDPMessage{Type: offer.Type.String(), SDP: offer.SDP}); err != nil {
+	offerTs, err := c.client.PostOffer(ctx, signaling.SDPMessage{Type: offer.Type.String(), SDP: offer.SDP})
+	if err != nil {
 		return err
 	}
-	c.log.Info("offer posted; waiting for viewer answer")
+	c.log.Info("offer posted; waiting for viewer answer", "offer_ts", offerTs)
 
-	if err := c.pollForAnswer(connCtx, peer); err != nil {
+	if err := c.pollForAnswer(connCtx, peer, offerTs); err != nil {
 		return err
 	}
 
@@ -201,7 +202,10 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 
 // pollForAnswer polls the Worker for the viewer's answer and ICE candidates and
 // applies them, returning once the answer has been set or ctx is cancelled.
-func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer) error {
+// offerTs is the Worker-assigned timestamp of our own offer; answers older than
+// it are stale leftovers from previous attempts and are skipped ("" = unknown,
+// apply unconditionally).
+func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer, offerTs string) error {
 	since := -1
 	gotAnswer := false
 	ticker := time.NewTicker(c.poll)
@@ -216,14 +220,14 @@ func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			payloads, next, err := c.client.Poll(ctx, signaling.PeerHost, since)
+			msgs, next, err := c.client.Poll(ctx, signaling.PeerHost, since)
 			if err != nil {
 				c.log.Debug("poll failed", "err", err)
 				continue
 			}
 			since = next
-			for _, p := range payloads {
-				if c.applyViewerMessage(peer, p) {
+			for _, m := range msgs {
+				if c.applyViewerMessage(peer, m, offerTs) {
 					gotAnswer = true
 				}
 			}
@@ -238,11 +242,20 @@ func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer) error {
 	}
 }
 
-// applyViewerMessage interprets one polled payload as either an SDP answer or an
+// applyViewerMessage interprets one polled message as either an SDP answer or an
 // ICE candidate and applies it. It returns true if an answer was applied.
-func (c *connManager) applyViewerMessage(peer *rtc.Peer, payload json.RawMessage) bool {
+// Answers timestamped before offerTs are stale (they answer a previous, dead
+// peer's offer) and are skipped; both timestamps were assigned by the Worker's
+// clock, so a lexicographic ISO-8601 comparison is safe — no host/Worker clock
+// skew is involved. offerTs=="" (older Worker that returned no ts) disables the
+// check for backward compatibility.
+func (c *connManager) applyViewerMessage(peer *rtc.Peer, msg signaling.Message, offerTs string) bool {
 	var sdp signaling.SDPMessage
-	if err := json.Unmarshal(payload, &sdp); err == nil && sdp.Type == "answer" && sdp.SDP != "" {
+	if err := json.Unmarshal(msg.Payload, &sdp); err == nil && sdp.Type == "answer" && sdp.SDP != "" {
+		if offerTs != "" && msg.Ts != "" && msg.Ts < offerTs {
+			c.log.Info("ignoring stale viewer answer", "answer_ts", msg.Ts, "offer_ts", offerTs)
+			return false
+		}
 		if err := peer.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeAnswer,
 			SDP:  sdp.SDP,
