@@ -576,8 +576,12 @@ func TestIntegration_SessionExpiry(t *testing.T) {
 	}
 
 	agCtx, agCancel := context.WithCancel(context.Background())
-	defer agCancel()
-	go func() { _ = ag.Run(agCtx) }()
+	agDone := make(chan struct{})
+	go func() { defer close(agDone); _ = ag.Run(agCtx) }()
+	// Join the agent before the test returns: its slog output goes through
+	// testWriter to t.Log, which races with the framework once the test is
+	// marked done.
+	defer func() { agCancel(); <-agDone }()
 
 	// Claim a 1-second session — it will expire naturally.
 	tok := mintSessionToken(t, priv, "room-pc", "viewer-1", 1)
