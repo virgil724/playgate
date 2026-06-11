@@ -26,9 +26,12 @@ In mock mode (nuxbt unavailable):
 import argparse
 import json
 import logging
+import multiprocessing
+import multiprocessing.util
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -79,6 +82,21 @@ BUTTON_MAP: list[tuple[int, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Logging setup
+#
+# Must happen before the nuxbt import below: logging a warning first would
+# implicitly configure the root logger at WARNING level and turn this
+# basicConfig into a no-op, silently dropping every INFO log in mock mode.
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger("nxbtd")
+
+# ---------------------------------------------------------------------------
 # nuxbt import — fall back to mock mode gracefully
 # ---------------------------------------------------------------------------
 
@@ -90,21 +108,54 @@ try:
 except ImportError:
     _nuxbt_available = False
     MOCK_MODE = True
-    logging.warning(
+    log.warning(
         "nuxbt module not found — running in mock mode. "
         "Inputs will be logged but not forwarded to a real Switch."
     )
 
 # ---------------------------------------------------------------------------
-# Logging setup
+# BlueZ plugin gate (real mode only)
+#
+# Emulating a controller requires bluetoothd to run with --compat --noplugin=*
+# (otherwise BlueZ's input plugin owns the HID L2CAP ports and pairing fails).
+# nuxbt manages this via a systemd override at
+# /run/systemd/system/bluetooth.service.d/nuxbt.conf — /run is tmpfs, so the
+# override evaporates on every reboot and the daemon must self-heal at start.
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
+# Detail string broadcast when the plugin is disabled and we cannot fix it.
+PLUGIN_DISABLED_HINT = (
+    "NUXBT BlueZ plugin not enabled — run 'sudo nuxbt toggle' "
+    "(or run nxbtd as root) and the daemon will retry"
 )
-log = logging.getLogger("nxbtd")
+
+# How long to wait for bluetoothd to come back after `systemctl restart`.
+BLUETOOTH_RESTART_WAIT = 2.0
+
+# Controller supervision retry back-off (seconds).
+RETRY_BACKOFF_INITIAL = 2.0
+RETRY_BACKOFF_MAX = 60.0
+
+
+class BluezPluginDisabledError(Exception):
+    """The NUXBT BlueZ plugin override is missing and we lack root to fix it."""
+
+
+def _import_bluez():
+    """Lazily import nuxbt.bluez.
+
+    Only ever called in real (non-mock) mode: nuxbt.bluez pulls in dbus and
+    must never be imported in mock mode or CI. Module-level indirection so
+    tests can inject a fake.
+    """
+    import nuxbt.bluez  # type: ignore
+    return nuxbt.bluez
+
+
+def _geteuid() -> int:
+    """os.geteuid indirection so tests can fake the root / non-root paths."""
+    return os.geteuid()
+
 
 # ---------------------------------------------------------------------------
 # Protocol helpers
@@ -192,6 +243,11 @@ class MockController:
         pass
 
 
+# Auto-pairing sequence timings (seconds). Module-level so tests can zero them.
+PAIR_PRESS_SECONDS = 0.2
+PAIR_RELEASE_SECONDS = 0.5
+
+
 class NxbtController:
     """Wraps the real nuxbt library."""
 
@@ -199,12 +255,88 @@ class NxbtController:
         self._nx = nuxbt.Nuxbt()
         self._index: Optional[int] = None
 
-    def connect(self) -> None:
-        """Create a Pro Controller and wait for the Switch to pair."""
-        self._index = self._nx.create_controller(nuxbt.PRO_CONTROLLER)
+    def _find_reconnect_targets(self) -> Optional[list]:
+        """Return MACs of previously-paired Switches, or None for fresh pair.
+
+        Mirrors the nuxbt TUI: reconnect targets come from BlueZ devices
+        aliased "Nintendo Switch". Any lookup failure falls back to fresh
+        pairing rather than aborting the connect attempt.
+        """
+        try:
+            bluez = _import_bluez()
+            addresses = bluez.find_devices_by_alias("Nintendo Switch")
+        except Exception as exc:
+            log.warning("could not query previously-paired Switches: %s", exc)
+            return None
+        return list(addresses) if addresses else None
+
+    def connect(self, shutdown_event: threading.Event) -> None:
+        """Create a Pro Controller and wait for the Switch to pair.
+
+        Reconnects to a previously-paired Switch when one is known (the
+        Switch can be anywhere, e.g. in a game); only does a fresh pair —
+        which requires the Change Grip/Order menu — when none is known.
+        """
+        reconnect = self._find_reconnect_targets()
+        if reconnect:
+            log.info("previously-paired Switch(es) found: %s — reconnecting", reconnect)
+            self._index = self._nx.create_controller(
+                nuxbt.PRO_CONTROLLER, reconnect_address=reconnect
+            )
+        else:
+            log.info("no previously-paired Switch — fresh pairing "
+                     "(Switch must be on the Change Grip/Order menu)")
+            self._index = self._nx.create_controller(nuxbt.PRO_CONTROLLER)
         log.info("nuxbt controller index=%d, waiting for Switch…", self._index)
-        self._nx.wait_for_connection(self._index)
-        log.info("Switch paired to controller index=%d", self._index)
+
+        while not shutdown_event.is_set():
+            state = self._nx.state[self._index]["state"]
+            if state == "connected":
+                break
+            if state == "crashed":
+                raise OSError(f"The controller has crashed with error: {self._nx.state[self._index].get('errors')}")
+            time.sleep(0.1)
+
+        if shutdown_event.is_set():
+            log.info("Connect cancelled by shutdown event.")
+            return
+
+        if reconnect:
+            # The Switch is NOT on the Grip/Order menu — pressing buttons
+            # here would press them in whatever is currently running.
+            log.info("Switch reconnected to controller index=%d — "
+                     "skipping auto-pairing sequence", self._index)
+            return
+
+        log.info("Switch paired to controller index=%d, sending auto-pairing sequence...", self._index)
+
+        # 1. Send L+R to register the controller
+        pkt = self._nx.create_input_packet()
+        pkt["L"] = True
+        pkt["R"] = True
+        self._nx.set_controller_input(self._index, pkt)
+        if shutdown_event.wait(timeout=PAIR_PRESS_SECONDS):
+            return
+
+        # 2. Release L+R
+        pkt = self._nx.create_input_packet()
+        self._nx.set_controller_input(self._index, pkt)
+        if shutdown_event.wait(timeout=PAIR_RELEASE_SECONDS):
+            return
+
+        # 3. Send A to confirm and exit pairing screen
+        pkt = self._nx.create_input_packet()
+        pkt["A"] = True
+        self._nx.set_controller_input(self._index, pkt)
+        if shutdown_event.wait(timeout=PAIR_PRESS_SECONDS):
+            return
+
+        # 4. Release A
+        pkt = self._nx.create_input_packet()
+        self._nx.set_controller_input(self._index, pkt)
+        if shutdown_event.wait(timeout=PAIR_PRESS_SECONDS):
+            return
+        log.info("Auto-pairing sequence complete for controller index=%d", self._index)
 
     def apply_input(
         self,
@@ -230,6 +362,35 @@ class NxbtController:
             except Exception:
                 pass
             self._index = None
+        nx = getattr(self, "_nx", None)
+        if nx is None:
+            return
+        # Terminate the controller manager process FIRST and gracefully.
+        # Its own SIGTERM handler raises SystemExit, and its finally-block
+        # (cm.shutdown()) terminates the controller session processes and
+        # shuts down its inner Manager — grandchildren this process cannot
+        # reach directly. A generous join: if it is killed before finishing,
+        # those grandchildren leak (they are not our children to reap).
+        controllers = getattr(nx, "controllers", None)
+        if controllers is not None and controllers.is_alive():
+            try:
+                controllers.terminate()
+                controllers.join(timeout=3.0)
+            except Exception:
+                pass
+        # Terminate the BlueZ agent process (daemon=True, no children).
+        agent = getattr(nx, "agent_process", None)
+        if agent is not None and agent.is_alive():
+            try:
+                agent.terminate()
+                agent.join(timeout=1.0)
+            except Exception:
+                pass
+        # Shut down the top-level manager process.
+        try:
+            nx.manager.shutdown()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -312,12 +473,18 @@ class ClientSession:
 
 
 class Daemon:
-    def __init__(self, socket_path: str, mock: bool) -> None:
+    def __init__(self, socket_path: str, mock: bool, skip_bluez_check: bool = False) -> None:
         self._socket_path = socket_path
         self._mock = mock or MOCK_MODE
+        self._skip_bluez_check = skip_bluez_check
         self._shutdown = threading.Event()
         self._current_session: Optional[ClientSession] = None
         self._session_lock = threading.Lock()
+        self._controller = None
+        # Last broadcast status, replayed to clients that connect later so
+        # they always learn the current controller state (e.g. they must be
+        # able to observe "disconnected" even if the failure predates them).
+        self._last_status: tuple[str, str] = ("connecting", "starting")
 
     # ------------------------------------------------------------------
     # Controller lifecycle with exponential back-off reconnect
@@ -328,20 +495,59 @@ class Daemon:
             return MockController()
         return NxbtController()
 
+    def _ensure_bluez_plugin(self) -> None:
+        """Gate each real-mode connect attempt on the NUXBT BlueZ plugin.
+
+        The /run systemd override evaporates on reboot, so a daemon started
+        at boot (systemd/docker, running as root) must self-heal: write the
+        override and bounce bluetoothd. Without root we can only report the
+        problem and retry — once the user runs 'sudo nuxbt toggle' the next
+        retry proceeds, no daemon restart needed.
+
+        Raises BluezPluginDisabledError (non-root) or CalledProcessError
+        (systemctl failure); both surface as "disconnected" + backoff retry.
+        """
+        bluez = _import_bluez()
+        if bluez.is_nuxbt_plugin_enabled():
+            return
+        if _geteuid() != 0:
+            raise BluezPluginDisabledError(PLUGIN_DISABLED_HINT)
+        log.info("NUXBT BlueZ plugin not enabled — enabling it (running as root)")
+        bluez.toggle_clean_bluez(True)
+        # toggle_clean_bluez only writes the override file; the caller must
+        # reload systemd and restart bluetoothd for it to take effect.
+        for cmd in (["systemctl", "daemon-reload"],
+                    ["systemctl", "restart", "bluetooth"]):
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            log.info("ran %s (stdout=%r, stderr=%r)",
+                     " ".join(cmd), result.stdout.strip(), result.stderr.strip())
+        # Give bluetoothd a moment to come back up (cancellable).
+        self._shutdown.wait(timeout=BLUETOOTH_RESTART_WAIT)
+        log.info("NUXBT BlueZ plugin enabled, bluetoothd restarted")
+
     def _run_controller(self) -> None:
         """
         Manages the NXBT controller lifecycle in a dedicated thread.
         Retries with exponential back-off on failure.
         """
-        backoff = 2.0
+        backoff = RETRY_BACKOFF_INITIAL
         while not self._shutdown.is_set():
-            ctrl = self._make_controller()
+            ctrl = None
             self._broadcast_status("connecting", "creating controller")
             try:
+                if not self._mock and not self._skip_bluez_check:
+                    self._ensure_bluez_plugin()
+                # Controller construction must stay inside the try: with real
+                # nuxbt and no usable Bluetooth stack, Nuxbt() itself raises,
+                # and that must surface as a "disconnected" status + retry,
+                # never as an unhandled exception killing this thread.
+                ctrl = self._make_controller()
                 if not self._mock:
-                    ctrl.connect()
+                    ctrl.connect(self._shutdown)
+                with self._session_lock:
+                    self._controller = ctrl
                 self._broadcast_status("connected", "Switch paired" if not self._mock else "mock mode")
-                backoff = 2.0  # reset on success
+                backoff = RETRY_BACKOFF_INITIAL  # reset on success
                 # Keep the controller alive until shutdown or error.
                 while not self._shutdown.is_set():
                     time.sleep(1)
@@ -349,15 +555,18 @@ class Daemon:
             except Exception as exc:
                 log.error("controller error: %s — retrying in %.0fs", exc, backoff)
                 self._broadcast_status("disconnected", str(exc))
-                ctrl.close()
                 if self._shutdown.wait(timeout=backoff):
                     break
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, RETRY_BACKOFF_MAX)
             finally:
-                ctrl.close()
+                with self._session_lock:
+                    self._controller = None
+                if ctrl is not None:
+                    ctrl.close()
 
     def _broadcast_status(self, state: str, detail: str = "") -> None:
         with self._session_lock:
+            self._last_status = (state, detail)
             session = self._current_session
         if session is not None:
             session.send_status(state, detail)
@@ -401,16 +610,18 @@ class Daemon:
                     except OSError:
                         pass
 
-                # Build a mock controller for the session in mock mode so that
-                # apply_input calls are routed through it.  In real mode we
-                # want to share the single NxbtController, but _run_controller
-                # holds it privately; for now pass a fresh MockController so the
-                # session can forward inputs without blocking.
-                # TODO(T16): wire real controller reference into session.
-                session_ctrl = MockController() if self._mock else MockController()
+                # Get the active controller reference (either real NxbtController or MockController)
+                with self._session_lock:
+                    session_ctrl = self._controller if self._controller is not None else MockController()
                 session = ClientSession(conn, session_ctrl, self._shutdown)
                 with self._session_lock:
                     self._current_session = session
+                    last_state, last_detail = self._last_status
+
+                # Replay the current controller state so a client connecting
+                # after a status change (e.g. an earlier Bluetooth failure)
+                # still learns it immediately.
+                session.send_status(last_state, last_detail)
 
                 t = threading.Thread(target=session.run, daemon=True, name="session")
                 t.start()
@@ -422,6 +633,9 @@ class Daemon:
                 pass
             self._shutdown.set()
             ctrl_thread.join(timeout=5)
+            # Mop up any multiprocessing children the controller thread's
+            # close() did not reap (e.g. it was wedged past the join above).
+            _cleanup_children()
             log.info("daemon stopped")
 
     def stop(self) -> None:
@@ -432,8 +646,72 @@ class Daemon:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# Grace period for the whole shutdown path (controller close, child joins,
+# nuxbt atexit cleanup) before the watchdog force-exits the process.
+SHUTDOWN_GRACE_SECONDS = 10.0
 
-def main() -> None:
+
+def _child_signals_after_fork(_obj=None) -> None:
+    """Set safe SIGINT/SIGTERM dispositions in forked children.
+
+    nuxbt spawns several multiprocessing children (controller manager, BlueZ
+    agent, manager processes). They fork after main() installed our handlers,
+    so without this hook every child inherits a handler that merely sets the
+    parent daemon's shutdown event — i.e. the children silently swallow the
+    SIGTERM that multiprocessing's terminate()/atexit cleanup relies on, and
+    the daemon hangs forever on exit.
+
+    SIGINT → SIG_IGN: a terminal Ctrl-C delivers SIGINT to the whole process
+    group. Children must NOT react to it — the parent orchestrates shutdown.
+    (With SIG_DFL, the group SIGINT killed nuxbt's controller-manager process
+    instantly, before its graceful cleanup could run, orphaning its own
+    children: the controller session processes and its inner Manager process,
+    which itself ignores SIGINT per bpo-36368 and therefore lingered forever.)
+
+    SIGTERM → SIG_DFL: Process.terminate() and multiprocessing's atexit
+    cleanup must actually kill children. This hook runs in Process._bootstrap
+    BEFORE the child's target function, so a child that installs its own
+    SIGTERM handler (nuxbt's _command_manager: SIGTERM → sys.exit(0), whose
+    finally-block reaps its grandchildren) still wins.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def _cleanup_children(children=None, grace: float = 2.0) -> None:
+    """Terminate any still-alive direct multiprocessing children.
+
+    terminate (SIGTERM) → join with a shared deadline → kill (SIGKILL)
+    stragglers. Normally a no-op: NxbtController.close() already shut
+    everything down gracefully. `children` is injectable for tests; defaults
+    to multiprocessing.active_children().
+    """
+    if children is None:
+        children = multiprocessing.active_children()
+    children = [child for child in children if child.is_alive()]
+    if not children:
+        return
+    log.warning("cleaning up %d leftover child process(es): %s",
+                len(children), [child.name for child in children])
+    for child in children:
+        try:
+            child.terminate()
+        except Exception:
+            pass
+    deadline = time.monotonic() + grace
+    for child in children:
+        child.join(timeout=max(0.0, deadline - time.monotonic()))
+    for child in children:
+        if child.is_alive():
+            log.warning("child %s ignored SIGTERM — killing", child.name)
+            try:
+                child.kill()
+                child.join(timeout=1.0)
+            except Exception:
+                pass
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="PlayGate NXBT daemon")
     parser.add_argument(
         "--socket",
@@ -446,23 +724,54 @@ def main() -> None:
         help="Force mock mode (no Bluetooth, log inputs to stdout)",
     )
     parser.add_argument(
+        "--skip-bluez-check",
+        action="store_true",
+        help="Skip the NUXBT BlueZ plugin gate before each connect attempt "
+             "(for testing, or setups where the systemd override cannot be "
+             "installed)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = _build_arg_parser().parse_args()
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    daemon = Daemon(socket_path=args.socket, mock=args.mock)
+    daemon = Daemon(
+        socket_path=args.socket,
+        mock=args.mock,
+        skip_bluez_check=args.skip_bluez_check,
+    )
+
+    watchdog_armed = threading.Event()
 
     def _handle_signal(signum, frame):
         log.info("received signal %d, shutting down…", signum)
         daemon.stop()
+        # Belt and braces: arm a last-resort watchdog on the FIRST signal so
+        # it covers the entire shutdown path (child joins, atexit cleanup).
+        # The normal path exits well before this fires.
+        if not watchdog_armed.is_set():
+            watchdog_armed.set()
+            watchdog = threading.Timer(SHUTDOWN_GRACE_SECONDS, os._exit, args=(0,))
+            watchdog.daemon = True
+            watchdog.start()
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+
+    # Ensure forked children (nuxbt's multiprocessing workers) do not inherit
+    # the handlers above — see _child_signals_after_fork.
+    multiprocessing.util.register_after_fork(
+        _child_signals_after_fork, _child_signals_after_fork
+    )
 
     daemon.run()
 

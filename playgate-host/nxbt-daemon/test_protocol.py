@@ -454,6 +454,549 @@ class TestButtonMapStructure(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: Daemon controller-thread failure handling (real-mode robustness)
+# ---------------------------------------------------------------------------
+
+class _RecordingSession:
+    """Stands in for ClientSession; records send_status calls."""
+
+    def __init__(self, on_status=None):
+        self.statuses = []
+        self._on_status = on_status
+
+    def send_status(self, state, detail=""):
+        self.statuses.append((state, detail))
+        if self._on_status is not None:
+            self._on_status(state, detail)
+
+
+class TestDaemonControllerFailure(unittest.TestCase):
+    """The controller thread must never die with an unhandled exception.
+
+    Regression test: with real nuxbt and no usable Bluetooth stack,
+    Nuxbt() itself raises inside _make_controller(). That must surface as
+    a "disconnected" status and a retry — not kill the thread.
+    """
+
+    def test_make_controller_failure_reports_disconnected(self):
+        daemon = nxbtd.Daemon(socket_path="/tmp/unused-test.sock", mock=False)
+
+        # Stop the daemon as soon as the failure has been reported so the
+        # retry loop exits instead of sleeping through its backoff.
+        session = _RecordingSession(
+            on_status=lambda state, detail: daemon.stop() if state == "disconnected" else None
+        )
+        daemon._current_session = session
+
+        def boom():
+            raise RuntimeError("no bluetooth adapter")
+        daemon._make_controller = boom
+
+        # Must not raise, and must finish promptly once stop() is called.
+        t = threading.Thread(target=daemon._run_controller)
+        t.start()
+        t.join(timeout=10)
+        self.assertFalse(t.is_alive(), "_run_controller must exit after stop()")
+
+        self.assertIn(("connecting", "creating controller"), session.statuses)
+        self.assertIn(("disconnected", "no bluetooth adapter"), session.statuses)
+
+    def test_last_status_tracks_broadcasts(self):
+        """_broadcast_status must record the state for replay to late clients."""
+        daemon = nxbtd.Daemon(socket_path="/tmp/unused-test.sock", mock=False)
+        self.assertEqual(daemon._last_status, ("connecting", "starting"))
+        daemon._broadcast_status("disconnected", "boom")
+        self.assertEqual(daemon._last_status, ("disconnected", "boom"))
+
+
+# ---------------------------------------------------------------------------
+# Test: forked children must not inherit the daemon's signal handlers
+# ---------------------------------------------------------------------------
+
+class TestChildSignalsAfterFork(unittest.TestCase):
+    """Regression tests for the real-mode shutdown hang.
+
+    Children must IGNORE SIGINT: a terminal Ctrl-C hits the whole process
+    group, and with SIG_DFL it killed nuxbt's controller-manager process
+    instantly — before its graceful cleanup could reap its own children
+    (controller sessions + an inner Manager process that itself ignores
+    SIGINT per bpo-36368), leaving orphans on init.
+
+    Children must take the DEFAULT action on SIGTERM so Process.terminate()
+    and multiprocessing's atexit cleanup actually kill them (the inherited
+    parent handler merely set the parent's shutdown event)."""
+
+    def test_child_dispositions(self):
+        import signal as _signal
+
+        old_int = _signal.getsignal(_signal.SIGINT)
+        old_term = _signal.getsignal(_signal.SIGTERM)
+        try:
+            dummy = lambda signum, frame: None
+            _signal.signal(_signal.SIGINT, dummy)
+            _signal.signal(_signal.SIGTERM, dummy)
+
+            nxbtd._child_signals_after_fork()
+
+            self.assertEqual(_signal.getsignal(_signal.SIGINT), _signal.SIG_IGN)
+            self.assertEqual(_signal.getsignal(_signal.SIGTERM), _signal.SIG_DFL)
+        finally:
+            _signal.signal(_signal.SIGINT, old_int)
+            _signal.signal(_signal.SIGTERM, old_term)
+
+
+# ---------------------------------------------------------------------------
+# Test: _cleanup_children (terminate → join → kill escalation)
+# ---------------------------------------------------------------------------
+
+class _FakeChild:
+    """Stands in for a multiprocessing.Process child."""
+
+    def __init__(self, name, dies_on_terminate=True):
+        self.name = name
+        self._alive = True
+        self._dies_on_terminate = dies_on_terminate
+        self.calls = []
+
+    def is_alive(self):
+        return self._alive
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if self._dies_on_terminate:
+            self._alive = False
+
+    def join(self, timeout=None):
+        self.calls.append("join")
+
+    def kill(self):
+        self.calls.append("kill")
+        self._alive = False
+
+
+class TestCleanupChildren(unittest.TestCase):
+
+    def test_terminates_then_joins(self):
+        child = _FakeChild("controllers")
+        nxbtd._cleanup_children(children=[child], grace=0.1)
+        self.assertEqual(child.calls[:2], ["terminate", "join"])
+        self.assertNotIn("kill", child.calls, "no SIGKILL when SIGTERM worked")
+
+    def test_escalates_to_kill_when_terminate_ignored(self):
+        child = _FakeChild("stubborn", dies_on_terminate=False)
+        nxbtd._cleanup_children(children=[child], grace=0.1)
+        self.assertEqual(child.calls, ["terminate", "join", "kill", "join"])
+        self.assertFalse(child.is_alive())
+
+    def test_skips_already_dead_children(self):
+        child = _FakeChild("dead")
+        child._alive = False
+        nxbtd._cleanup_children(children=[child], grace=0.1)
+        self.assertEqual(child.calls, [])
+
+    def test_default_uses_active_children(self):
+        """Without an explicit list it must consult active_children() —
+        an empty process pool means a clean no-op."""
+        nxbtd._cleanup_children(grace=0.1)  # must not raise
+
+    def test_real_child_is_reaped(self):
+        """End-to-end: a live multiprocessing child is terminated."""
+        import multiprocessing as mp
+        proc = mp.Process(target=_sleep_forever)
+        proc.start()
+        try:
+            self.assertTrue(proc.is_alive())
+            nxbtd._cleanup_children(grace=5.0)
+            self.assertFalse(proc.is_alive(), "child must be reaped")
+        finally:
+            if proc.is_alive():
+                proc.kill()
+            proc.join(timeout=5.0)
+
+
+def _sleep_forever():
+    import time as _time
+    _time.sleep(300)
+
+
+# ---------------------------------------------------------------------------
+# Test: BlueZ plugin gate (real mode; nuxbt.bluez is faked — never imported)
+# ---------------------------------------------------------------------------
+
+class _FakeBluez:
+    """Stands in for the lazily imported nuxbt.bluez module."""
+
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+        self.enabled_checks = 0
+        self.toggle_calls = []
+
+    def is_nuxbt_plugin_enabled(self):
+        self.enabled_checks += 1
+        return self.enabled
+
+    def toggle_clean_bluez(self, toggle):
+        self.toggle_calls.append(toggle)
+        self.enabled = bool(toggle)
+
+
+class _FakeCompletedProcess:
+    stdout = ""
+    stderr = ""
+
+
+class _GateHarness(unittest.TestCase):
+    """Shared monkeypatching for the plugin-gate tests."""
+
+    def setUp(self):
+        self._saved = {
+            "_import_bluez": nxbtd._import_bluez,
+            "_geteuid": nxbtd._geteuid,
+            "RETRY_BACKOFF_INITIAL": nxbtd.RETRY_BACKOFF_INITIAL,
+            "BLUETOOTH_RESTART_WAIT": nxbtd.BLUETOOTH_RESTART_WAIT,
+            "subprocess_run": nxbtd.subprocess.run,
+        }
+        # Keep retries fast in tests.
+        nxbtd.RETRY_BACKOFF_INITIAL = 0.01
+        nxbtd.BLUETOOTH_RESTART_WAIT = 0.01
+
+    def tearDown(self):
+        nxbtd._import_bluez = self._saved["_import_bluez"]
+        nxbtd._geteuid = self._saved["_geteuid"]
+        nxbtd.RETRY_BACKOFF_INITIAL = self._saved["RETRY_BACKOFF_INITIAL"]
+        nxbtd.BLUETOOTH_RESTART_WAIT = self._saved["BLUETOOTH_RESTART_WAIT"]
+        nxbtd.subprocess.run = self._saved["subprocess_run"]
+
+    def _make_daemon(self, skip_bluez_check=False):
+        daemon = nxbtd.Daemon(
+            socket_path="/tmp/unused-test.sock",
+            mock=False,
+            skip_bluez_check=skip_bluez_check,
+        )
+        # In CI nxbtd.MOCK_MODE is True (nuxbt absent), which forces _mock on
+        # and would bypass the gate. These tests exercise the REAL-mode
+        # supervision path with every nuxbt touchpoint faked out.
+        daemon._mock = False
+        return daemon
+
+    def _run_controller_thread(self, daemon, timeout=10):
+        t = threading.Thread(target=daemon._run_controller)
+        t.start()
+        t.join(timeout=timeout)
+        finished_in_time = not t.is_alive()
+        if not finished_in_time:
+            daemon.stop()  # don't leak a busy thread into other tests
+            t.join(timeout=5)
+        self.assertTrue(finished_in_time, "_run_controller must exit after stop()")
+
+
+class TestBluezPluginGateNonRoot(_GateHarness):
+
+    def test_disabled_nonroot_reports_hint_and_retries(self):
+        """Plugin disabled + non-root → 'disconnected' with the hint, the
+        daemon keeps retrying (no exception, no dead thread)."""
+        daemon = self._make_daemon()
+        fake_bluez = _FakeBluez(enabled=False)
+        nxbtd._import_bluez = lambda: fake_bluez
+        nxbtd._geteuid = lambda: 1000
+
+        constructed = []
+        daemon._make_controller = lambda: constructed.append(1)
+
+        disconnects = []
+
+        def on_status(state, detail):
+            if state == "disconnected":
+                disconnects.append(detail)
+                if len(disconnects) >= 2:  # observed a retry
+                    daemon.stop()
+
+        daemon._current_session = _RecordingSession(on_status=on_status)
+        self._run_controller_thread(daemon)
+
+        self.assertGreaterEqual(len(disconnects), 2, "gate must retry")
+        for detail in disconnects:
+            self.assertEqual(detail, nxbtd.PLUGIN_DISABLED_HINT)
+        self.assertGreaterEqual(fake_bluez.enabled_checks, 2)
+        self.assertEqual(fake_bluez.toggle_calls, [], "non-root must not toggle")
+        self.assertEqual(constructed, [], "controller must not be constructed")
+
+    def test_recovers_when_plugin_enabled_externally(self):
+        """Once the user runs 'sudo nuxbt toggle', the next retry proceeds —
+        no daemon restart needed."""
+        daemon = self._make_daemon()
+        fake_bluez = _FakeBluez(enabled=False)
+        nxbtd._import_bluez = lambda: fake_bluez
+        nxbtd._geteuid = lambda: 1000
+
+        class _StubCtrl:
+            def connect(self, shutdown_event):
+                pass
+
+            def close(self):
+                pass
+
+        daemon._make_controller = _StubCtrl
+
+        statuses = []
+
+        def on_status(state, detail):
+            statuses.append((state, detail))
+            if state == "disconnected":
+                fake_bluez.enabled = True  # user fixes it externally
+            elif state == "connected":
+                daemon.stop()
+
+        daemon._current_session = _RecordingSession(on_status=on_status)
+        self._run_controller_thread(daemon)
+
+        self.assertIn(("disconnected", nxbtd.PLUGIN_DISABLED_HINT), statuses)
+        self.assertIn(("connected", "Switch paired"), statuses)
+
+
+class TestBluezPluginGateRoot(_GateHarness):
+
+    def test_disabled_root_toggles_and_restarts_bluetooth(self):
+        """Plugin disabled + root → toggle_clean_bluez(True) plus the two
+        systemctl commands (subprocess is mocked — nothing really runs)."""
+        daemon = self._make_daemon()
+        fake_bluez = _FakeBluez(enabled=False)
+        nxbtd._import_bluez = lambda: fake_bluez
+        nxbtd._geteuid = lambda: 0
+
+        run_calls = []
+
+        def fake_run(cmd, check=False, capture_output=False, text=False):
+            run_calls.append((tuple(cmd), check))
+            return _FakeCompletedProcess()
+
+        nxbtd.subprocess.run = fake_run
+
+        class _StubCtrl:
+            def connect(self, shutdown_event):
+                pass
+
+            def close(self):
+                pass
+
+        daemon._make_controller = _StubCtrl
+
+        def on_status(state, detail):
+            if state == "connected":
+                daemon.stop()
+
+        daemon._current_session = _RecordingSession(on_status=on_status)
+        self._run_controller_thread(daemon)
+
+        self.assertEqual(fake_bluez.toggle_calls, [True])
+        self.assertEqual(run_calls, [
+            (("systemctl", "daemon-reload"), True),
+            (("systemctl", "restart", "bluetooth"), True),
+        ])
+
+    def test_systemctl_failure_is_disconnected_not_fatal(self):
+        """A failing systemctl surfaces as 'disconnected' + retry."""
+        import subprocess as _subprocess
+
+        daemon = self._make_daemon()
+        fake_bluez = _FakeBluez(enabled=False)
+        # Re-arm: the gate short-circuits once enabled, so keep it disabled.
+        fake_bluez.toggle_clean_bluez = lambda toggle: None
+        nxbtd._import_bluez = lambda: fake_bluez
+        nxbtd._geteuid = lambda: 0
+
+        def fake_run(cmd, check=False, capture_output=False, text=False):
+            raise _subprocess.CalledProcessError(1, cmd)
+
+        nxbtd.subprocess.run = fake_run
+
+        disconnects = []
+
+        def on_status(state, detail):
+            if state == "disconnected":
+                disconnects.append(detail)
+                daemon.stop()
+
+        daemon._current_session = _RecordingSession(on_status=on_status)
+        self._run_controller_thread(daemon)
+
+        self.assertEqual(len(disconnects), 1)
+        self.assertIn("systemctl", disconnects[0])
+
+
+class TestBluezPluginGateSkipFlag(_GateHarness):
+
+    def test_skip_flag_bypasses_gate(self):
+        """--skip-bluez-check: nuxbt.bluez is never even imported."""
+        daemon = self._make_daemon(skip_bluez_check=True)
+
+        def must_not_import():
+            raise AssertionError("gate must be bypassed with --skip-bluez-check")
+
+        nxbtd._import_bluez = must_not_import
+
+        class _StubCtrl:
+            def connect(self, shutdown_event):
+                pass
+
+            def close(self):
+                pass
+
+        daemon._make_controller = _StubCtrl
+
+        statuses = []
+
+        def on_status(state, detail):
+            statuses.append((state, detail))
+            if state in ("connected", "disconnected"):
+                daemon.stop()
+
+        daemon._current_session = _RecordingSession(on_status=on_status)
+        self._run_controller_thread(daemon)
+
+        self.assertIn(("connected", "Switch paired"), statuses)
+
+    def test_cli_flag_parses(self):
+        parser = nxbtd._build_arg_parser()
+        args = parser.parse_args(["--skip-bluez-check"])
+        self.assertTrue(args.skip_bluez_check)
+        args = parser.parse_args([])
+        self.assertFalse(args.skip_bluez_check, "must default to False")
+
+
+# ---------------------------------------------------------------------------
+# Test: reconnect vs fresh-pair connect paths (nuxbt itself is faked)
+# ---------------------------------------------------------------------------
+
+class _FakeNx:
+    """Stands in for a nuxbt.Nuxbt instance during connect()."""
+
+    def __init__(self, initial_state="connected"):
+        self.create_calls = []
+        self.inputs = []
+        self.state = {0: {"state": initial_state, "errors": None}}
+
+    def create_controller(self, controller_type, reconnect_address=None):
+        self.create_calls.append(
+            dict(controller_type=controller_type, reconnect_address=reconnect_address)
+        )
+        return 0
+
+    def create_input_packet(self):
+        return _make_packet()
+
+    def set_controller_input(self, index, pkt):
+        self.inputs.append((index, pkt))
+
+
+class TestConnectPaths(unittest.TestCase):
+
+    def setUp(self):
+        self._saved_import = nxbtd._import_bluez
+        self._saved_press = nxbtd.PAIR_PRESS_SECONDS
+        self._saved_release = nxbtd.PAIR_RELEASE_SECONDS
+        self._had_nuxbt = hasattr(nxbtd, "nuxbt")
+        self._saved_nuxbt = getattr(nxbtd, "nuxbt", None)
+        # connect() references the module-level `nuxbt` name, absent in CI.
+        import types
+        nxbtd.nuxbt = types.SimpleNamespace(PRO_CONTROLLER="PRO_CONTROLLER")
+        nxbtd.PAIR_PRESS_SECONDS = 0
+        nxbtd.PAIR_RELEASE_SECONDS = 0
+
+    def tearDown(self):
+        nxbtd._import_bluez = self._saved_import
+        nxbtd.PAIR_PRESS_SECONDS = self._saved_press
+        nxbtd.PAIR_RELEASE_SECONDS = self._saved_release
+        if self._had_nuxbt:
+            nxbtd.nuxbt = self._saved_nuxbt
+        else:
+            del nxbtd.nuxbt
+
+    def _make_controller(self, nx):
+        ctrl = nxbtd.NxbtController.__new__(nxbtd.NxbtController)
+        ctrl._nx = nx
+        ctrl._index = None
+        return ctrl
+
+    def test_reconnect_passes_address_and_skips_pairing_sequence(self):
+        """Previously-paired Switch found → reconnect_address is passed and
+        the L+R/A sequence is NOT sent (the Switch is not on the menu)."""
+        fake_bluez = _FakeBluez()
+        fake_bluez.find_devices_by_alias = lambda alias: ["DC:68:EB:00:00:01"]
+        nxbtd._import_bluez = lambda: fake_bluez
+
+        nx = _FakeNx()
+        ctrl = self._make_controller(nx)
+        ctrl.connect(threading.Event())
+
+        self.assertEqual(len(nx.create_calls), 1)
+        self.assertEqual(nx.create_calls[0]["reconnect_address"], ["DC:68:EB:00:00:01"])
+        self.assertEqual(nx.inputs, [], "no button presses on reconnect")
+
+    def test_fresh_pair_sends_lr_then_a_sequence(self):
+        """No previously-paired Switch → fresh pair, sequence IS sent."""
+        fake_bluez = _FakeBluez()
+        fake_bluez.find_devices_by_alias = lambda alias: []
+        nxbtd._import_bluez = lambda: fake_bluez
+
+        nx = _FakeNx()
+        ctrl = self._make_controller(nx)
+        ctrl.connect(threading.Event())
+
+        self.assertEqual(nx.create_calls[0]["reconnect_address"], None)
+        self.assertEqual(len(nx.inputs), 4, "press L+R, release, press A, release")
+        press_lr, release_lr, press_a, release_a = [pkt for _, pkt in nx.inputs]
+        self.assertTrue(press_lr["L"] and press_lr["R"])
+        self.assertFalse(press_lr["A"])
+        self.assertFalse(release_lr["L"] or release_lr["R"] or release_lr["A"])
+        self.assertTrue(press_a["A"])
+        self.assertFalse(press_a["L"] or press_a["R"])
+        self.assertFalse(release_a["A"])
+
+    def test_alias_lookup_failure_falls_back_to_fresh_pair(self):
+        """A DBus error during the alias lookup must not abort the attempt."""
+        def boom():
+            raise RuntimeError("dbus unavailable")
+
+        nxbtd._import_bluez = boom
+
+        nx = _FakeNx()
+        ctrl = self._make_controller(nx)
+        ctrl.connect(threading.Event())
+
+        self.assertEqual(nx.create_calls[0]["reconnect_address"], None)
+        self.assertEqual(len(nx.inputs), 4, "fresh-pair sequence expected")
+
+    def test_crashed_state_raises(self):
+        """'crashed' controller state surfaces as an exception (existing
+        behavior — feeds the supervision loop's disconnected+retry path)."""
+        fake_bluez = _FakeBluez()
+        fake_bluez.find_devices_by_alias = lambda alias: []
+        nxbtd._import_bluez = lambda: fake_bluez
+
+        nx = _FakeNx(initial_state="crashed")
+        nx.state[0]["errors"] = "adapter gone"
+        ctrl = self._make_controller(nx)
+        with self.assertRaises(OSError) as cm:
+            ctrl.connect(threading.Event())
+        self.assertIn("adapter gone", str(cm.exception))
+
+    def test_connect_wait_cancellable_by_shutdown_event(self):
+        """A pre-set shutdown event cancels the wait without raising and
+        without sending any buttons."""
+        fake_bluez = _FakeBluez()
+        fake_bluez.find_devices_by_alias = lambda alias: []
+        nxbtd._import_bluez = lambda: fake_bluez
+
+        nx = _FakeNx(initial_state="connecting")
+        ctrl = self._make_controller(nx)
+        ev = threading.Event()
+        ev.set()
+        ctrl.connect(ev)
+        self.assertEqual(nx.inputs, [])
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
