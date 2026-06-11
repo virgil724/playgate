@@ -101,15 +101,29 @@ async function iceServers() {
   return [{ urls: "stun:stun.l.google.com:19302" }];
 }
 
+// The currently active attempt. Each Connect click tears the previous one
+// down first — otherwise its pc / poll loop / pumps stay alive and keep
+// writing to the shared state display (a dead earlier pc reporting "failed"
+// while the live one is connected).
+let active = null;
+
 $("connect").onclick = async () => {
+  if (active) {
+    active.timers.forEach(clearInterval);
+    try { active.pc.close(); } catch { /* already closed */ }
+    active = null;
+  }
   base = $("url").value.replace(/\/+$/, "");
   room = $("room").value.trim();
   const token = $("token").value.trim();
   setState("fetching ICE");
   const pc = new RTCPeerConnection({ iceServers: await iceServers() });
+  const timers = [];
+  active = { pc, timers };
+  const isActive = () => active?.pc === pc;
 
-  pc.ontrack = ev => { if (ev.streams[0]) $("video").srcObject = ev.streams[0]; };
-  pc.onconnectionstatechange = () => setState(pc.connectionState);
+  pc.ontrack = ev => { if (isActive() && ev.streams[0]) $("video").srcObject = ev.streams[0]; };
+  pc.onconnectionstatechange = () => { if (isActive()) setState(pc.connectionState); };
 
   let inputCh = null, controlCh = null, granted = !token; // gate disabled => send freely
   pc.ondatachannel = ev => {
@@ -120,9 +134,9 @@ $("connect").onclick = async () => {
       ch.onopen = () => {
         log("control channel open");
         if (token) ch.send(JSON.stringify({ kind: "auth", token }));
-        setInterval(() => {
+        timers.push(setInterval(() => {
           if (ch.readyState === "open") ch.send(JSON.stringify({ kind: "ping", ts: performance.now() }));
-        }, 2000);
+        }, 2000));
       };
       ch.onmessage = ev2 => {
         let m; try { m = JSON.parse(ev2.data); } catch { return; }
@@ -142,7 +156,7 @@ $("connect").onclick = async () => {
   const poll = setInterval(async () => {
     try {
       const r = await fetch(`${base}/rooms/${room}/viewer?since=${since}`);
-      if (!r.ok) return;
+      if (!r.ok || !isActive()) return;
       const j = await r.json();
       since = j.nextSince;
       // Answer the NEWEST offer in the batch: older ones belong to recycled
@@ -167,11 +181,12 @@ $("connect").onclick = async () => {
       }
     } catch (e) { log("poll error: " + e); }
   }, 500);
+  timers.push(poll);
 
   // 60 Hz input pump: latest state snapshot, only while granted.
-  setInterval(() => {
+  timers.push(setInterval(() => {
     if (granted && inputCh?.readyState === "open") inputCh.send(encodeInput());
-  }, 1000 / 60);
+  }, 1000 / 60));
 };
 </script>
 </body>
