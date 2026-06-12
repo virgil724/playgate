@@ -80,7 +80,12 @@ export function RoomPage() {
       grantedRef.current = false;
       setGranted(false);
       setRemaining(0);
+      setQueuePos(null);
       gamepadRef.current.reset();
+      // The session is over and the JWT is spent — drop it so the redeem
+      // panel reappears and the viewer can enter a fresh code without
+      // reloading the page. The connection itself stays up (view-only).
+      setSession(null);
     }
   }, []);
 
