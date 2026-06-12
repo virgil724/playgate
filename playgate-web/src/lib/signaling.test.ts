@@ -45,7 +45,7 @@ describe("SignalingClient", () => {
     const msgs = await c.poll();
     expect(msgs).toHaveLength(1);
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://signal.test/rooms/r1/host?since=-1",
+      "http://signal.test/rooms/r1/viewer?since=-1",
     );
 
     // Second poll uses advanced since.
@@ -55,7 +55,7 @@ describe("SignalingClient", () => {
     });
     await c.poll();
     expect(fetchMock.mock.calls[1][0]).toBe(
-      "http://signal.test/rooms/r1/host?since=0",
+      "http://signal.test/rooms/r1/viewer?since=0",
     );
   });
 

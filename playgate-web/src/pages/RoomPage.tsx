@@ -12,6 +12,7 @@ import {
   describeEvent,
 } from "../lib/control-events";
 import { VirtualGamepad } from "../components/VirtualGamepad";
+import { dlog, subscribeLog, logHistory, type LogEntry } from "../lib/log";
 
 const CONN_LABEL: Record<ConnectionState, string> = {
   idle: "Idle",
@@ -40,7 +41,19 @@ export function RoomPage() {
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
   const [session, setSession] = useState<{ token: string; viewerId: string } | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>(() => logHistory());
+  const logBoxRef = useRef<HTMLDivElement>(null);
   const [, forceRender] = useState(0);
+
+  // Mirror the shared debug log into the on-page panel.
+  useEffect(() => {
+    const unsub = subscribeLog((e) => setLogs((prev) => [...prev.slice(-299), e]));
+    return unsub;
+  }, []);
+  useEffect(() => {
+    const box = logBoxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [logs]);
 
   const onChange = useCallback(() => forceRender((n) => n + 1), []);
 
@@ -69,6 +82,7 @@ export function RoomPage() {
   // Start the WebRTC connection once we have a session (or immediately for view-only).
   useEffect(() => {
     if (!roomId) return;
+    dlog("page", `starting connection room=${roomId} ${session ? "with session token" : "view-only (no token)"}`);
     const signaling = new SignalingClient({
       baseUrl: SIGNALING_BASE_URL,
       roomId,
@@ -230,6 +244,27 @@ export function RoomPage() {
       )}
 
       <VirtualGamepad state={gamepadRef.current} enabled={granted} onChange={onChange} />
+
+      <div
+        ref={logBoxRef}
+        className="mono"
+        style={{
+          margin: 12,
+          padding: 8,
+          maxHeight: 220,
+          overflowY: "auto",
+          fontSize: 12,
+          whiteSpace: "pre-wrap",
+          background: "rgba(0,0,0,.35)",
+          borderRadius: 6,
+        }}
+      >
+        {logs.map((l, i) => (
+          <div key={i}>
+            [{l.ts}] {l.tag}: {l.text}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

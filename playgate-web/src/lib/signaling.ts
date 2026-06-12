@@ -9,6 +9,8 @@
  * Framework-free. No React.
  */
 
+import { dlog } from "./log";
+
 export interface SignalingMessage {
   seq: number;
   ts: string;
@@ -34,7 +36,8 @@ export const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
 export interface SignalingOptions {
   baseUrl: string;
   roomId: string;
-  /** Our role. Viewer pushes to /viewer and polls /host's messages. */
+  /** Our role. Both push and poll go to /rooms/{roomId}/{our role};
+   * GET under our own name returns the *other* peer's messages. */
   peer?: "viewer" | "host";
   /** Optional bearer token (session JWT / HMAC) for auth-enabled deployments. */
   token?: string;
@@ -55,10 +58,6 @@ export class SignalingClient {
     this.token = opts.token;
   }
 
-  /** The peer whose messages we poll for (the opposite of our role). */
-  private get otherPeer(): "viewer" | "host" {
-    return this.peer === "viewer" ? "host" : "viewer";
-  }
 
   private headers(json = true): HeadersInit {
     const h: Record<string, string> = {};
@@ -79,9 +78,13 @@ export class SignalingClient {
     }
   }
 
-  /** Poll once for new messages from the other peer. */
+  /**
+   * Poll once for new messages from the other peer. The Worker's GET
+   * /rooms/{roomId}/{peer} takes OUR role and returns the messages the
+   * opposite peer posted — so we poll under our own peer name.
+   */
   async poll(): Promise<SignalingMessage[]> {
-    const url = `${this.baseUrl}/rooms/${this.roomId}/${this.otherPeer}?since=${this.since}`;
+    const url = `${this.baseUrl}/rooms/${this.roomId}/${this.peer}?since=${this.since}`;
     const res = await fetch(url, { headers: this.headers(false) });
     if (!res.ok) {
       throw new Error(`signaling poll failed: ${res.status}`);
@@ -109,6 +112,7 @@ export class SignalingClient {
           for (const m of msgs) onMessage(m);
           await delay(intervalMs);
         } catch (err) {
+          dlog("signaling", "poll error:", err);
           onError?.(err);
           await delay(intervalMs * 2);
         }
@@ -132,8 +136,10 @@ export class SignalingClient {
       if (!res.ok) throw new Error(`turn ${res.status}`);
       const data = (await res.json()) as TurnCredentials;
       if (data.iceServers && data.iceServers.length > 0) return data.iceServers;
+      dlog("signaling", "turn response had no iceServers; using fallback STUN");
       return FALLBACK_ICE_SERVERS;
-    } catch {
+    } catch (err) {
+      dlog("signaling", "turn credentials failed; using fallback STUN:", err);
       return FALLBACK_ICE_SERVERS;
     }
   }
