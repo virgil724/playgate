@@ -74,3 +74,14 @@ signaling:
 # Pipeline latency reporting (capture -> encode -> track, p50/p95 logged).
 metrics:
   report_interval_seconds: 5
+
+# playgate-server integration (optional). When url is set the host periodically
+# POSTs a heartbeat so the streamer console can show the room online/offline
+# status and the current controller's viewer id. The server also uses heartbeat
+# responses to deliver Force kick requests: when kick_requested=true the host
+# immediately removes the current controller through the session idle-kick path.
+# Leave url empty (the default) to disable this feature entirely.
+server:
+  url: ""                          # e.g. http://localhost:8080 — empty disables heartbeats
+  api_key: ""                      # host API key from playgate-server register-host
+  heartbeat_interval_seconds: 30   # how often to POST; values <= 0 default to 30

@@ -25,6 +25,7 @@ import (
 
 	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/core"
+	"github.com/playgate/playgate-host/internal/heartbeat"
 	"github.com/playgate/playgate-host/internal/metrics"
 	"github.com/playgate/playgate-host/internal/session"
 )
@@ -154,6 +155,18 @@ func (h *Host) Run(ctx context.Context) error {
 	// 4b. Session manager (only when gating is enabled).
 	if h.session != nil {
 		g.Go(func() error { return h.session.Run(gctx) })
+	}
+
+	// 4c. Heartbeat loop (only when server.url is configured).
+	if h.cfg.Server.URL != "" {
+		var viewers heartbeat.ViewerSource
+		var kickFn heartbeat.KickFunc
+		if h.session != nil {
+			viewers = h.session
+			kickFn = heartbeat.MakeKickFunc(h.session)
+		}
+		hb := heartbeat.New(h.log, h.cfg, viewers, kickFn)
+		g.Go(func() error { return hb.Run(gctx) })
 	}
 
 	// 5. Per-viewer WebRTC connection loop.

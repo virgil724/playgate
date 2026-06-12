@@ -18,6 +18,7 @@ type Config struct {
 	Session   SessionConfig   `yaml:"session"`
 	Signaling SignalingConfig `yaml:"signaling"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
+	Server    ServerConfig    `yaml:"server"`
 }
 
 // Capture source kinds.
@@ -158,6 +159,22 @@ type MetricsConfig struct {
 	ReportIntervalSeconds int `yaml:"report_interval_seconds"`
 }
 
+// ServerConfig configures the optional connection to playgate-server. When URL
+// is empty the whole feature is disabled and no heartbeats are sent.
+// When enabled the host POSTs a heartbeat on each interval, which powers the
+// streamer console's online status indicator and Force kick button.
+type ServerConfig struct {
+	// URL is the HTTP base URL of the playgate-server, e.g. http://localhost:8080.
+	// Empty string disables the heartbeat feature entirely.
+	URL string `yaml:"url"`
+	// APIKey is the host API key sent as "Authorization: Bearer <key>" on every
+	// heartbeat request. Obtain it from playgate-server's register-host endpoint.
+	APIKey string `yaml:"api_key"`
+	// HeartbeatIntervalSeconds is how often the host sends a heartbeat POST.
+	// Values <= 0 default to 30.
+	HeartbeatIntervalSeconds int `yaml:"heartbeat_interval_seconds"`
+}
+
 // Default returns a Config populated with sensible defaults. Load starts from
 // these defaults and overlays the YAML file on top, so unspecified fields keep
 // their default value.
@@ -206,6 +223,9 @@ func Default() Config {
 		},
 		Metrics: MetricsConfig{
 			ReportIntervalSeconds: 5,
+		},
+		Server: ServerConfig{
+			HeartbeatIntervalSeconds: 30,
 		},
 	}
 }

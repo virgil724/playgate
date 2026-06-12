@@ -118,9 +118,9 @@ type sessionEntry struct {
 	idleDuration time.Duration
 
 	// closedGates ensures gate channels are closed exactly once.
-	gatesMu    sync.Mutex
-	gatesDone  bool
-	gates      []*gateHandle
+	gatesMu   sync.Mutex
+	gatesDone bool
+	gates     []*gateHandle
 }
 
 // gateHandle holds a Gate output channel and a once-close guard.
@@ -160,6 +160,31 @@ func NewManager(cfg Config) (*Manager, error) {
 // the session goroutines.
 func (m *Manager) Events() <-chan SessionEvent {
 	return m.eventsOut
+}
+
+// CurrentViewerID returns the viewer_id of the viewer currently holding
+// control, or "" when no session is active. Safe for concurrent use.
+func (m *Manager) CurrentViewerID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil {
+		return ""
+	}
+	return m.active.viewerID
+}
+
+// KickCurrentController terminates the active session using the idle-kick path
+// (EventIdleKicked), which revokes control authority and closes all Gate
+// channels for the current controller. It is a no-op when no viewer is active.
+// Safe for concurrent use.
+func (m *Manager) KickCurrentController() {
+	m.mu.Lock()
+	entry := m.active
+	m.mu.Unlock()
+	if entry == nil {
+		return
+	}
+	m.endSession(entry, EventIdleKicked)
 }
 
 // Claim validates token, checks room_id, and attempts to grant control to the
