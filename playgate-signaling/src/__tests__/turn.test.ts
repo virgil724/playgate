@@ -12,26 +12,28 @@ import type { TurnCredentialsResponse } from "../types.js";
 
 const BASE = "https://signaling.example.com";
 
-/** Build a mock Cloudflare TURN API success response. */
+/**
+ * Build a mock Cloudflare TURN API success response — a bare ICE server
+ * object (no success/result envelope), matching the live API.
+ */
 function mockCfTurnResponse(overrides?: Partial<{
   username: string;
   credential: string;
   urls: string[];
-  ttl: number;
 }>): Response {
-  const result = {
+  const iceServers = {
     username: "test-user",
     credential: "test-cred",
     urls: [
+      "stun:stun.cloudflare.com:3478",
       "turn:turn.cloudflare.com:3478?transport=udp",
       "turn:turn.cloudflare.com:3478?transport=tcp",
       "turns:turn.cloudflare.com:5349?transport=tcp",
     ],
-    ttl: 86400,
     ...overrides,
   };
   return new Response(
-    JSON.stringify({ success: true, result, errors: [], messages: [] }),
+    JSON.stringify({ iceServers }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }
@@ -138,9 +140,7 @@ describe("POST /turn/credentials", () => {
   });
 
   it("respects optional TTL in request body (capped at 86400)", async () => {
-    const mockFetch = vi.fn().mockResolvedValueOnce(
-      mockCfTurnResponse({ ttl: 3600 }),
-    );
+    const mockFetch = vi.fn().mockResolvedValueOnce(mockCfTurnResponse());
     globalThis.fetch = mockFetch;
 
     const env = makeEnv({ TURN_KEY_ID: "k", TURN_KEY_API_TOKEN: "t" });
@@ -185,7 +185,7 @@ describe("POST /turn/credentials", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 
-  it("handles Cloudflare API reporting success=false", async () => {
+  it("handles an unexpected Cloudflare API response shape", async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(
       new Response(
         JSON.stringify({ success: false, result: null, errors: ["bad"], messages: [] }),

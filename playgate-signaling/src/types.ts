@@ -58,15 +58,14 @@ export interface RTCIceServer {
   credential?: string;
 }
 
-/** Cloudflare Realtime TURN credential API response */
+/**
+ * Cloudflare Realtime TURN credential API response — a bare ICE server
+ * object, not the usual success/result API envelope.
+ */
 export interface CloudflareCredentialResponse {
-  result: {
-    username: string;
-    credential: string;
-    urls: string[];
-    ttl: number;
+  iceServers?: {
+    urls?: string[];
+    username?: string;
+    credential?: string;
   };
-  success: boolean;
-  errors: unknown[];
-  messages: unknown[];
 }

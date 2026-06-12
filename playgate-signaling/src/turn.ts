@@ -13,6 +13,9 @@
  *
  * Cloudflare API reference:
  *   POST https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate
+ *
+ * The API responds with a bare ICE server object (no success/result envelope):
+ *   { "iceServers": { "urls": [...], "username": "...", "credential": "..." } }
  */
 
 import type {
@@ -80,22 +83,22 @@ export async function handleTurnCredentials(
 
   const data = (await cfResponse.json()) as CloudflareCredentialResponse;
 
-  if (!data.success) {
-    return jsonError("Cloudflare TURN API reported failure", 502);
+  const ice = data.iceServers;
+  if (!ice?.username || !ice.credential || !ice.urls?.length) {
+    return jsonError("Cloudflare TURN API returned an unexpected response shape", 502);
   }
 
-  const { username, credential, urls, ttl } = data.result;
-
   // Build iceServers array:
-  //   1. STUN entries (no credentials needed)
-  //   2. TURN entries (carry username + credential)
+  //   1. STUN entry (no credentials needed; harmless if urls already has one)
+  //   2. TURN entry (carries username + credential)
   const iceServers: RTCIceServer[] = [
     // Cloudflare free STUN
     { urls: "stun:stun.cloudflare.com:3478" },
     // Authenticated TURN
-    { urls, username, credential },
+    { urls: ice.urls, username: ice.username, credential: ice.credential },
   ];
 
-  const responseBody: TurnCredentialsResponse = { iceServers, ttl };
+  // The API does not echo a TTL back; report the one we requested.
+  const responseBody: TurnCredentialsResponse = { iceServers, ttl: requestedTtl };
   return jsonOk(responseBody);
 }
