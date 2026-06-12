@@ -72,6 +72,11 @@ export class ApiClient {
     return data as T;
   }
 
+  // ---- unauthenticated ----
+  publicKey(): Promise<{ algorithm: string; public_key: string }> {
+    return this.req<{ algorithm: string; public_key: string }>("GET", "/api/public-key");
+  }
+
   // ---- viewer ----
   redeem(code: string): Promise<RedeemResult> {
     return this.req<RedeemResult>("POST", `/api/tokens/${encodeURIComponent(code)}/redeem`, {});

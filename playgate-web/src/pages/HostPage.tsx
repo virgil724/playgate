@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiClient,
   API_BASE_URL,
+  SIGNALING_BASE_URL,
   ApiError,
   type RoomStatus,
   type TokenInfo,
 } from "../lib/api";
+import { buildHostConfig } from "../lib/config-template";
 
 const LS_KEY = "playgate.host.apiKey";
 
@@ -24,8 +26,15 @@ export function HostPage() {
   const [issueCount, setIssueCount] = useState(5);
   const [issuedCodes, setIssuedCodes] = useState<string[]>([]);
   const [registerName, setRegisterName] = useState("");
+  const [hostConfigYaml, setHostConfigYaml] = useState("");
+  const [configLoading, setConfigLoading] = useState(false);
 
   const selectedRoom = rooms.find((r) => r.id === selected) ?? null;
+
+  // A generated config is room-specific — drop it when the selection changes.
+  useEffect(() => {
+    setHostConfigYaml("");
+  }, [selected]);
 
   const refreshRooms = useCallback(async () => {
     try {
@@ -136,6 +145,37 @@ export function HostPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Kick failed");
     }
+  };
+
+  const generateConfig = async () => {
+    if (!selected) return;
+    setConfigLoading(true);
+    try {
+      const { public_key } = await apiRef.current.publicKey();
+      const yaml = buildHostConfig({
+        roomId: selected,
+        signalingUrl: SIGNALING_BASE_URL,
+        serverUrl: API_BASE_URL,
+        apiKey,
+        publicKeyBase64: public_key,
+      });
+      setHostConfigYaml(yaml);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch public key");
+    } finally {
+      setConfigLoading(false);
+    }
+  };
+
+  const downloadConfig = (yaml: string) => {
+    const blob = new Blob([yaml], { type: "text/yaml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "config.yaml";
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const copy = (text: string) => {
@@ -339,6 +379,34 @@ export function HostPage() {
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="panel">
+            <div className="row">
+              <strong style={{ flex: 1 }}>Host config</strong>
+              <button
+                className="btn-primary"
+                onClick={() => void generateConfig()}
+                disabled={configLoading}
+              >
+                {configLoading ? "Fetching…" : "Generate config.yaml"}
+              </button>
+            </div>
+
+            {hostConfigYaml && (
+              <div style={{ marginTop: 10 }}>
+                <textarea
+                  readOnly
+                  rows={14}
+                  className="mono"
+                  value={hostConfigYaml}
+                  style={{ width: "100%" }}
+                />
+                <div className="row" style={{ marginTop: 6 }}>
+                  <button onClick={() => copy(hostConfigYaml)}>Copy</button>
+                  <button onClick={() => downloadConfig(hostConfigYaml)}>Download</button>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
