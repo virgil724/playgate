@@ -68,9 +68,14 @@ export class ViewerConnection {
   private authPayload?: Record<string, unknown>;
   private pc: RTCPeerConnection | null = null;
   private inputChannel: RTCDataChannel | null = null;
+  private controlChannel: RTCDataChannel | null = null;
   private remoteSet = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private sentAuth = false;
+  private iceServers: RTCIceServer[] = [];
+  /** Worker-assigned ts of the offer we answered; newer offers mean the host
+   * recycled its peer and our connection is dead — we restart on them. */
+  private appliedOfferTs: string | null = null;
   /** Set by close(); guards the async start() so a connection closed while
    * start() is still awaiting (React StrictMode double-mount) cannot
    * resurrect itself and keep polling/answering as a zombie. */
@@ -99,6 +104,23 @@ export class ViewerConnection {
     }
   }
 
+  /** Authorize on the live connection (e.g. after redeeming a token code).
+   * Sends the auth message immediately when the control channel is open;
+   * otherwise it is sent on the next control-channel open. */
+  sendAuth(token: string): void {
+    this.authPayload = { ...this.authPayload, token };
+    if (this.controlChannel?.readyState === "open") {
+      try {
+        this.controlChannel.send(JSON.stringify({ kind: "auth", token }));
+        dlog("webrtc", "auth sent on live control channel");
+      } catch (err) {
+        dlog("webrtc", "sendAuth failed:", err);
+      }
+    } else {
+      dlog("webrtc", "sendAuth: control channel not open yet; will auth on open");
+    }
+  }
+
   async start(): Promise<void> {
     this.setState("fetching-ice");
     const iceServers = await this.signaling.fetchIceServers();
@@ -110,9 +132,27 @@ export class ViewerConnection {
       ([] as string[]).concat(s.urls as string | string[]).some((u) => u.startsWith("turn")),
     );
     dlog("webrtc", `ice servers: ${iceServers.length} (turn: ${hasTurn})`);
+    this.iceServers = iceServers;
+    this.createPeer();
 
-    const pc = new RTCPeerConnection({ iceServers });
+    // Begin polling for the host's offer + ICE.
+    this.setState("waiting-offer");
+    this.signaling.startPolling(
+      (msg) => void this.handleSignal(msg),
+      (err) => this.setState("connecting", `signaling: ${String(err)}`),
+    );
+  }
+
+  /** (Re)build the RTCPeerConnection. Called once from start() and again when
+   * a newer offer arrives (host recycled its peer; the old pc is dead). */
+  private createPeer(): void {
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     this.pc = pc;
+    this.remoteSet = false;
+    this.sentAuth = false;
+    this.inputChannel = null;
+    this.controlChannel = null;
+    this.pendingCandidates = [];
 
     pc.ontrack = (ev) => {
       dlog("webrtc", `ontrack kind=${ev.track.kind} streams=${ev.streams.length}`);
@@ -159,13 +199,6 @@ export class ViewerConnection {
           break;
       }
     };
-
-    // Begin polling for the host's offer + ICE.
-    this.setState("waiting-offer");
-    this.signaling.startPolling(
-      (msg) => void this.handleSignal(msg),
-      (err) => this.setState("connecting", `signaling: ${String(err)}`),
-    );
   }
 
   private async pushWithAuth(payload: Record<string, unknown>): Promise<void> {
@@ -188,7 +221,7 @@ export class ViewerConnection {
     dlog("webrtc", `signal seq=${msg.seq} ts=${msg.ts} kind=${kind}`);
     try {
       if (kind === "offer") {
-        await this.handleOffer(msg.payload as RTCSessionDescriptionInit);
+        await this.handleOffer(msg.payload as RTCSessionDescriptionInit, msg.ts);
       } else if (kind === "candidate") {
         await this.addCandidate(msg.payload as RTCIceCandidateInit);
       }
@@ -199,14 +232,26 @@ export class ViewerConnection {
     }
   }
 
-  private async handleOffer(offer: RTCSessionDescriptionInit): Promise<void> {
-    if (!this.pc || this.remoteSet) {
-      dlog("webrtc", `offer ignored (pc=${!!this.pc} remoteSet=${this.remoteSet})`);
-      return;
+  private async handleOffer(offer: RTCSessionDescriptionInit, ts?: string): Promise<void> {
+    if (!this.pc) return;
+    if (this.remoteSet) {
+      // Both timestamps come from the Worker's clock, so a lexicographic
+      // ISO-8601 comparison is safe (same trick as the host's stale-answer
+      // check). An offer NEWER than the one we answered means the host
+      // recycled its peer — our current pc is doomed; restart on it. An
+      // older/equal one is a stale leftover; ignore.
+      if (!ts || !this.appliedOfferTs || ts <= this.appliedOfferTs) {
+        dlog("webrtc", `stale offer ignored (ts=${ts ?? "?"} applied=${this.appliedOfferTs ?? "?"})`);
+        return;
+      }
+      dlog("webrtc", "newer offer received — host recycled; restarting peer connection");
+      this.pc.close();
+      this.createPeer();
     }
     this.setState("connecting");
     await this.pc.setRemoteDescription(offer);
     this.remoteSet = true;
+    this.appliedOfferTs = ts ?? null;
     dlog("webrtc", "remote offer applied");
 
     // Flush any candidates that arrived before the remote description.
@@ -245,6 +290,7 @@ export class ViewerConnection {
   }
 
   private attachControlChannel(ch: RTCDataChannel): void {
+    this.controlChannel = ch;
     ch.onopen = () => {
       dlog("webrtc", "control channel open");
       // The host's session gate authorizes viewers via a control-channel auth
@@ -282,6 +328,7 @@ export class ViewerConnection {
     this.closed = true;
     this.signaling.stop();
     this.inputChannel?.close();
+    this.controlChannel?.close();
     this.pc?.close();
     this.pc = null;
     this.setState("closed");

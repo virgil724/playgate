@@ -41,6 +41,11 @@ export function RoomPage() {
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
   const [session, setSession] = useState<{ token: string; viewerId: string } | null>(null);
+  // Ref mirror so stable callbacks can read the current session without
+  // retriggering the connection effect (reconnecting on redeem races the
+  // host, which is still serving the connection we'd be tearing down).
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
   const [logs, setLogs] = useState<LogEntry[]>(() => logHistory());
   const logBoxRef = useRef<HTMLDivElement>(null);
   const [, forceRender] = useState(0);
@@ -59,7 +64,7 @@ export function RoomPage() {
 
   const handleControlEvent = useCallback((ev: ControlEvent) => {
     setStatusMsg(describeEvent(ev));
-    const viewerId = session?.viewerId ?? "";
+    const viewerId = sessionRef.current?.viewerId ?? "";
     if (ev.kind === "granted" && grantsControl(ev, viewerId)) {
       grantedRef.current = true;
       setGranted(true);
@@ -77,21 +82,25 @@ export function RoomPage() {
       setRemaining(0);
       gamepadRef.current.reset();
     }
-  }, [session]);
+  }, []);
 
-  // Start the WebRTC connection once we have a session (or immediately for view-only).
+  // Start the WebRTC connection once per room. Redeeming later does NOT
+  // reconnect — auth is sent over the live control channel (see below);
+  // tearing down and re-answering races the host, which is still serving
+  // the connection we just closed.
   useEffect(() => {
     if (!roomId) return;
-    dlog("page", `starting connection room=${roomId} ${session ? "with session token" : "view-only (no token)"}`);
+    const sess = sessionRef.current;
+    dlog("page", `starting connection room=${roomId} ${sess ? "with session token" : "view-only (no token)"}`);
     const signaling = new SignalingClient({
       baseUrl: SIGNALING_BASE_URL,
       roomId,
       peer: "viewer",
-      token: session?.token,
+      token: sess?.token,
     });
     const connection = new ViewerConnection({
       signaling,
-      authPayload: session ? { token: session.token } : undefined,
+      authPayload: sess ? { token: sess.token } : undefined,
       callbacks: {
         onState: (s, d) => {
           setConn(s);
@@ -109,7 +118,12 @@ export function RoomPage() {
       connection.close();
       connRef.current = null;
     };
-  }, [roomId, session, handleControlEvent]);
+  }, [roomId, handleControlEvent]);
+
+  // Authorize on the live connection when a token is redeemed.
+  useEffect(() => {
+    if (session) connRef.current?.sendAuth(session.token);
+  }, [session]);
 
   // 60 Hz input loop: sample gamepad, encode, send — only while granted.
   useEffect(() => {
