@@ -216,13 +216,68 @@ const longPollWait = 25 * time.Second
 // (round-trip < 1s with no messages) and sleeps c.poll before the next call,
 // degrading to the pre-existing polling behaviour.
 func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer, offerTs string) error {
-	since := -1
-	gotAnswer := false
-	longPollLogged := false
-
 	// Bound the wait for an answer so a stale room doesn't block forever; once an
 	// answer arrives we keep polling for trickle ICE within the connection ctx.
 	deadline := time.Now().Add(60 * time.Second)
+
+	// Prefer a WebSocket: an idle WS accrues zero Durable Object duration, whereas
+	// a held long-poll keeps the per-room DO awake. Dial once; on any failure fall
+	// back to the long-poll loop below (old Workers / test servers don't speak WS).
+	if c.receiveAnswerWS(ctx, peer, offerTs, deadline) {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	if !time.Now().Before(deadline) {
+		return errTimeoutNoAnswer
+	}
+
+	return c.pollForAnswerLongPoll(ctx, peer, offerTs, deadline)
+}
+
+// receiveAnswerWS dials the WebSocket and, on success, feeds replayed and live
+// viewer frames through applyViewerMessage until an answer is applied or the read
+// fails / the deadline passes. It returns true only when an answer was applied
+// (the caller is then done). A dial failure, a Receive error before any answer,
+// or ctx cancellation returns false so the caller can fall back to long-poll
+// (unless ctx was cancelled, which the caller re-checks).
+func (c *connManager) receiveAnswerWS(ctx context.Context, peer *rtc.Peer, offerTs string, deadline time.Time) bool {
+	wsCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	conn, err := c.client.DialWS(wsCtx, signaling.PeerHost)
+	if err != nil {
+		c.log.Debug("ws dial failed; falling back to long-poll", "err", err)
+		return false
+	}
+	defer conn.Close()
+
+	for {
+		// Receive blocks on the socket but honours wsCtx, so a cancelled parent
+		// ctx or the elapsed deadline aborts the parked read promptly.
+		m, err := conn.Receive(wsCtx)
+		if err != nil {
+			if ctx.Err() == nil && time.Now().Before(deadline) {
+				c.log.Debug("ws receive failed; falling back to long-poll", "err", err)
+			}
+			return false
+		}
+		if c.applyViewerMessage(peer, m, offerTs) {
+			// applyViewerMessage already logged the apply; just note the transport.
+			c.log.Info("answer transport", "transport", "websocket")
+			return true
+		}
+	}
+}
+
+// pollForAnswerLongPoll is the original HTTP long-poll path, retained as a
+// fallback for Workers that do not speak WebSocket. It runs until an answer is
+// applied, the deadline passes (errTimeoutNoAnswer), or ctx is cancelled.
+func (c *connManager) pollForAnswerLongPoll(ctx context.Context, peer *rtc.Peer, offerTs string, deadline time.Time) error {
+	since := -1
+	gotAnswer := false
+	longPollLogged := false
 
 	for {
 		if ctx.Err() != nil {

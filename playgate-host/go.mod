@@ -3,6 +3,7 @@ module github.com/playgate/playgate-host
 go 1.25.3
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/pion/webrtc/v4 v4.2.15
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.41.0
