@@ -5,6 +5,7 @@ import { SignalingClient } from "../lib/signaling";
 import { ViewerConnection, type ConnectionState } from "../lib/webrtc";
 import { GamepadState } from "../lib/gamepad-state";
 import { encodeInput } from "../lib/input-codec";
+import { pollPhysicalGamepad, mergeInput } from "../lib/physical-gamepad";
 import {
   type ControlEvent,
   grantsControl,
@@ -130,7 +131,8 @@ export function RoomPage() {
     if (session) connRef.current?.sendAuth(session.token);
   }, [session]);
 
-  // 60 Hz input loop: sample gamepad, encode, send — only while granted.
+  // 60 Hz input loop: sample keyboard/virtual state, merge in the physical
+  // gamepad (Gamepad API), encode, send — only while granted.
   useEffect(() => {
     let raf = 0;
     let last = 0;
@@ -142,10 +144,28 @@ export function RoomPage() {
       if (!grantedRef.current) return;
       const conn = connRef.current;
       if (!conn || !conn.inputReady) return;
-      conn.sendInput(encodeInput(gamepadRef.current.snapshot()));
+      const state = mergeInput(gamepadRef.current.snapshot(), pollPhysicalGamepad());
+      conn.sendInput(encodeInput(state));
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // Physical gamepad connect/disconnect indicator.
+  const [padName, setPadName] = useState<string | null>(null);
+  useEffect(() => {
+    const refresh = () => {
+      const pads = navigator.getGamepads?.() ?? [];
+      const gp = pads.find((p) => p?.connected) ?? null;
+      setPadName(gp ? gp.id.slice(0, 32) : null);
+      dlog("page", gp ? `gamepad connected: ${gp.id}` : "gamepad disconnected");
+    };
+    window.addEventListener("gamepadconnected", refresh);
+    window.addEventListener("gamepaddisconnected", refresh);
+    return () => {
+      window.removeEventListener("gamepadconnected", refresh);
+      window.removeEventListener("gamepaddisconnected", refresh);
+    };
   }, []);
 
   // Keyboard mapping.
@@ -212,6 +232,7 @@ export function RoomPage() {
         <span className={`dot ${connClass}`} />
         <span>{CONN_LABEL[conn]}</span>
         <span className="muted mono">room {roomId}</span>
+        {padName && <span className="muted">🎮 {padName}</span>}
         {granted && remaining !== null && (
           <span className="countdown" style={{ marginLeft: "auto", color: "var(--ok)" }}>
             ⏱ {remaining}s
