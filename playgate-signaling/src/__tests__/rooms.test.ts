@@ -13,7 +13,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import worker from "../index.js";
-import { makeEnv, makeRequest, MockKVNamespace } from "./helpers.js";
+import { makeEnv, makeRequest } from "./helpers.js";
 import type { MessagesResponse } from "../types.js";
 
 const BASE = "https://signaling.example.com";
@@ -123,10 +123,7 @@ describe("host offer starts a new signaling session", () => {
     await post("viewer", { type: "answer", sdp: "stale-answer" });
     await post("host", { type: "offer", sdp: "new-offer" });
 
-    const kv = env.SIGNALING_KV as unknown as MockKVNamespace;
-    expect(kv.getRaw("room:fresh:viewer")).toBeUndefined();
-
-    // Host polling from -1 sees no stale answer.
+    // Host polling from -1 sees no stale answer (the viewer queue was wiped).
     const hostPoll = await poll("host");
     expect(hostPoll.messages).toHaveLength(0);
     expect(hostPoll.nextSince).toBe(-1);
@@ -389,6 +386,74 @@ describe("Full offer/answer + ICE exchange flow", () => {
 
     expect(hostIcePoll.messages).toHaveLength(1);
     expect(hostIcePoll.messages[0]!.payload).toEqual(viewerIce);
+  });
+});
+
+describe("GET long-poll (?wait)", () => {
+  let env: ReturnType<typeof makeEnv>;
+  beforeEach(() => {
+    env = makeEnv();
+  });
+
+  it("returns immediately with data even when wait is set", async () => {
+    await worker.fetch(
+      makeRequest("POST", `${BASE}/rooms/lp1/host`, { type: "offer" }),
+      env,
+      {} as ExecutionContext,
+    );
+    const res = await worker.fetch(
+      makeRequest("GET", `${BASE}/rooms/lp1/viewer?since=-1&wait=10`),
+      env,
+      {} as ExecutionContext,
+    );
+    const body = (await res.json()) as MessagesResponse;
+    expect(body.messages).toHaveLength(1);
+  });
+
+  it("times out with empty messages when nothing arrives", async () => {
+    // wait=1 (1s); should resolve empty quickly.
+    const res = await worker.fetch(
+      makeRequest("GET", `${BASE}/rooms/lp2/viewer?since=-1&wait=1`),
+      env,
+      {} as ExecutionContext,
+    );
+    const body = (await res.json()) as MessagesResponse;
+    expect(body.messages).toHaveLength(0);
+    expect(body.nextSince).toBe(-1);
+  });
+
+  it("a held long-poll is resolved by a later POST from the other peer", async () => {
+    const pollPromise = worker
+      .fetch(
+        makeRequest("GET", `${BASE}/rooms/lp3/viewer?since=-1&wait=10`),
+        env,
+        {} as ExecutionContext,
+      )
+      .then((r) => r.json() as Promise<MessagesResponse>);
+
+    // Post after the poll is already waiting.
+    await worker.fetch(
+      makeRequest("POST", `${BASE}/rooms/lp3/host`, { type: "offer", sdp: "x" }),
+      env,
+      {} as ExecutionContext,
+    );
+
+    const body = await pollPromise;
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]!.payload).toEqual({ type: "offer", sdp: "x" });
+    expect(body.nextSince).toBe(0);
+  });
+});
+
+describe("WebSocket route", () => {
+  it("rejects /ws without an Upgrade header", async () => {
+    const env = makeEnv();
+    const res = await worker.fetch(
+      makeRequest("GET", `${BASE}/rooms/wsroom/viewer/ws`),
+      env,
+      {} as ExecutionContext,
+    );
+    expect(res.status).toBe(426);
   });
 });
 

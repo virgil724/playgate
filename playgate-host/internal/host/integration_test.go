@@ -3,6 +3,9 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,3 +259,211 @@ func TestApplyViewerMessageSkipsStaleAnswer(t *testing.T) {
 	}
 }
 
+// buildRealAnswer creates a genuine SDP answer for the given peer's offer so
+// that SetRemoteDescription in applyViewerMessage succeeds.
+func buildRealAnswer(t *testing.T, peer *rtc.Peer) string {
+	t.Helper()
+	ctx := context.Background()
+	offer, err := peer.CreateOffer(ctx)
+	if err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("new browser: %v", err)
+	}
+	t.Cleanup(func() { _ = browser.Close() })
+	if err := browser.SetRemoteDescription(offer); err != nil {
+		t.Fatalf("browser SetRemoteDescription: %v", err)
+	}
+	answer, err := browser.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("CreateAnswer: %v", err)
+	}
+	if err := browser.SetLocalDescription(answer); err != nil {
+		t.Fatalf("browser SetLocalDescription: %v", err)
+	}
+	return answer.SDP
+}
+
+// pollForAnswerServer builds an httptest server whose /rooms/ handler behaves
+// as a signaling Worker for pollForAnswer tests. On the first poll it holds for
+// holdFor before replying; subsequent polls reply immediately. answerPayload is
+// returned as the sole message in the first delayed response.
+func pollForAnswerServer(t *testing.T, holdFor time.Duration, answerPayload []byte) (*httptest.Server, *int64) {
+	t.Helper()
+	var reqCount int64
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&reqCount, 1)
+		n := atomic.LoadInt64(&reqCount)
+		if n == 1 && holdFor > 0 {
+			select {
+			case <-time.After(holdFor):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		ts := time.Now().UTC().Format(time.RFC3339Nano)
+		var msgs []signaling.Message
+		if n == 1 && answerPayload != nil {
+			msgs = []signaling.Message{{Seq: 0, Ts: ts, Payload: json.RawMessage(answerPayload)}}
+		}
+		next := -1
+		if len(msgs) > 0 {
+			next = msgs[len(msgs)-1].Seq
+		}
+		type pollResp struct {
+			Messages  []signaling.Message `json:"messages"`
+			NextSince int                 `json:"nextSince"`
+		}
+		_ = json.NewEncoder(rw).Encode(pollResp{Messages: msgs, NextSince: next})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &reqCount
+}
+
+// TestPollForAnswerLongPollReceivesAnswer verifies that pollForAnswer succeeds
+// when the signaling server holds the first request for a short delay and then
+// delivers an SDP answer.
+func TestPollForAnswerLongPollReceivesAnswer(t *testing.T) {
+	peer, err := rtc.NewPeer(rtc.Config{Logger: discardLogger()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+
+	answerSDP := buildRealAnswer(t, peer)
+	payload, _ := json.Marshal(signaling.SDPMessage{Type: "answer", SDP: answerSDP})
+
+	// Server holds for 150ms (> 1s threshold is NOT needed — we just need it to
+	// deliver the answer; the 1s threshold only gates the anti-hot-spin sleep).
+	srv, _ := pollForAnswerServer(t, 150*time.Millisecond, payload)
+
+	sc, err := signaling.New(signaling.Config{
+		BaseURL:    srv.URL,
+		RoomID:     "r",
+		HTTPClient: &http.Client{}, // no shared timeout — long-poll uses ctx deadline
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cm := &connManager{
+		log:    discardLogger(),
+		client: sc,
+		poll:   10 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cm.pollForAnswer(ctx, peer, ""); err != nil {
+		t.Fatalf("pollForAnswer returned error: %v", err)
+	}
+}
+
+// TestPollForAnswerOldServerDegrades verifies that when the server ignores the
+// wait parameter and returns immediately with no messages, pollForAnswer sleeps
+// c.poll between calls instead of hot-spinning. We measure request rate: with
+// poll=20ms and a 100ms window the loop should make far fewer than 100 calls.
+func TestPollForAnswerOldServerDegrades(t *testing.T) {
+	// Old server: always returns immediately with no messages.
+	var reqCount int64
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&reqCount, 1)
+		type pollResp struct {
+			Messages  []signaling.Message `json:"messages"`
+			NextSince int                 `json:"nextSince"`
+		}
+		_ = json.NewEncoder(rw).Encode(pollResp{Messages: nil, NextSince: -1})
+	}))
+	t.Cleanup(srv.Close)
+
+	sc, err := signaling.New(signaling.Config{
+		BaseURL:    srv.URL,
+		RoomID:     "r",
+		HTTPClient: &http.Client{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const pollInterval = 20 * time.Millisecond
+	cm := &connManager{
+		log:    discardLogger(),
+		client: sc,
+		poll:   pollInterval,
+	}
+
+	// Run for 3 poll intervals and then cancel. With anti-hot-spin sleeping
+	// pollInterval between each call, we expect at most ~4 requests.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*pollInterval)
+	defer cancel()
+
+	// Run in background; expect errTimeoutNoAnswer or ctx cancel.
+	done := make(chan error, 1)
+	go func() {
+		// Use a peer stub — we only care about request count, not SDP application.
+		// Since no answer is ever delivered, pollForAnswer will exit via ctx cancel.
+		done <- cm.pollForAnswer(ctx, nil, "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pollForAnswer did not return after ctx cancel")
+	}
+
+	got := atomic.LoadInt64(&reqCount)
+	// With pollInterval=20ms and window=3*20ms=60ms, at most 4 iterations
+	// (one immediate + one per sleep interval). Allow a generous upper bound of 8
+	// to avoid flakiness on slow CI without permitting actual hot-spinning (which
+	// would produce hundreds of calls).
+	if got > 8 {
+		t.Errorf("too many requests in degraded mode: got %d, want ≤8 (anti-hot-spin not working)", got)
+	}
+}
+
+// TestPollForAnswerCtxCancelMidHold verifies that cancelling the context while
+// a long-poll request is held by the server causes pollForAnswer to return
+// promptly (within ~1 second).
+func TestPollForAnswerCtxCancelMidHold(t *testing.T) {
+	// Server holds until the client disconnects.
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // released when client aborts
+	}))
+	t.Cleanup(srv.Close)
+
+	sc, err := signaling.New(signaling.Config{
+		BaseURL:    srv.URL,
+		RoomID:     "r",
+		HTTPClient: &http.Client{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cm := &connManager{
+		log:    discardLogger(),
+		client: sc,
+		poll:   10 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- cm.pollForAnswer(ctx, nil, "")
+	}()
+
+	// Give it a moment to reach the server, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("pollForAnswer returned non-nil error after ctx cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pollForAnswer did not return within 1s after ctx cancel")
+	}
+}

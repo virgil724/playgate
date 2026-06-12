@@ -3,10 +3,15 @@ main = "src/index.ts"
 compatibility_date = "2024-05-29"
 compatibility_flags = ["nodejs_compat"]
 
-[[kv_namespaces]]
-binding = "SIGNALING_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_NAMESPACE_ID"
+# Per-room Durable Object holding transient signaling state (replaces KV).
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomDO"
+
+# SQLite-backed DO classes are REQUIRED for the free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
 
 # Secrets (set via `wrangler secret put`):
 #   TURN_KEY_ID       - Cloudflare Realtime TURN key ID

@@ -200,44 +200,81 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 	})
 }
 
+// longPollWait is the duration requested from the Durable Object Worker.
+// The server caps its own wait at 25s; we ask for exactly 25s.
+const longPollWait = 25 * time.Second
+
 // pollForAnswer polls the Worker for the viewer's answer and ICE candidates and
 // applies them, returning once the answer has been set or ctx is cancelled.
 // offerTs is the Worker-assigned timestamp of our own offer; answers older than
 // it are stale leftovers from previous attempts and are skipped ("" = unknown,
 // apply unconditionally).
+//
+// Long-poll mode: each iteration calls PollWait(..., 25s) so a Durable Object
+// Worker can hold the request open until a message arrives. Old Workers that
+// ignore the wait param return immediately; the anti-hot-spin guard detects that
+// (round-trip < 1s with no messages) and sleeps c.poll before the next call,
+// degrading to the pre-existing polling behaviour.
 func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer, offerTs string) error {
 	since := -1
 	gotAnswer := false
-	ticker := time.NewTicker(c.poll)
-	defer ticker.Stop()
+	longPollLogged := false
 
 	// Bound the wait for an answer so a stale room doesn't block forever; once an
 	// answer arrives we keep polling for trickle ICE within the connection ctx.
 	deadline := time.Now().Add(60 * time.Second)
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return nil
-		case <-ticker.C:
-			msgs, next, err := c.client.Poll(ctx, signaling.PeerHost, since)
-			if err != nil {
-				c.log.Debug("poll failed", "err", err)
-				continue
+		}
+
+		start := time.Now()
+		msgs, next, err := c.client.PollWait(ctx, signaling.PeerHost, since, longPollWait)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			// ctx cancellation — exit cleanly.
+			if ctx.Err() != nil {
+				return nil
 			}
-			since = next
+			c.log.Debug("poll failed", "err", err)
+			// Throttle errors so they don't hot-loop.
+			if !sleepCtx(ctx, c.poll) {
+				return nil
+			}
+			continue
+		}
+
+		since = next
+
+		if len(msgs) > 0 {
+			if !longPollLogged {
+				longPollLogged = true
+				c.log.Info("long-poll mode active", "first_wait", elapsed.Round(time.Millisecond))
+			}
 			for _, m := range msgs {
 				if c.applyViewerMessage(peer, m, offerTs) {
 					gotAnswer = true
 				}
 			}
-			if !gotAnswer && time.Now().After(deadline) {
-				return errTimeoutNoAnswer
-			}
-			if gotAnswer {
-				// Answer applied; ICE is non-trickle on both ends so we can stop.
+		} else if elapsed < time.Second {
+			// Server returned immediately with no messages — it does not understand
+			// the wait parameter (old Worker). Log once and degrade to polling cadence.
+			c.log.Debug("server ignored long-poll wait; degrading to short-poll", "elapsed", elapsed.Round(time.Millisecond))
+			if !sleepCtx(ctx, c.poll) {
 				return nil
 			}
+		}
+		// If elapsed >= 1s and no messages, the server held and timed out on its
+		// end — that's normal; loop immediately for the next long-poll.
+
+		if !gotAnswer && time.Now().After(deadline) {
+			return errTimeoutNoAnswer
+		}
+		if gotAnswer {
+			// Answer applied; ICE is non-trickle on both ends so we can stop.
+			return nil
 		}
 	}
 }

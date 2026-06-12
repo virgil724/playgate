@@ -2,8 +2,8 @@
  * Cloudflare Worker environment bindings.
  */
 export interface Env {
-  /** Workers KV namespace for transient signaling messages (TTL 5 min) */
-  SIGNALING_KV: KVNamespace;
+  /** Per-room Durable Object namespace holding transient signaling state. */
+  ROOMS: DurableObjectNamespace;
 
   /** Cloudflare Realtime TURN key ID (wrangler secret) */
   TURN_KEY_ID?: string;
@@ -32,11 +32,6 @@ export interface SignalingMessage {
   ts: string;
   /** Arbitrary JSON payload (SDP offer/answer or ICE candidate) */
   payload: unknown;
-}
-
-/** The envelope stored in KV for one peer's queue. */
-export interface PeerQueue {
-  messages: SignalingMessage[];
 }
 
 /** Response body for GET /rooms/:roomId/:peer */

@@ -208,12 +208,42 @@ func (c *Client) post(ctx context.Context, peer Peer, payload any) (postResponse
 // returns the messages (envelope incl. seq/ts plus raw payload) and the next
 // "since" value to use.
 func (c *Client) Poll(ctx context.Context, self Peer, since int) ([]Message, int, error) {
-	url := fmt.Sprintf("%s/rooms/%s/%s?since=%d", c.base, c.room, self, since)
-	req, err := c.newRequest(ctx, http.MethodGet, url, nil)
+	return c.PollWait(ctx, self, since, 0)
+}
+
+// PollWait is like Poll but appends &wait=<seconds> when wait > 0, asking a
+// supporting Durable Object Worker to hold the request until a message arrives
+// or the server-side timeout elapses. Old Workers that do not understand the
+// parameter return immediately — callers should detect that case (response time
+// < 1 second) and throttle themselves to avoid a hot-spin.
+//
+// When wait > 0 a per-request context deadline of wait+10s is applied so a
+// stalled server cannot hold the connection longer than that. The shared
+// http.Client timeout (typically 10s) is intentionally left unchanged; adding a
+// per-request deadline via context is the correct mechanism for long-polls.
+func (c *Client) PollWait(ctx context.Context, self Peer, since int, wait time.Duration) ([]Message, int, error) {
+	rawURL := fmt.Sprintf("%s/rooms/%s/%s?since=%d", c.base, c.room, self, since)
+	reqCtx := ctx
+	httpClient := c.http
+	if wait > 0 {
+		waitSec := int(wait.Seconds())
+		rawURL = fmt.Sprintf("%s&wait=%d", rawURL, waitSec)
+		// http.Client.Timeout is an absolute cap that a context deadline can
+		// only shorten, never extend — the shared client (typically 10s) would
+		// kill a held 25s request. Use a copy with the cap removed and bound
+		// the request with a wait+10s context deadline instead.
+		lp := *c.http
+		lp.Timeout = 0
+		httpClient = &lp
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, wait+10*time.Second)
+		defer cancel()
+	}
+	req, err := c.newRequest(reqCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, since, err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, since, fmt.Errorf("signaling: poll %s: %w", self, err)
 	}

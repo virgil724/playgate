@@ -2,7 +2,9 @@
 
 Cloudflare Workers-based WebRTC signaling server for PlayGate.
 
-Implements **T7** (SDP offer/answer + ICE candidate exchange via Workers KV) and **T8** (short-lived Cloudflare Realtime TURN credential issuance).
+Implements **T7** (SDP offer/answer + ICE candidate exchange via a per-room Durable Object, with HTTP polling, HTTP long-poll, and WebSocket push) and **T8** (short-lived Cloudflare Realtime TURN credential issuance).
+
+Room state lives in a per-room **Durable Object** (`RoomDO`), selected by `env.ROOMS.idFromName(roomId)`. Workers KV is no longer used — the DO holds each room's per-peer message queues in SQLite-backed storage and pushes new messages over WebSocket / resolves long-polls instantly, so an idle host and an open browser tab no longer burn polling reads.
 
 ---
 
@@ -31,7 +33,8 @@ Content-Type: application/json
 ```
 
 - `peer` must be `host` or `viewer`.
-- Appends the payload to the sender's KV queue with a 5-minute TTL.
+- Appends the payload to the sender's queue inside the room's Durable Object.
+- A host SDP **offer** starts a fresh session: it replaces the host queue (seq continuity preserved as `lastSeq + 1`) and deletes the viewer queue, so stale ICE/answers from a dead peer never survive a new offer.
 
 **Response 201:**
 ```json
@@ -50,13 +53,14 @@ curl -X POST https://<worker>.workers.dev/rooms/my-room/host \
 #### Poll for messages
 
 ```
-GET /rooms/{roomId}/{peer}?since=<lastSeq>
+GET /rooms/{roomId}/{peer}?since=<lastSeq>[&wait=<seconds>]
 Authorization: Bearer <session-token>
 ```
 
 Returns messages posted by the **other** peer.  
 `since` (optional): last `seq` the caller has already processed; messages with `seq > since` are returned.  
-Omit `since` (or pass `-1`) to receive all messages.
+Omit `since` (or pass `-1`) to receive all messages.  
+`wait` (optional, NEW): seconds to hold the request inside the room DO when there are **no** new messages, up to a server cap of **25 s**. When a new message arrives within that window the request returns immediately; otherwise it returns an empty `messages` list on timeout. `wait` absent or `0` → immediate response (classic polling).
 
 **Response 200:**
 ```json
@@ -72,9 +76,46 @@ Omit `since` (or pass `-1`) to receive all messages.
 }
 ```
 
-**Example — viewer polls for host's offer:**
+**Example — viewer long-polls for host's offer (push-like, no busy loop):**
 ```bash
-curl "https://<worker>.workers.dev/rooms/my-room/viewer?since=-1"
+curl "https://<worker>.workers.dev/rooms/my-room/viewer?since=-1&wait=25"
+```
+
+---
+
+#### Subscribe over WebSocket (push)
+
+```
+GET /rooms/{roomId}/{peer}/ws
+Upgrade: websocket
+Authorization: Bearer <session-token>
+```
+
+Opens a WebSocket into the room DO using the **hibernation API**. On connect the
+server immediately sends the **other** peer's current backlog, one frame per
+message. Thereafter every new message from the other peer is pushed live.
+
+- **Server→client frame** (one per message):
+  ```json
+  { "seq": 0, "ts": "2024-01-01T00:00:00.000Z", "payload": { "type": "offer", "sdp": "..." } }
+  ```
+- **Client→server frame**: a raw JSON payload — the same body you would `POST`.
+  The server assigns `seq`/`ts`, applies the host offer-reset rule, stores it,
+  and pushes it as a `{seq,ts,payload}` frame to all of the other peer's sockets
+  (and resolves any pending long-poll for that peer).
+- Malformed JSON frames are ignored (the server may reply `{"error":"bad json"}`)
+  and never close the socket.
+- Multiple sockets per peer are allowed; pushes fan out to all of them.
+
+**Browser usage:**
+```js
+const ws = new WebSocket(`wss://<worker>.workers.dev/rooms/my-room/viewer/ws`);
+ws.onmessage = (e) => {
+  const { seq, ts, payload } = JSON.parse(e.data);
+  // handle SDP offer / ICE candidate from the host
+};
+// send an answer / ICE candidate:
+ws.send(JSON.stringify({ type: "answer", sdp: "v=0\r\n..." }));
 ```
 
 ---
@@ -144,23 +185,24 @@ The auth layer is a configurable stub, ready to be replaced with ed25519 JWT ver
 - A [Cloudflare account](https://dash.cloudflare.com/) (free tier is fine)
 - `wrangler` CLI (`npm i -g wrangler` or use `npx wrangler`)
 
-### 2. Create a KV namespace
+### 2. Durable Object (no KV namespace needed)
 
-```bash
-npx wrangler kv namespace create SIGNALING_KV
-# Note the returned id
+There is **no KV namespace to create** anymore. Room state lives in the
+per-room Durable Object `RoomDO`, configured in `wrangler.toml`:
 
-npx wrangler kv namespace create SIGNALING_KV --preview
-# Note the returned preview_id
-```
-
-Edit `wrangler.toml` and replace the placeholder values:
 ```toml
-[[kv_namespaces]]
-binding = "SIGNALING_KV"
-id = "<your-kv-namespace-id>"
-preview_id = "<your-kv-preview-namespace-id>"
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomDO"
+
+# SQLite-backed DO classes are REQUIRED on the free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
 ```
+
+The `[[migrations]]` block with `new_sqlite_classes` is applied automatically on
+the first `wrangler deploy`; no manual namespace provisioning is required.
 
 ### 3. Set secrets
 
@@ -204,7 +246,7 @@ npm install
 npx wrangler dev
 ```
 
-The Worker runs at `http://localhost:8787`. KV is backed by a local SQLite store.
+The Worker runs at `http://localhost:8787`. The room Durable Object is backed by a local SQLite store under `.wrangler/`.
 
 ---
 
@@ -214,7 +256,7 @@ The Worker runs at `http://localhost:8787`. KV is backed by a local SQLite store
 # TypeScript type check
 npx tsc --noEmit
 
-# Unit tests (27 tests covering T7 + T8)
+# Unit tests (51 tests covering room logic, router, long-poll, T8)
 npx vitest run
 
 # Dry-run build (no Cloudflare login required)
@@ -235,17 +277,18 @@ json.NewDecoder(resp.Body).Decode(&turnCreds)
 sdpOffer, _ := json.Marshal(map[string]string{"type": "offer", "sdp": pc.LocalDescription().SDP})
 http.Post(signalingURL+"/rooms/"+roomID+"/host", "application/json", bytes.NewReader(sdpOffer))
 
-// 3. Poll for viewer's answer
+// 3. Long-poll for the viewer's answer / ICE (wait=25 → no busy loop).
+//    Or open GET /rooms/{roomID}/host/ws for push instead.
 since := -1
 for {
-    r, _ := http.Get(fmt.Sprintf("%s/rooms/%s/host?since=%d", signalingURL, roomID, since))
+    r, _ := http.Get(fmt.Sprintf("%s/rooms/%s/host?since=%d&wait=25", signalingURL, roomID, since))
     var msgs MessagesResponse
     json.NewDecoder(r.Body).Decode(&msgs)
     for _, m := range msgs.Messages {
         // handle SDP answer or ICE candidate
     }
     since = msgs.NextSince
-    time.Sleep(500 * time.Millisecond)
+    // wait=25 already blocked up to 25s server-side; reconnect immediately.
 }
 ```
 
@@ -266,17 +309,19 @@ for {
 ```
 playgate-signaling/
 ├── src/
-│   ├── index.ts        # Worker entry point + routing
-│   ├── types.ts        # Shared TypeScript types + Env bindings
-│   ├── cors.ts         # CORS headers + response helpers
-│   ├── auth.ts         # Auth stub (SESSION_SECRET / AUTH_DISABLED)
-│   ├── rooms.ts        # T7 signaling endpoints
-│   ├── turn.ts         # T8 TURN credential endpoint
+│   ├── index.ts          # Worker entry: auth/CORS/turn/healthz + routes /rooms/* to the DO
+│   ├── roomDO.ts         # RoomDO Durable Object: HTTP + long-poll + WebSocket hibernation glue
+│   ├── roomState.ts      # Pure room/queue logic (append, offer-reset, since-filter, seq) — unit-tested
+│   ├── types.ts          # Shared TypeScript types + Env bindings (ROOMS: DurableObjectNamespace)
+│   ├── cors.ts           # CORS headers + response helpers
+│   ├── auth.ts           # Auth stub (SESSION_SECRET / AUTH_DISABLED)
+│   ├── turn.ts           # T8 TURN credential endpoint
 │   └── __tests__/
-│       ├── helpers.ts       # MockKVNamespace + test factories
-│       ├── rooms.test.ts    # 18 tests for T7
-│       └── turn.test.ts     # 9 tests for T8
-├── wrangler.toml       # Worker config + KV binding
+│       ├── helpers.ts          # Fake DO state/namespace + request factories
+│       ├── roomState.test.ts   # 15 tests for the pure room logic
+│       ├── rooms.test.ts       # 27 tests for the router + long-poll
+│       └── turn.test.ts        # 9 tests for T8
+├── wrangler.toml         # Worker config + DO binding + sqlite migration
 ├── tsconfig.json
 ├── vitest.config.ts
 └── package.json

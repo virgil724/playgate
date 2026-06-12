@@ -39,12 +39,20 @@ export async function checkAuth(
   }
 
   const authHeader = request.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return { ok: false, reason: "Missing Bearer token" };
+  if (authHeader.startsWith("Bearer ")) {
+    const token = authHeader.slice("Bearer ".length).trim();
+    return validateToken(token, env.SESSION_SECRET);
   }
 
-  const token = authHeader.slice("Bearer ".length).trim();
-  return validateToken(token, env.SESSION_SECRET);
+  // Browsers cannot set headers on a WebSocket handshake, so /ws upgrades
+  // (and only requests without an Authorization header) may carry the token
+  // as a ?token= query parameter instead.
+  const queryToken = new URL(request.url).searchParams.get("token");
+  if (queryToken) {
+    return validateToken(queryToken.trim(), env.SESSION_SECRET);
+  }
+
+  return { ok: false, reason: "Missing Bearer token" };
 }
 
 /**

@@ -231,3 +231,140 @@ func TestNewValidation(t *testing.T) {
 		t.Error("expected error for empty RoomID")
 	}
 }
+
+// TestPollWaitOutlivesClientTimeout pins the long-poll timeout fix:
+// http.Client.Timeout is an absolute cap that a context deadline can only
+// shorten, so PollWait must bypass the shared client's cap or a held request
+// dies early (the production default is 10s vs a 25s wait).
+func TestPollWaitOutlivesClientTimeout(t *testing.T) {
+	const hold = 500 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		time.Sleep(hold)
+		_ = json.NewEncoder(rw).Encode(messagesResponse{
+			Messages:  []Message{{Seq: 1, Ts: fakeTs(), Payload: json.RawMessage(`{"type":"answer","sdp":"v=0"}`)}},
+			NextSince: 1,
+		})
+	}))
+	defer srv.Close()
+
+	// Shared client timeout far below the server hold; wait must still win.
+	c, err := New(Config{BaseURL: srv.URL, RoomID: "r", HTTPClient: &http.Client{Timeout: 100 * time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, _, err := c.PollWait(context.Background(), PeerHost, -1, 2*time.Second)
+	if err != nil {
+		t.Fatalf("PollWait died before the server replied (client cap not bypassed): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d, want 1", len(msgs))
+	}
+
+	// And the short-poll path must still honour the shared client timeout.
+	if _, _, err := c.Poll(context.Background(), PeerHost, -1); err == nil {
+		t.Fatal("Poll with 100ms client timeout against a 500ms hold should fail")
+	}
+}
+
+// TestPollWaitSendsWaitParam verifies that PollWait appends &wait=<seconds> to
+// the URL and that a server-side delay is tolerated — the response is returned
+// intact once the server replies.
+func TestPollWaitSendsWaitParam(t *testing.T) {
+	const holdDuration = 100 * time.Millisecond // fast for CI
+
+	var gotWait string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		gotWait = r.URL.Query().Get("wait")
+		// Simulate a server hold before replying.
+		time.Sleep(holdDuration)
+		_ = json.NewEncoder(rw).Encode(messagesResponse{
+			Messages:  []Message{{Seq: 7, Ts: fakeTs(), Payload: json.RawMessage(`{"type":"answer","sdp":"v=0"}`)}},
+			NextSince: 7,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{BaseURL: srv.URL, RoomID: "r", HTTPClient: &http.Client{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	msgs, next, err := c.PollWait(context.Background(), PeerHost, -1, 2*time.Second)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("PollWait: %v", err)
+	}
+	if gotWait != "2" {
+		t.Errorf("wait query param = %q, want %q", gotWait, "2")
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	if next != 7 {
+		t.Errorf("nextSince = %d, want 7", next)
+	}
+	if elapsed < holdDuration {
+		t.Errorf("elapsed %v < hold %v — server hold was not respected", elapsed, holdDuration)
+	}
+}
+
+// TestPollWaitCtxCancellation verifies that cancelling the context during a
+// held long-poll returns promptly (no hang).
+func TestPollWaitCtxCancellation(t *testing.T) {
+	// Server holds indefinitely until the client disconnects.
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // released when client aborts
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{BaseURL: srv.URL, RoomID: "r", HTTPClient: &http.Client{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.PollWait(ctx, PeerHost, -1, 25*time.Second)
+		done <- err
+	}()
+
+	// Give the goroutine time to reach the server, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected an error after ctx cancellation, got nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PollWait did not return within 1s after ctx cancellation")
+	}
+}
+
+// TestPollWaitZeroWait verifies that Poll (which delegates with wait=0) does NOT
+// append a wait parameter — keeping backward compatibility with old Workers.
+func TestPollWaitZeroWait(t *testing.T) {
+	var gotRaw string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		gotRaw = r.URL.RawQuery
+		_ = json.NewEncoder(rw).Encode(messagesResponse{})
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{BaseURL: srv.URL, RoomID: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.Poll(context.Background(), PeerHost, 0); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotRaw, "wait") {
+		t.Errorf("Poll appended wait to query; raw=%q", gotRaw)
+	}
+}
