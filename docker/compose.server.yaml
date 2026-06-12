@@ -1,0 +1,58 @@
+# docker/compose.server.yaml — playgate-server on a public VPS (e.g. Oracle Free)
+# ─────────────────────────────────────────────────────────────────────────────
+# Server-only stack: the REST API + Cloudflare Tunnel for HTTPS ingress +
+# Watchtower for hands-off updates. The streaming host stays on your LAN box;
+# see compose.example.yaml for the combined single-machine setup.
+#
+# One-time setup:
+#   1. Cloudflare dashboard → Zero Trust → Networks → Tunnels → Create tunnel
+#      (Cloudflared connector). Copy the tunnel token.
+#   2. In the tunnel's "Public hostnames" add e.g.
+#        playgate-api.<your-domain>  →  HTTP  →  server:8080
+#   3. On the VPS:
+#        echo "TUNNEL_TOKEN=<paste token>" > .env
+#        docker compose -f compose.server.yaml up -d
+#
+# No inbound firewall ports are needed — cloudflared dials out. TLS is
+# terminated by Cloudflare on your domain.
+#
+# Updates are automatic: CI pushes ghcr.io/.../playgate-server:latest on every
+# merge to main; Watchtower polls every 5 minutes and recreates the container.
+#
+# Back up the "server-data" volume — it holds the SQLite DB and the ed25519
+# signing key (losing the key invalidates every host's configured public key).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  server:
+    image: ghcr.io/virgil724/playgate-server:latest
+    restart: unless-stopped
+    # No ports: published only through the tunnel on the compose network.
+    volumes:
+      - server-data:/data
+    environment:
+      PLAYGATE_ADDR: ":8080"
+      PLAYGATE_DB: "/data/playgate.db"
+      PLAYGATE_KEY: "/data/ed25519.pem"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - server
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Only touch containers that opted in via label; prune old images.
+    command: --label-enable --interval 300 --cleanup
+
+volumes:
+  server-data:
