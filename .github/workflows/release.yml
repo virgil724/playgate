@@ -1,0 +1,164 @@
+# Build and publish playgate-host release binaries + tarballs on tag push.
+#
+# Triggering:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# What this produces in the GitHub Release:
+#   playgate-host-linux-amd64            ← bare binary (install-host.sh §5)
+#   playgate-host-linux-arm64            ← bare binary (install-host.sh §5)
+#   playgate-host-<tag>-linux-amd64.tar.gz  ← full bundle tarball
+#   playgate-host-<tag>-linux-arm64.tar.gz  ← full bundle tarball
+#   SHA256SUMS.txt
+#
+# install-host.sh §5 downloads the bare binary directly by name:
+#   latest  → .../releases/latest/download/playgate-host-linux-${ARCH}
+#   version → .../releases/download/v${VERSION}/playgate-host-linux-${ARCH}
+# The bare binary names MUST match exactly — do not rename them.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish playgate-host release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: playgate-host/go.mod
+          cache-dependency-path: playgate-host/go.sum
+
+      # ── Tests (release fails on red) ──────────────────────────────────────
+      - name: go test
+        working-directory: playgate-host
+        run: go test ./...
+
+      # ── Cross-build — mirror Makefile host-linux-* targets exactly ────────
+      # Makefile lines 47-63:
+      #   CGO_ENABLED=0 GOOS=linux GOARCH=<arch>
+      #   go -C playgate-host build -trimpath
+      #     -ldflags "-s -w -X main.Version=... -X main.Commit=... -X main.BuildDate=..."
+      #     -o dist/playgate-host-linux-<arch>
+      #     ./cmd/host
+      - name: Build linux/amd64
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go -C playgate-host build \
+            -trimpath \
+            -ldflags "-s -w \
+              -X main.Version=${{ github.ref_name }} \
+              -X main.Commit=${{ github.sha }} \
+              -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o ../dist/playgate-host-linux-amd64 \
+            ./cmd/host
+
+      - name: Build linux/arm64
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go -C playgate-host build \
+            -trimpath \
+            -ldflags "-s -w \
+              -X main.Version=${{ github.ref_name }} \
+              -X main.Commit=${{ github.sha }} \
+              -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o ../dist/playgate-host-linux-arm64 \
+            ./cmd/host
+
+      # ── Assemble tarballs ─────────────────────────────────────────────────
+      # Each tarball contains a top-level directory:
+      #   playgate-host-<tag>-linux-<arch>/
+      #     playgate-host               ← binary
+      #     config.example.yaml         ← from playgate-host/
+      #     nxbt-daemon/
+      #       nxbtd.py
+      #       requirements.txt
+      #       README.md
+      #     systemd/
+      #       nxbtd.service
+      #       playgate-host.service
+      #     install-host.sh
+      #     TERMS.md
+      - name: Assemble tarballs
+        run: |
+          VERSION="${{ github.ref_name }}"
+
+          for ARCH in amd64 arm64; do
+            BUNDLE="playgate-host-${VERSION}-linux-${ARCH}"
+            STAGEDIR="dist/staging/${BUNDLE}"
+
+            mkdir -p "${STAGEDIR}/nxbt-daemon"
+            mkdir -p "${STAGEDIR}/systemd"
+
+            # Binary
+            cp "dist/playgate-host-linux-${ARCH}" "${STAGEDIR}/playgate-host"
+            chmod +x "${STAGEDIR}/playgate-host"
+
+            # Config template
+            cp playgate-host/config.example.yaml "${STAGEDIR}/config.example.yaml"
+
+            # nxbt-daemon (exclude test_protocol.py and __pycache__)
+            cp playgate-host/nxbt-daemon/nxbtd.py       "${STAGEDIR}/nxbt-daemon/"
+            cp playgate-host/nxbt-daemon/requirements.txt "${STAGEDIR}/nxbt-daemon/"
+            cp playgate-host/nxbt-daemon/README.md        "${STAGEDIR}/nxbt-daemon/"
+
+            # systemd units
+            cp scripts/systemd/nxbtd.service          "${STAGEDIR}/systemd/"
+            cp scripts/systemd/playgate-host.service  "${STAGEDIR}/systemd/"
+
+            # Installer script
+            cp scripts/install-host.sh "${STAGEDIR}/install-host.sh"
+            chmod +x "${STAGEDIR}/install-host.sh"
+
+            # TERMS.md (present in repo root)
+            if [[ -f TERMS.md ]]; then
+              cp TERMS.md "${STAGEDIR}/TERMS.md"
+            fi
+
+            # Create tarball
+            tar -czf "dist/${BUNDLE}.tar.gz" \
+              -C dist/staging \
+              "${BUNDLE}"
+
+            echo "Created dist/${BUNDLE}.tar.gz"
+          done
+
+      # ── SHA256SUMS.txt ────────────────────────────────────────────────────
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd dist
+          sha256sum \
+            playgate-host-linux-amd64 \
+            playgate-host-linux-arm64 \
+            playgate-host-${{ github.ref_name }}-linux-amd64.tar.gz \
+            playgate-host-${{ github.ref_name }}-linux-arm64.tar.gz \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # ── Publish GitHub Release ─────────────────────────────────────────────
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/playgate-host-linux-amd64
+            dist/playgate-host-linux-arm64
+            dist/playgate-host-${{ github.ref_name }}-linux-amd64.tar.gz
+            dist/playgate-host-${{ github.ref_name }}-linux-arm64.tar.gz
+            dist/SHA256SUMS.txt
