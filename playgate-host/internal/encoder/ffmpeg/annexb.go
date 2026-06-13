@@ -6,12 +6,18 @@ package ffmpeg
 // code: either 0x000001 (3-byte) or 0x00000001 (4-byte). The low 5 bits of the
 // first byte after the start code give the NAL unit type.
 //
-// We group NAL units into access units (AUs). For our low-latency, no-B-frame
-// stream an AU is "everything from one VCL slice's leading parameter sets up to
-// (but not including) the next VCL slice". Practically we accumulate NAL units
-// and cut an AU when we see the next slice NALU (type 1 or 5) after we have
-// already seen one in the current AU. SPS/PPS that precede an IDR are folded
-// into the keyframe AU so the packet is independently decodable.
+// We group NAL units into access units (AUs). An AU contains all NAL units that
+// belong to a single coded picture: parameter sets and SEI that precede it, plus
+// every VCL slice of that picture. A multi-slice frame (e.g. libx264 with
+// sliced-threads) produces multiple VCL NALUs per picture; they must all be
+// grouped into the same AU or the decoder sees incomplete frames (green screen).
+//
+// To distinguish "continuation slice of the same picture" from "first slice of
+// the next picture" we check first_mb_in_slice, the first syntax element of the
+// slice header (H.264 §7.3.3). It is unsigned exp-Golomb coded: value 0 encodes
+// as a single '1' bit, so if the MSB of the first slice-header byte is 1, the
+// slice starts at macroblock 0 (= new picture). If it is 0, the slice starts at
+// a later macroblock (= continuation of the current picture).
 
 // NAL unit types we care about (H.264 / ITU-T H.264 Table 7-1).
 const (
@@ -32,6 +38,11 @@ type nalUnit struct {
 	end int
 	// nalType is the NAL unit type (low 5 bits of the first payload byte).
 	nalType byte
+	// firstSlice is true for VCL NAL units (type 1 or 5) where
+	// first_mb_in_slice == 0, meaning this is the first slice of a new coded
+	// picture. Continuation slices of the same picture have firstSlice == false.
+	// For non-VCL NALUs this field is meaningless.
+	firstSlice bool
 }
 
 // isVCL reports whether the NAL unit carries coded slice data (a picture).
@@ -83,7 +94,26 @@ func splitNALUs(buf []byte) []nalUnit {
 			if payloadStart < len(buf) {
 				t = buf[payloadStart] & 0x1f
 			}
-			out = append(out, nalUnit{start: start, end: end, nalType: t})
+			fs := false
+			if t == nalTypeNonIDR || t == nalTypeIDR {
+				// Check first_mb_in_slice: the first syntax element in the
+				// slice header (the byte immediately after the 1-byte NAL
+				// header). Value 0 encodes as a single '1' bit in unsigned
+				// exp-Golomb, so MSB=1 means first_mb_in_slice==0 → this
+				// slice starts a new picture. MSB=0 means first_mb_in_slice>0
+				// → continuation slice of the current picture.
+				sliceStart := payloadStart + 1
+				if sliceStart < end {
+					fs = buf[sliceStart]&0x80 != 0
+				} else {
+					// Can't read slice header byte yet (incomplete NALU at
+					// buffer end). Default to false (assume continuation) so
+					// we don't prematurely cut the AU. The trailing NALU will
+					// be re-parsed once more data arrives.
+					fs = false
+				}
+			}
+			out = append(out, nalUnit{start: start, end: end, nalType: t, firstSlice: fs})
 		}
 		start, scLen = next, nextLen
 	}
@@ -128,10 +158,12 @@ func (s *AnnexBSplitter) Flush() []accessUnit {
 // later chunk. When final is true it emits everything remaining.
 //
 // AU boundary rule: an AU is closed when we encounter a NALU that begins a new
-// picture, i.e. a VCL slice (or an explicit AUD) after the current AU already
-// contains a VCL slice. Parameter sets / SEI / AUD that precede a picture are
-// folded into that picture's AU, so an IDR AU carries its own SPS+PPS and is
-// independently decodable.
+// picture — either the first VCL slice of a new picture (first_mb_in_slice == 0)
+// or an explicit AUD — provided the current AU already contains a VCL slice.
+// Continuation slices (first_mb_in_slice > 0) of a multi-slice frame are kept
+// in the same AU. Parameter sets / SEI that precede a picture are folded into
+// that picture's AU, so an IDR AU carries its own SPS+PPS and is independently
+// decodable.
 func (s *AnnexBSplitter) drain(final bool) []accessUnit {
 	nalus := splitNALUs(s.buf)
 	if len(nalus) == 0 {
@@ -147,7 +179,11 @@ func (s *AnnexBSplitter) drain(final bool) []accessUnit {
 	)
 
 	for _, n := range nalus {
-		startsNewAU := seenVCL && (n.isVCL() || n.nalType == nalTypeAUD)
+		// A new AU starts when we already have a VCL slice and encounter:
+		//   - a VCL NALU that is the first slice of a new picture, OR
+		//   - an explicit access-unit delimiter.
+		// Continuation slices (firstSlice==false) stay in the current AU.
+		startsNewAU := seenVCL && (n.nalType == nalTypeAUD || (n.isVCL() && n.firstSlice))
 		if startsNewAU {
 			aus = append(aus, accessUnit{
 				data:       cloneBytes(s.buf[auStart:n.start]),
