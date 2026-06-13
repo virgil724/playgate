@@ -55,9 +55,12 @@ type Encoder struct {
 	// with coalescing so rapid requests collapse into one restart.
 	restart chan struct{}
 
-	// mu guards bitrate (the only field mutated after construction). The encoder
-	// args are rebuilt from opts on each (re)launch under this lock.
+	// mu guards bitrate and lastForce (the fields mutated after construction). The
+	// encoder args are rebuilt from opts on each (re)launch under this lock.
 	mu sync.Mutex
+	// lastForce is when ForceKeyframe last triggered a restart, used to debounce a
+	// burst of viewer PLIs into at most one restart per forceKeyframeDebounce.
+	lastForce time.Time
 }
 
 // Ensure Encoder satisfies core.Module at compile time.
@@ -107,6 +110,36 @@ func (e *Encoder) SetBitrate(bps int) {
 	e.log.Info("bitrate change requested; will restart encoder", "bitrate", bps)
 	// Coalesce: a full channel already has a pending restart that will pick up the
 	// latest opts.Bitrate when it fires.
+	select {
+	case e.restart <- struct{}{}:
+	default:
+	}
+}
+
+// forceKeyframeDebounce bounds how often ForceKeyframe may restart ffmpeg, so a
+// burst of viewer PLIs (which arrive once per lost/garbled frame) cannot turn
+// into a restart loop. One second matches the default GOP, so a forced IDR is
+// never more than ~1 GOP earlier than the scheduled one anyway.
+const forceKeyframeDebounce = time.Second
+
+// ForceKeyframe asks the encoder to emit an IDR as soon as possible. ffmpeg
+// cannot inject an on-demand IDR into a running subprocess, so — like SetBitrate
+// — this restarts the subprocess (the relaunched ffmpeg emits an IDR
+// immediately; the rtc layer's keyframe gating hides the brief gap). It is the
+// host's response to a viewer Picture Loss Indication. Calls are debounced by
+// forceKeyframeDebounce and coalesced onto the single restart slot, so a PLI
+// storm costs at most one restart per second. Safe for concurrent use and
+// non-blocking.
+func (e *Encoder) ForceKeyframe() {
+	e.mu.Lock()
+	now := time.Now()
+	if !e.lastForce.IsZero() && now.Sub(e.lastForce) < forceKeyframeDebounce {
+		e.mu.Unlock()
+		return
+	}
+	e.lastForce = now
+	e.mu.Unlock()
+	e.log.Info("keyframe requested (PLI); will restart encoder for an IDR")
 	select {
 	case e.restart <- struct{}{}:
 	default:

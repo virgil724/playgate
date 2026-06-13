@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
@@ -60,6 +62,12 @@ type Config struct {
 	// now returns the current time; injectable for deterministic tests. Nil means
 	// time.Now.
 	now func() time.Time
+
+	// OnKeyframeRequest, if set, is invoked when the viewer's RTCP receiver asks
+	// for a keyframe (Picture Loss Indication / Full Intra Request). The host wires
+	// this to the encoder's ForceKeyframe so a decoder that lost an IDR recovers
+	// without waiting for the next scheduled one. Nil disables PLI handling.
+	OnKeyframeRequest func()
 }
 
 // DefaultConfig returns a Config with a public Google STUN server and sensible
@@ -135,7 +143,64 @@ func NewPeer(cfg Config) (*Peer, error) {
 		cfg.CommandBuffer = 64
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: cfg.ICEServers})
+	// Custom MediaEngine: Pion's default H.264 codecs all advertise
+	// profile-level-id=...1f (Level 3.1, max 1280x720@30). Sending a higher
+	// resolution (e.g. 1080p60) over a Level 3.1 negotiation makes Chrome's
+	// decoder emit a green frame. Register H.264 Constrained Baseline at Level
+	// 4.2 (profile-level-id=42e02a) so the negotiated level covers 1080p60.
+	// Providing a non-nil MediaEngine skips RegisterDefaultCodecs. We also register
+	// the default interceptors (NACK/RTCP reports/TWCC) explicitly against this same
+	// engine. On Pion v4 NewAPI would auto-register them when the registry is left
+	// unset, but doing it explicitly documents intent and stays correct if that
+	// default changes.
+	//
+	// The paired RTX codec (apt=102) is required for NACK-driven retransmission:
+	// a 1080p keyframe fragments into ~hundreds of RTP packets, and losing even
+	// one leaves the bottom of the frame undecoded (green) until a fully-received
+	// keyframe arrives. RTX lets the host resend the lost packets so the decoder
+	// recovers. Omitting it (as the first cut did) is what left most frames green.
+	m := &webrtc.MediaEngine{}
+	videoFeedback := []webrtc.RTCPFeedback{
+		{Type: "goog-remb"},
+		{Type: "ccm", Parameter: "fir"},
+		{Type: "nack"},
+		{Type: "nack", Parameter: "pli"},
+	}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     webrtc.MimeTypeH264,
+			ClockRate:    90000,
+			SDPFmtpLine:  "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e02a",
+			RTCPFeedback: videoFeedback,
+		},
+		PayloadType: 102,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("rtc: register h264 codec: %w", err)
+	}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeRTX,
+			ClockRate:   90000,
+			SDPFmtpLine: "apt=102",
+		},
+		PayloadType: 103,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("rtc: register rtx codec: %w", err)
+	}
+
+	ir := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(m, ir); err != nil {
+		return nil, fmt.Errorf("rtc: register interceptors: %w", err)
+	}
+
+	s := webrtc.SettingEngine{}
+	s.SetIncludeLoopbackCandidate(true)
+	api := webrtc.NewAPI(
+		webrtc.WithMediaEngine(m),
+		webrtc.WithInterceptorRegistry(ir),
+		webrtc.WithSettingEngine(s),
+	)
+	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: cfg.ICEServers})
 	if err != nil {
 		return nil, fmt.Errorf("rtc: create peer connection: %w", err)
 	}
@@ -171,11 +236,41 @@ func (p *Peer) setupVideoTrack() error {
 	if err != nil {
 		return fmt.Errorf("rtc: create video track: %w", err)
 	}
-	if _, err := p.pc.AddTrack(track); err != nil {
+	sender, err := p.pc.AddTrack(track)
+	if err != nil {
 		return fmt.Errorf("rtc: add video track: %w", err)
 	}
 	p.video = track
+	go p.readSenderRTCP(sender)
 	return nil
+}
+
+// readSenderRTCP drains the video sender's RTCP stream so Pion's interceptors run
+// (they consume inbound RTCP, e.g. NACK responder), and forwards viewer keyframe
+// requests to OnKeyframeRequest. A PLI (Picture Loss Indication) or FIR (Full
+// Intra Request) means the decoder lost an IDR and needs a fresh keyframe to
+// recover. The loop exits when the sender is closed (pc.Close), which makes Read
+// return an error.
+func (p *Peer) readSenderRTCP(sender *webrtc.RTPSender) {
+	buf := make([]byte, 1500)
+	for {
+		n, _, err := sender.Read(buf)
+		if err != nil {
+			return // sender closed
+		}
+		pkts, err := rtcp.Unmarshal(buf[:n])
+		if err != nil {
+			continue
+		}
+		for _, pkt := range pkts {
+			switch pkt.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				if p.cfg.OnKeyframeRequest != nil {
+					p.cfg.OnKeyframeRequest()
+				}
+			}
+		}
+	}
 }
 
 // setupDataChannels opens the unreliable "input" and reliable "control" channels.

@@ -43,6 +43,7 @@
   <span class="stat">session: <b id="session">-</b></span>
   <span class="stat">remaining: <b id="remaining">-</b></span>
   <span class="stat">control RTT: <b id="rtt">-</b></span>
+  <span class="stat">video: <b id="vstat">-</b></span>
 </div>
 <video id="video" playsinline autoplay muted></video>
 <p>Keys: <kbd>WASD</kbd> left stick · <kbd>arrows</kbd> right stick ·
@@ -125,6 +126,25 @@ $("connect").onclick = async () => {
   pc.ontrack = ev => { if (isActive() && ev.streams[0]) $("video").srcObject = ev.streams[0]; };
   pc.onconnectionstatechange = () => { if (isActive()) setState(pc.connectionState); };
 
+  // Show the *negotiated* inbound video codec + live fps on the page, so the
+  // actually-decoded stream is visible without digging through webrtc-internals
+  // (which also lists dead, closed PeerConnections and is easy to misread).
+  timers.push(setInterval(async () => {
+    if (!isActive() || pc.connectionState !== "connected") return;
+    try {
+      const stats = await pc.getStats();
+      let inb = null, codec = null;
+      stats.forEach(s => { if (s.type === "inbound-rtp" && s.kind === "video") inb = s; });
+      if (inb && inb.codecId) codec = stats.get(inb.codecId);
+      if (inb) {
+        const fmt = codec?.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
+        $("vstat").textContent =
+          `${(codec?.mimeType || "?")} ${fmt || ""} | ${inb.framesPerSecond ?? 0} fps | ` +
+          `dec ${inb.framesDecoded ?? 0} (key ${inb.keyFramesDecoded ?? 0})`;
+      }
+    } catch { /* ignore transient getStats errors */ }
+  }, 1000));
+
   let inputCh = null, controlCh = null, granted = !token; // gate disabled => send freely
   pc.ondatachannel = ev => {
     const ch = ev.channel;
@@ -166,6 +186,13 @@ $("connect").onclick = async () => {
         answered = true;
         clearInterval(poll);
         setState("answering");
+        // Which host offer did we actually answer? The H.264 level lives in the
+        // offer SDP's profile-level-id: 42e02a = Level 4.2 (1080p-capable, the
+        // fixed host), ...1f = Level 3.1 (720p max — a stale/old host). Logging it
+        // here removes any need to guess from chrome://webrtc-internals.
+        const lvl = (p.sdp.match(/profile-level-id=([0-9a-fA-F]{6})/) || [])[1];
+        log("offer H264 profile-level-id=" + (lvl || "?") +
+            (lvl ? (lvl.endsWith("02a") ? " (Level 4.2 ✓)" : " (Level 3.1 — old host!)") : ""));
         await pc.setRemoteDescription(p);
         await pc.setLocalDescription(await pc.createAnswer());
         // Host applies a single non-trickle answer: wait for gathering.

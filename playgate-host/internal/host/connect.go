@@ -120,6 +120,11 @@ func (c *connManager) loop(ctx context.Context) error {
 
 // serveOne handles exactly one viewer connection from offer to disconnect.
 func (c *connManager) serveOne(ctx context.Context) error {
+	// NOTE: we intentionally do NOT wire OnKeyframeRequest to the encoder. The only
+	// way CLI ffmpeg can emit an on-demand IDR is to restart the subprocess, and a
+	// mid-stream restart (new SPS/PPS, PTS reset) makes Chrome's hardware decoder
+	// drop the stream. A continuous stream with periodic GOP keyframes decodes far
+	// better. The peer still drains sender RTCP so the interceptors run.
 	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: c.log})
 	if err != nil {
 		return err

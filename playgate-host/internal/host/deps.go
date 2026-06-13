@@ -252,6 +252,10 @@ func (w *encoderWrapper) Packets() <-chan core.EncodedPacket { return w.outCh }
 // which restarts the subprocess to apply it (T14).
 func (w *encoderWrapper) SetBitrate(bps int) { w.enc.SetBitrate(bps) }
 
+// ForceKeyframe forwards a viewer keyframe request (RTCP PLI/FIR) to the encoder,
+// which restarts the subprocess to emit a fresh IDR for decoder recovery.
+func (w *encoderWrapper) ForceKeyframe() { w.enc.ForceKeyframe() }
+
 // Run starts the tap and encoder, and re-emits packets with encode-stage latency
 // recorded. The capture source itself is run by the host's main group; the tap
 // and encoder are owned here. It returns when ctx is cancelled or the encoder
