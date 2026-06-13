@@ -42,7 +42,13 @@ type Encoder struct {
 	packets chan core.EncodedPacket
 	errs    chan error
 
-	start time.Time // stream start, for PTS computation
+	// framesOut counts access units emitted across the encoder's whole life
+	// (spanning ffmpeg restarts). PTS is derived from this counter and the target
+	// FPS, NOT from wall-clock time: ffmpeg flushes frames to stdout in bursts, so
+	// wall-clock read-times bunch several frames into nearly-identical PTS, which
+	// collapses to duplicate RTP timestamps and makes a browser jitter buffer drop
+	// every frame but the keyframes. A counter gives evenly-spaced, monotonic PTS.
+	framesOut int64
 
 	// restart signals the Run loop to tear down the current ffmpeg subprocess and
 	// relaunch it with the latest options (used by SetBitrate). Buffered size 1
@@ -193,9 +199,6 @@ func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err
 	if err := cmd.Start(); err != nil {
 		return false, fmt.Errorf("encoder: start ffmpeg: %w", err)
 	}
-	if e.start.IsZero() {
-		e.start = time.Now() // PTS clock spans restarts so timestamps stay monotonic
-	}
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -299,6 +302,7 @@ func (e *Encoder) writeFrames(ctx context.Context, stdin io.WriteCloser) {
 		close(queue)
 		<-writerDone
 	}()
+	frameSizeLogged := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -312,6 +316,22 @@ func (e *Encoder) writeFrames(ctx context.Context, stdin io.WriteCloser) {
 				e.log.Warn("dropping frame: format mismatch",
 					"got", frame.PixelFormat, "want", e.opts.InputFormat)
 				continue
+			}
+			if frame.Width != e.opts.Width || frame.Height != e.opts.Height {
+				// Resolution mismatch would corrupt the rawvideo stream; skip it.
+				e.log.Warn("dropping frame: resolution mismatch",
+					"got", fmt.Sprintf("%dx%d", frame.Width, frame.Height),
+					"want", fmt.Sprintf("%dx%d", e.opts.Width, e.opts.Height))
+				continue
+			}
+			if !frameSizeLogged {
+				frameSizeLogged = true
+				expected := expectedRawSize(e.opts.Width, e.opts.Height, e.opts.InputFormat)
+				e.log.Info("first frame diagnostic",
+					"data_len", len(frame.Data),
+					"expected_len", expected,
+					"width", frame.Width, "height", frame.Height,
+					"format", frame.PixelFormat)
 			}
 			e.enqueueFrame(queue, frame)
 		}
@@ -373,9 +393,16 @@ func (e *Encoder) readPackets(ctx context.Context, stdout io.Reader) error {
 // the output channel using drop-oldest semantics so a slow consumer never
 // blocks the encoder.
 func (e *Encoder) emitPacket(ctx context.Context, au accessUnit) {
+	fps := e.opts.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	// Evenly-spaced monotonic PTS from the emitted-frame counter (see framesOut).
+	pts := time.Duration(e.framesOut) * time.Second / time.Duration(fps)
+	e.framesOut++
 	pkt := core.EncodedPacket{
 		Data:       au.data,
-		PTS:        time.Since(e.start),
+		PTS:        pts,
 		IsKeyframe: au.isKeyframe,
 	}
 	select {
@@ -413,5 +440,18 @@ func (e *Encoder) reportSubprocessExit(ctx context.Context, waitErr, readErr err
 	case e.errs <- msg:
 	case <-ctx.Done():
 	default:
+	}
+}
+
+// expectedRawSize returns the expected byte count for a single raw frame at the
+// given dimensions and format. Returns -1 for variable-length formats (MJPEG).
+func expectedRawSize(w, h int, fmt core.PixelFormat) int {
+	switch fmt {
+	case core.PixelFormatNV12:
+		return w * h * 3 / 2
+	case core.PixelFormatYUYV:
+		return w * h * 2
+	default:
+		return -1
 	}
 }
