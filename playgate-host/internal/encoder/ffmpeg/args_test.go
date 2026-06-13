@@ -81,6 +81,32 @@ func TestBuildArgsYUYV(t *testing.T) {
 	}
 }
 
+func TestBuildArgsNV12(t *testing.T) {
+	o := DefaultOptions(1920, 1080, 60, core.PixelFormatNV12)
+	args, err := BuildArgs(o)
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+
+	// NV12 input: rawvideo demuxer with explicit geometry and the nv12 pixel
+	// format (semi-planar 4:2:0; half the bandwidth of YUYV).
+	if !hasPair(args, "-f", "rawvideo") {
+		t.Errorf("NV12 input should use -f rawvideo; args: %v", args)
+	}
+	if !hasPair(args, "-pixel_format", "nv12") {
+		t.Errorf("NV12 input should set -pixel_format nv12; args: %v", args)
+	}
+	if !hasPair(args, "-video_size", "1920x1080") {
+		t.Errorf("NV12 input should set -video_size 1920x1080; args: %v", args)
+	}
+	if !hasPair(args, "-i", "pipe:0") {
+		t.Error("input should read from pipe:0")
+	}
+	if !hasPair(args, "-pix_fmt", "yuv420p") {
+		t.Error("output should be yuv420p for decoder compatibility")
+	}
+}
+
 func TestBuildArgsMJPEG(t *testing.T) {
 	o := DefaultOptions(1920, 1080, 60, core.PixelFormatMJPEG)
 	args, err := BuildArgs(o)

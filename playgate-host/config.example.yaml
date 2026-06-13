@@ -6,10 +6,11 @@
 capture:
   source: v4l2          # v4l2 (production, Linux) | synthetic (dev test pattern, any OS)
   device: /dev/video0   # V4L2 device node of the capture card (v4l2 only)
-  width: 1280
-  height: 720
-  fps: 30
-  format: YUYV          # YUYV | MJPEG
+  width: 1920           # match a resolution the card advertises for the chosen format
+  height: 1080
+  fps: 30               # best-effort; the driver clamps to its nearest rate (raw YUYV often caps at 30;
+                        # NV12 is half the bandwidth, so many USB cards offer 60fps in NV12)
+  format: YUYV          # YUYV | NV12 | MJPEG — must be a format the card lists at this resolution
 
 # H.264 encoder (T3: ffmpeg subprocess; T13: hardware codec selection).
 encoder:

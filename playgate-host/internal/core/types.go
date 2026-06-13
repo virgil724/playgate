@@ -30,6 +30,11 @@ const (
 	PixelFormatYUYV
 	// PixelFormatMJPEG is a Motion-JPEG frame (each VideoFrame.Data is one JPEG).
 	PixelFormatMJPEG
+	// PixelFormatNV12 is semi-planar YUV 4:2:0 (V4L2 FourCC "NV12"), 12 bits/pixel:
+	// a full-resolution Y plane followed by an interleaved half-resolution UV plane.
+	// USB capture cards (e.g. AVerMedia GC553) expose higher frame rates in NV12
+	// than in raw YUYV because it is half the bandwidth.
+	PixelFormatNV12
 )
 
 // String implements fmt.Stringer for friendly logging.
@@ -39,6 +44,8 @@ func (p PixelFormat) String() string {
 		return "YUYV"
 	case PixelFormatMJPEG:
 		return "MJPEG"
+	case PixelFormatNV12:
+		return "NV12"
 	default:
 		return "UNKNOWN"
 	}

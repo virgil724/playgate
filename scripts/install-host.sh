@@ -309,10 +309,10 @@ else
 capture:
   source: v4l2
   device: /dev/video0   # change if your capture card is video1, video2, etc.
-  width: 1280
-  height: 720
-  fps: 30
-  format: YUYV
+  width: 1920           # use a resolution your card lists for this format
+  height: 1080
+  fps: 30               # best-effort; driver clamps to nearest (raw YUYV often caps at 30; NV12 can do 60)
+  format: YUYV          # YUYV | NV12 | MJPEG — must match a format the card advertises
 
 encoder:
   bitrate: 6000000

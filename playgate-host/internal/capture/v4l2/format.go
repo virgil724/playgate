@@ -24,6 +24,7 @@ func FourCC(a, b, c, d byte) uint32 {
 var (
 	FourCCYUYV  = FourCC('Y', 'U', 'Y', 'V')
 	FourCCMJPEG = FourCC('M', 'J', 'P', 'G')
+	FourCCNV12  = FourCC('N', 'V', '1', '2')
 )
 
 // PixelFormatToFourCC maps a core.PixelFormat to its V4L2 FourCC code. The
@@ -34,6 +35,8 @@ func PixelFormatToFourCC(pf core.PixelFormat) (uint32, bool) {
 		return FourCCYUYV, true
 	case core.PixelFormatMJPEG:
 		return FourCCMJPEG, true
+	case core.PixelFormatNV12:
+		return FourCCNV12, true
 	default:
 		return 0, false
 	}
@@ -47,6 +50,8 @@ func FourCCToPixelFormat(fourcc uint32) (core.PixelFormat, bool) {
 		return core.PixelFormatYUYV, true
 	case FourCCMJPEG:
 		return core.PixelFormatMJPEG, true
+	case FourCCNV12:
+		return core.PixelFormatNV12, true
 	default:
 		return core.PixelFormatUnknown, false
 	}
@@ -60,8 +65,10 @@ func ParsePixelFormat(s string) (core.PixelFormat, error) {
 		return core.PixelFormatYUYV, nil
 	case "MJPEG", "MJPG":
 		return core.PixelFormatMJPEG, nil
+	case "NV12":
+		return core.PixelFormatNV12, nil
 	default:
-		return core.PixelFormatUnknown, fmt.Errorf("unsupported pixel format %q (want YUYV or MJPEG)", s)
+		return core.PixelFormatUnknown, fmt.Errorf("unsupported pixel format %q (want YUYV, NV12 or MJPEG)", s)
 	}
 }
 

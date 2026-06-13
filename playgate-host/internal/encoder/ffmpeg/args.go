@@ -93,9 +93,9 @@ func (o Options) Validate() error {
 		return fmt.Errorf("encoder: frame size must be positive, got %dx%d", o.Width, o.Height)
 	}
 	switch o.InputFormat {
-	case core.PixelFormatYUYV, core.PixelFormatMJPEG:
+	case core.PixelFormatYUYV, core.PixelFormatNV12, core.PixelFormatMJPEG:
 	default:
-		return fmt.Errorf("encoder: unsupported input format %v (want YUYV or MJPEG)", o.InputFormat)
+		return fmt.Errorf("encoder: unsupported input format %v (want YUYV, NV12 or MJPEG)", o.InputFormat)
 	}
 	return nil
 }
@@ -128,19 +128,28 @@ func (LibX264) OutputArgs(o Options) []string {
 	}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
-	args = append(args, "-pix_fmt", "yuv420p") // 4:2:0 is what H.264/WebRTC decoders expect
+	args = append(args, "-pix_fmt", "yuv420p", "-slices", "1") // 4:2:0 is what H.264/WebRTC decoders expect; force 1 slice per frame for Annex-B splitter
 	return args
 }
 
 // inputArgs returns the ffmpeg input-side flags describing the raw frames we
-// feed on stdin. For YUYV we use the rawvideo demuxer with explicit geometry;
-// for MJPEG we use the mjpeg demuxer (each frame is a self-describing JPEG).
+// feed on stdin. For YUYV and NV12 we use the rawvideo demuxer with explicit
+// geometry and pixel format; for MJPEG we use the mjpeg demuxer (each frame is
+// a self-describing JPEG).
 func (o Options) inputArgs() ([]string, error) {
 	switch o.InputFormat {
 	case core.PixelFormatYUYV:
 		return []string{
 			"-f", "rawvideo",
 			"-pixel_format", "yuyv422",
+			"-video_size", fmt.Sprintf("%dx%d", o.Width, o.Height),
+			"-framerate", strconv.Itoa(o.FPS),
+			"-i", "pipe:0",
+		}, nil
+	case core.PixelFormatNV12:
+		return []string{
+			"-f", "rawvideo",
+			"-pixel_format", "nv12",
 			"-video_size", fmt.Sprintf("%dx%d", o.Width, o.Height),
 			"-framerate", strconv.Itoa(o.FPS),
 			"-i", "pipe:0",
