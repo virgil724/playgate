@@ -33,6 +33,11 @@ type Source struct {
 	pixfmt core.PixelFormat
 	width  int
 	height int
+	// bytesPerLine and sizeImage come from VIDIOC_S_FMT after negotiation. For
+	// uncompressed formats, drivers may pad each row; ffmpeg rawvideo expects a
+	// tightly packed frame, so forward repacks using this stride.
+	bytesPerLine int
+	sizeImage    int
 }
 
 // Ensure Source satisfies core.CaptureSource at compile time.
@@ -118,10 +123,13 @@ func (s *Source) Start(_ context.Context) error {
 	s.pixfmt = pixfmt
 	s.width = int(actual.Width)
 	s.height = int(actual.Height)
+	s.bytesPerLine = int(actual.BytesPerLine)
+	s.sizeImage = int(actual.SizeImage)
 
 	s.log.Info("capture started",
 		"format", FourCCString(fourcc),
-		"width", s.width, "height", s.height, "fps", s.cfg.FPS)
+		"width", s.width, "height", s.height, "fps", s.cfg.FPS,
+		"bytes_per_line", s.bytesPerLine, "size_image", s.sizeImage)
 	return nil
 }
 
@@ -209,13 +217,11 @@ func (s *Source) forward(ctx context.Context, buf v4l2Buffer) {
 	if idx < 0 || idx >= len(s.dev.buffers) {
 		return
 	}
-	n := int(buf.BytesUsed)
 	src := s.dev.buffers[idx].data
-	if n > len(src) {
-		n = len(src)
+	data, ok := s.copyFrameData(src, int(buf.BytesUsed))
+	if !ok {
+		return
 	}
-	data := make([]byte, n)
-	copy(data, src[:n])
 
 	// Build a timestamp: prefer the kernel-supplied capture time, else now.
 	ts := time.Now()
@@ -258,5 +264,85 @@ func (s *Source) emitError(ctx context.Context, err error) {
 	case s.errs <- err:
 	case <-ctx.Done():
 	default:
+	}
+}
+
+// copyFrameData returns a frame payload suitable for the encoder. Compressed
+// MJPEG is variable-length, so BytesUsed is authoritative. Raw formats are
+// fixed-size; some capture drivers under-report BytesUsed, and some pad rows to
+// bytesPerLine, so use the negotiated geometry/stride instead.
+func (s *Source) copyFrameData(src []byte, bytesUsed int) ([]byte, bool) {
+	switch s.pixfmt {
+	case core.PixelFormatMJPEG:
+		if bytesUsed > len(src) {
+			bytesUsed = len(src)
+		}
+		if bytesUsed <= 0 {
+			s.log.Warn("dropping frame: empty MJPEG buffer")
+			return nil, false
+		}
+		data := make([]byte, bytesUsed)
+		copy(data, src[:bytesUsed])
+		return data, true
+	case core.PixelFormatNV12:
+		return s.copyNV12(src, bytesUsed)
+	case core.PixelFormatYUYV:
+		return s.copyYUYV(src, bytesUsed)
+	default:
+		s.log.Warn("dropping frame: unsupported pixel format", "format", s.pixfmt)
+		return nil, false
+	}
+}
+
+func (s *Source) copyYUYV(src []byte, bytesUsed int) ([]byte, bool) {
+	rowBytes := s.width * 2
+	stride := s.bytesPerLine
+	if stride <= 0 {
+		stride = rowBytes
+	}
+	if stride < rowBytes {
+		s.log.Warn("dropping frame: invalid YUYV stride",
+			"bytes_used", bytesUsed, "stride", stride, "row_bytes", rowBytes)
+		return nil, false
+	}
+	required := stride * s.height
+	if len(src) < required {
+		s.log.Warn("dropping frame: YUYV buffer too small",
+			"bytes_used", bytesUsed, "buffer_len", len(src), "required", required)
+		return nil, false
+	}
+	data := make([]byte, rowBytes*s.height)
+	copyRows(data, rowBytes, src, stride, s.height)
+	return data, true
+}
+
+func (s *Source) copyNV12(src []byte, bytesUsed int) ([]byte, bool) {
+	rowBytes := s.width
+	stride := s.bytesPerLine
+	if stride <= 0 {
+		stride = rowBytes
+	}
+	if stride < rowBytes {
+		s.log.Warn("dropping frame: invalid NV12 stride",
+			"bytes_used", bytesUsed, "stride", stride, "row_bytes", rowBytes)
+		return nil, false
+	}
+	uvRows := (s.height + 1) / 2
+	required := stride * (s.height + uvRows)
+	if len(src) < required {
+		s.log.Warn("dropping frame: NV12 buffer too small",
+			"bytes_used", bytesUsed, "buffer_len", len(src), "required", required)
+		return nil, false
+	}
+
+	data := make([]byte, rowBytes*(s.height+uvRows))
+	copyRows(data[:rowBytes*s.height], rowBytes, src[:stride*s.height], stride, s.height)
+	copyRows(data[rowBytes*s.height:], rowBytes, src[stride*s.height:], stride, uvRows)
+	return data, true
+}
+
+func copyRows(dst []byte, dstStride int, src []byte, srcStride int, rows int) {
+	for y := 0; y < rows; y++ {
+		copy(dst[y*dstStride:(y+1)*dstStride], src[y*srcStride:y*srcStride+dstStride])
 	}
 }
