@@ -110,7 +110,7 @@ describe("SignalingClient (HTTP)", () => {
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toBe("http://signal.test/rooms/r1/viewer");
     expect(opts.method).toBe("POST");
-    expect(JSON.parse(opts.body as string)).toEqual({ type: "answer", sdp: "x" });
+    expect(JSON.parse(opts.body as string)).toEqual({ type: "answer", sdp: "x", viewerId: c.viewerId });
   });
 
   it("viewer polls the host's messages and advances since", async () => {
@@ -255,7 +255,7 @@ describe("SignalingClient (WebSocket)", () => {
     // Sent over WS, not via fetch.
     expect(fetchMock).not.toHaveBeenCalled();
     expect(ws.sent).toHaveLength(1);
-    expect(JSON.parse(ws.sent[0])).toEqual({ type: "answer", sdp: "y" });
+    expect(JSON.parse(ws.sent[0])).toEqual({ type: "answer", sdp: "y", viewerId: c.viewerId });
     c.stop();
   });
 
