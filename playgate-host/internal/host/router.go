@@ -18,19 +18,21 @@ type PacketSink interface {
 	WriteSample(pkt core.EncodedPacket, duration time.Duration) error
 }
 
-// VideoRouter consumes the encoder's packet stream once and forwards each packet
-// to the currently-registered viewer sink. When no viewer is connected the
-// packets are discarded (the encoder keeps running so a new viewer gets video
-// immediately). It also records the rtc-stage latency for each forwarded packet.
+// VideoRouter consumes the encoder's packet stream once and fans each packet out
+// to every currently-registered viewer sink (mesh broadcast). When no viewer is
+// connected the packets are discarded (the encoder keeps running so a new viewer
+// gets video immediately). It also records the rtc-stage latency per packet.
 //
-// Swapping sinks is concurrency-safe: the connection manager calls SetSink when a
-// viewer connects and Clear when it disconnects.
+// Sink registration is concurrency-safe: the connection manager calls AddSink
+// when a viewer connects and RemoveSink when it disconnects. Each sink (an
+// rtc.Peer) does its own keyframe gating, so a late joiner simply waits for the
+// next keyframe before its video starts.
 type VideoRouter struct {
 	log     *slog.Logger
 	metrics *metrics.Collector
 
 	mu       sync.Mutex
-	sink     PacketSink
+	sinks    map[PacketSink]struct{}
 	prevPTS  time.Duration
 	havePrev bool
 }
@@ -40,28 +42,29 @@ func NewVideoRouter(log *slog.Logger, mc *metrics.Collector) *VideoRouter {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &VideoRouter{log: log.With("module", "video-router"), metrics: mc}
+	return &VideoRouter{
+		log:     log.With("module", "video-router"),
+		metrics: mc,
+		sinks:   make(map[PacketSink]struct{}),
+	}
 }
 
-// SetSink registers the active viewer sink. It resets the PTS delta tracking so
-// the new connection's first sample uses the default duration.
-func (r *VideoRouter) SetSink(s PacketSink) {
+// AddSink registers a viewer sink to receive the broadcast.
+func (r *VideoRouter) AddSink(s PacketSink) {
 	r.mu.Lock()
-	r.sink = s
-	r.havePrev = false
-	r.prevPTS = 0
+	r.sinks[s] = struct{}{}
 	r.mu.Unlock()
 }
 
-// Clear removes the active sink (viewer disconnected).
-func (r *VideoRouter) Clear() {
+// RemoveSink unregisters a viewer sink (that viewer disconnected).
+func (r *VideoRouter) RemoveSink(s PacketSink) {
 	r.mu.Lock()
-	r.sink = nil
+	delete(r.sinks, s)
 	r.mu.Unlock()
 }
 
 // Run drains packets from the encoder until the channel closes or ctx is
-// cancelled, forwarding each to the active sink (if any).
+// cancelled, forwarding each to all active sinks.
 func (r *VideoRouter) Run(ctx context.Context, packets <-chan core.EncodedPacket) {
 	for {
 		select {
@@ -76,22 +79,27 @@ func (r *VideoRouter) Run(ctx context.Context, packets <-chan core.EncodedPacket
 	}
 }
 
-// forward writes one packet to the active sink with a computed sample duration
-// and records the rtc-stage write latency.
+// forward writes one packet to every active sink with a computed sample duration
+// and records the rtc-stage write latency. The duration is a property of the
+// stream (PTS delta), computed once and shared by all sinks.
 func (r *VideoRouter) forward(pkt core.EncodedPacket) {
 	r.mu.Lock()
-	sink := r.sink
 	dur := sampleDuration(pkt.PTS, r.prevPTS, r.havePrev)
 	r.prevPTS, r.havePrev = pkt.PTS, true
+	sinks := make([]PacketSink, 0, len(r.sinks))
+	for s := range r.sinks {
+		sinks = append(sinks, s)
+	}
 	r.mu.Unlock()
 
-	if sink == nil {
+	if len(sinks) == 0 {
 		return
 	}
 	start := time.Now()
-	if err := sink.WriteSample(pkt, dur); err != nil {
-		r.log.Debug("write sample failed", "err", err)
-		return
+	for _, sink := range sinks {
+		if err := sink.WriteSample(pkt, dur); err != nil {
+			r.log.Debug("write sample failed", "err", err)
+		}
 	}
 	if r.metrics != nil {
 		r.metrics.RTC.Observe(time.Since(start))
@@ -105,15 +113,15 @@ type AudioSink interface {
 	WriteAudioSample(data []byte, duration time.Duration) error
 }
 
-// AudioRouter consumes the audio source's Opus page stream once and forwards each
-// page to the currently-registered viewer sink, discarding pages when no viewer
-// is connected. It is the audio analogue of VideoRouter and is created only when
+// AudioRouter consumes the audio source's Opus page stream once and fans each
+// page out to every registered viewer sink, discarding pages when no viewer is
+// connected. It is the audio analogue of VideoRouter and is created only when
 // audio capture is enabled.
 type AudioRouter struct {
 	log *slog.Logger
 
-	mu   sync.Mutex
-	sink AudioSink
+	mu    sync.Mutex
+	sinks map[AudioSink]struct{}
 }
 
 // NewAudioRouter constructs an audio router.
@@ -121,25 +129,28 @@ func NewAudioRouter(log *slog.Logger) *AudioRouter {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &AudioRouter{log: log.With("module", "audio-router")}
+	return &AudioRouter{
+		log:   log.With("module", "audio-router"),
+		sinks: make(map[AudioSink]struct{}),
+	}
 }
 
-// SetSink registers the active viewer sink.
-func (r *AudioRouter) SetSink(s AudioSink) {
+// AddSink registers a viewer sink to receive the audio broadcast.
+func (r *AudioRouter) AddSink(s AudioSink) {
 	r.mu.Lock()
-	r.sink = s
+	r.sinks[s] = struct{}{}
 	r.mu.Unlock()
 }
 
-// Clear removes the active sink (viewer disconnected).
-func (r *AudioRouter) Clear() {
+// RemoveSink unregisters a viewer sink (that viewer disconnected).
+func (r *AudioRouter) RemoveSink(s AudioSink) {
 	r.mu.Lock()
-	r.sink = nil
+	delete(r.sinks, s)
 	r.mu.Unlock()
 }
 
 // Run drains Opus pages until the channel closes or ctx is cancelled, forwarding
-// each to the active sink (if any).
+// each to all active sinks.
 func (r *AudioRouter) Run(ctx context.Context, packets <-chan opus.Packet) {
 	for {
 		select {
@@ -150,13 +161,15 @@ func (r *AudioRouter) Run(ctx context.Context, packets <-chan opus.Packet) {
 				return
 			}
 			r.mu.Lock()
-			sink := r.sink
-			r.mu.Unlock()
-			if sink == nil {
-				continue
+			sinks := make([]AudioSink, 0, len(r.sinks))
+			for s := range r.sinks {
+				sinks = append(sinks, s)
 			}
-			if err := sink.WriteAudioSample(pkt.Data, pkt.Duration); err != nil {
-				r.log.Debug("write audio sample failed", "err", err)
+			r.mu.Unlock()
+			for _, sink := range sinks {
+				if err := sink.WriteAudioSample(pkt.Data, pkt.Duration); err != nil {
+					r.log.Debug("write audio sample failed", "err", err)
+				}
 			}
 		}
 	}

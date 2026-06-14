@@ -137,14 +137,15 @@ func (c *connManager) serveOne(ctx context.Context) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Register the peer as the active video sink and clear it on teardown.
-	c.router.SetSink(peer)
-	defer c.router.Clear()
+	// Register the peer as a video sink and remove it on teardown. The router
+	// fans out to every registered sink, so multiple viewers can watch at once.
+	c.router.AddSink(peer)
+	defer c.router.RemoveSink(peer)
 
 	// Same for audio when enabled: the peer carries an Opus track to write to.
 	if c.arouter != nil {
-		c.arouter.SetSink(peer)
-		defer c.arouter.Clear()
+		c.arouter.AddSink(peer)
+		defer c.arouter.RemoveSink(peer)
 	}
 
 	// Wire input: gated or pass-through depending on session config.

@@ -177,9 +177,9 @@ func TestPipelineFlows(t *testing.T) {
 		Encoder: enc,
 		Input:   in,
 		Connect: func(ctx context.Context, router *VideoRouter, _ *AudioRouter, _ InputSink) error {
-			router.SetSink(sink)
+			router.AddSink(sink)
 			<-ctx.Done()
-			router.Clear()
+			router.RemoveSink(sink)
 			return nil
 		},
 	}

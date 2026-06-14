@@ -47,8 +47,8 @@ func TestEndToEndLoopback(t *testing.T) {
 		}
 		defer peer.Close()
 
-		router.SetSink(peer)
-		defer router.Clear()
+		router.AddSink(peer)
+		defer router.RemoveSink(peer)
 
 		// Forward decoded commands to the fake target (session disabled path).
 		go sink.HandleCommands(ctx, peer.Commands(), func(b []byte) error { return peer.SendControl(b) })
