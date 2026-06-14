@@ -93,6 +93,10 @@ func TestSinkGatedAuthorize(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go sink.forwardEvents(ctx, sendControl)
+	// forwardEvents subscribes to the manager's event fan-out; events emitted
+	// before it subscribes are not replayed. In the real flow it subscribes at
+	// connect, long before any auth/grant — reproduce that ordering here.
+	time.Sleep(50 * time.Millisecond)
 
 	raw := make(chan core.InputCommand, 4)
 	token := signToken(t, priv, "room1", "viewerX", 60)

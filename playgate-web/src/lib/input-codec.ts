@@ -14,8 +14,8 @@
  *   total 13 bytes
  */
 
-export const INPUT_WIRE_VERSION = 0x01;
-export const INPUT_WIRE_SIZE = 13;
+export const INPUT_WIRE_VERSION = 0x02;
+export const INPUT_WIRE_SIZE = 17;
 export const AXIS_SCALE = 32767;
 
 /** Button bit positions / masks (uint32). Matches protocols.md §2. */
@@ -77,8 +77,10 @@ export function unscaleAxis(int16: number): number {
   return int16 / AXIS_SCALE;
 }
 
-/** Encode an InputState into a 13-byte ArrayBuffer. */
-export function encodeInput(state: InputState): ArrayBuffer {
+/** Encode an InputState into a 17-byte ArrayBuffer. seq is a monotonically
+ * increasing sender sequence number so the host can drop stale/reordered
+ * frames on the unreliable+unordered channel. */
+export function encodeInput(state: InputState, seq = 0): ArrayBuffer {
   const buf = new ArrayBuffer(INPUT_WIRE_SIZE);
   const v = new DataView(buf);
   v.setUint8(0, INPUT_WIRE_VERSION);
@@ -87,6 +89,7 @@ export function encodeInput(state: InputState): ArrayBuffer {
   v.setInt16(7, scaleAxis(state.ly), true);
   v.setInt16(9, scaleAxis(state.rx), true);
   v.setInt16(11, scaleAxis(state.ry), true);
+  v.setUint32(13, seq >>> 0, true);
   return buf;
 }
 

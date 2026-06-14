@@ -121,6 +121,12 @@ type Peer struct {
 	commands  chan core.InputCommand
 	connState chan webrtc.PeerConnectionState
 
+	// input sequence gate: the input channel is unreliable+unordered, so we drop
+	// any frame whose Seq is not newer than the last accepted one (stale/reorder).
+	// Guarded by mu. haveInputSeq is false until the first frame is accepted.
+	lastInputSeq uint32
+	haveInputSeq bool
+
 	// keyframe gating: WriteSample drops packets until the first keyframe is seen
 	// so a freshly-attached decoder starts on an IDR.
 	seenKeyframe bool
@@ -427,6 +433,16 @@ func (p *Peer) attachInputChannel(dc *webrtc.DataChannel) {
 		defer p.mu.Unlock()
 		if p.closed {
 			return
+		}
+		// Drop stale/reordered frames: only accept a strictly newer Seq. The first
+		// frame (haveInputSeq false) is always accepted. Seq 0 from a legacy sender
+		// means "no sequencing" and is accepted unconditionally (no reorder guard).
+		if cmd.Seq != 0 {
+			if p.haveInputSeq && cmd.Seq <= p.lastInputSeq {
+				return // stale or reordered; ignore
+			}
+			p.lastInputSeq = cmd.Seq
+			p.haveInputSeq = true
 		}
 		select {
 		case p.commands <- cmd:

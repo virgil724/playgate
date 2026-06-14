@@ -74,17 +74,19 @@ addEventListener("keydown", e => { if (!e.repeat) held.add(e.code); });
 addEventListener("keyup",   e => held.delete(e.code));
 
 function axis(neg, pos) { return (held.has(pos) ? 1 : 0) - (held.has(neg) ? 1 : 0); }
+let inputSeq = 0;
 function encodeInput() {
   let buttons = 0;
   for (const [code, bit] of Object.entries(KEYBTN)) if (held.has(code)) buttons |= (1 << bit);
-  const buf = new ArrayBuffer(13), v = new DataView(buf);
-  v.setUint8(0, 1); // wire version
+  const buf = new ArrayBuffer(17), v = new DataView(buf);
+  v.setUint8(0, 2); // wire version (v2: trailing seq)
   v.setUint32(1, buttons >>> 0, true);
   const sc = f => Math.max(-32767, Math.min(32767, Math.round(f * 32767)));
   v.setInt16(5,  sc(axis("KeyA", "KeyD")), true);          // lx
   v.setInt16(7,  sc(axis("KeyS", "KeyW")), true);          // ly (W = up = +1)
   v.setInt16(9,  sc(axis("ArrowLeft", "ArrowRight")), true); // rx
   v.setInt16(11, sc(axis("ArrowDown", "ArrowUp")), true);    // ry
+  v.setUint32(13, (++inputSeq) >>> 0, true);                 // monotonic seq
   return buf;
 }
 

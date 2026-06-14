@@ -81,6 +81,11 @@ type EncodedPacket struct {
 // not a delta, so a dropped packet simply means a slightly stale state rather
 // than a stuck button.
 type InputCommand struct {
+	// Seq is a sender-assigned, monotonically increasing sequence number. The
+	// input DataChannel is unreliable AND unordered, so the host uses Seq to drop
+	// stale/reordered snapshots (a late "button pressed" arriving after a newer
+	// "released" would otherwise re-press it). 0 means "no sequence" (legacy).
+	Seq uint32
 	// Buttons is a bitmask of pressed buttons; see the Button* constants.
 	Buttons uint32
 	// Analog stick axes, normalised to [-1, 1]. LX/LY = left stick, RX/RY = right.

@@ -25,8 +25,13 @@ import (
 //	7      2    ly       int16   left  stick Y
 //	9      2    rx       int16   right stick X
 //	11     2    ry       int16   right stick Y
+//	13     4    seq      uint32  sender sequence number (drop stale/reordered)
 //	------ ---- -------- ------- ------------------------------------------------
-//	total: 13 bytes
+//	total: 17 bytes
+//
+// Sequence (v2): the channel is unreliable+unordered, so the host keeps the
+// highest Seq seen and drops any frame with Seq <= that, eliminating stuck/
+// repeated inputs from reordered packets. Senders increment Seq per frame.
 //
 // Axis scaling: each float32 axis in [-1, 1] is mapped to int16 by multiplying by
 // AxisScale (32767) and rounding to nearest, then clamped to [-32767, 32767].
@@ -41,10 +46,11 @@ import (
 // latest-known desired state at receive time.
 const (
 	// InputWireVersion is the current wire format version byte (offset 0).
-	InputWireVersion uint8 = 1
+	// v2 added the trailing 4-byte sequence number.
+	InputWireVersion uint8 = 2
 
 	// InputWireSize is the exact encoded length in bytes of one command.
-	InputWireSize = 13
+	InputWireSize = 17
 
 	// AxisScale is the fixed-point multiplier mapping a [-1,1] float axis to int16.
 	AxisScale = 32767
@@ -60,6 +66,7 @@ func EncodeInputCommand(cmd core.InputCommand) []byte {
 	binary.LittleEndian.PutUint16(buf[7:9], uint16(axisToInt16(cmd.LY)))
 	binary.LittleEndian.PutUint16(buf[9:11], uint16(axisToInt16(cmd.RX)))
 	binary.LittleEndian.PutUint16(buf[11:13], uint16(axisToInt16(cmd.RY)))
+	binary.LittleEndian.PutUint32(buf[13:17], cmd.Seq)
 	return buf
 }
 
@@ -79,6 +86,7 @@ func DecodeInputCommand(buf []byte, now time.Time) (core.InputCommand, error) {
 		LY:        int16ToAxis(int16(binary.LittleEndian.Uint16(buf[7:9]))),
 		RX:        int16ToAxis(int16(binary.LittleEndian.Uint16(buf[9:11]))),
 		RY:        int16ToAxis(int16(binary.LittleEndian.Uint16(buf[11:13]))),
+		Seq:       binary.LittleEndian.Uint32(buf[13:17]),
 		Timestamp: now,
 	}, nil
 }

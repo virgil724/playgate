@@ -12,15 +12,21 @@ import {
 } from "./input-codec";
 
 describe("input-codec byte layout", () => {
-  it("encodes exactly 13 bytes", () => {
+  it("encodes exactly 17 bytes", () => {
     const buf = encodeInput(emptyInputState());
     expect(buf.byteLength).toBe(INPUT_WIRE_SIZE);
+    expect(INPUT_WIRE_SIZE).toBe(17);
   });
 
-  it("places version 0x01 at offset 0", () => {
+  it("places version 0x02 at offset 0", () => {
     const v = new DataView(encodeInput(emptyInputState()));
     expect(v.getUint8(0)).toBe(INPUT_WIRE_VERSION);
-    expect(v.getUint8(0)).toBe(1);
+    expect(v.getUint8(0)).toBe(2);
+  });
+
+  it("writes the sequence as little-endian uint32 at offset 13", () => {
+    const v = new DataView(encodeInput(emptyInputState(), 0x01020304));
+    expect(v.getUint32(13, true)).toBe(0x01020304);
   });
 
   it("writes buttons as little-endian uint32 at offset 1", () => {
@@ -108,7 +114,7 @@ describe("encode/decode round-trip", () => {
 
   it("rejects wrong version byte", () => {
     const buf = encodeInput(emptyInputState());
-    new DataView(buf).setUint8(0, 0x02);
+    new DataView(buf).setUint8(0, 0x99);
     expect(decodeInput(buf)).toBeNull();
   });
 

@@ -57,6 +57,8 @@ export function RoomPage() {
   // Previous cumulative counters, so jitter/decode are shown as the CURRENT
   // per-interval value (delta) rather than a session average that hides drift.
   const statsPrevRef = useRef({ jbDelay: 0, jbCount: 0, decTime: 0, decFrames: 0 });
+  // Monotonic input sequence so the host can drop stale/reordered frames.
+  const inputSeqRef = useRef(0);
   const [showGamepad, setShowGamepad] = useState(() => {
     if (typeof window !== "undefined") {
       return "ontouchstart" in window || navigator.maxTouchPoints > 0;
@@ -242,7 +244,7 @@ export function RoomPage() {
       const conn = connRef.current;
       if (!conn || !conn.inputReady) return;
       const state = mergeInput(gamepadRef.current.snapshot(), pollPhysicalGamepad());
-      conn.sendInput(encodeInput(state));
+      conn.sendInput(encodeInput(state, ++inputSeqRef.current));
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
