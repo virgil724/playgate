@@ -139,7 +139,7 @@ func TestRunShutsDownOnCancel(t *testing.T) {
 		Capture: cap,
 		Encoder: enc,
 		Input:   in,
-		Connect: func(ctx context.Context, _ *VideoRouter, _ InputSink) error {
+		Connect: func(ctx context.Context, _ *VideoRouter, _ *AudioRouter, _ InputSink) error {
 			<-ctx.Done()
 			return nil
 		},
@@ -176,7 +176,7 @@ func TestPipelineFlows(t *testing.T) {
 		Capture: cap,
 		Encoder: enc,
 		Input:   in,
-		Connect: func(ctx context.Context, router *VideoRouter, _ InputSink) error {
+		Connect: func(ctx context.Context, router *VideoRouter, _ *AudioRouter, _ InputSink) error {
 			router.SetSink(sink)
 			<-ctx.Done()
 			router.Clear()

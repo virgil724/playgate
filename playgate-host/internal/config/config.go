@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Capture   CaptureConfig   `yaml:"capture"`
 	Encoder   EncoderConfig   `yaml:"encoder"`
+	Audio     AudioConfig     `yaml:"audio"`
 	ABR       ABRConfig       `yaml:"abr"`
 	WebRTC    WebRTCConfig    `yaml:"webrtc"`
 	Input     InputConfig     `yaml:"input"`
@@ -82,6 +83,25 @@ const (
 	CodecVAAPI   = "h264_vaapi"
 	CodecNVENC   = "h264_nvenc"
 )
+
+// AudioConfig configures the optional ALSA→Opus audio source sent alongside the
+// video on its own WebRTC track. Disabled by default so video-only deployments
+// are unaffected.
+type AudioConfig struct {
+	// Enabled turns on audio capture and adds an Opus track to each viewer peer.
+	Enabled bool `yaml:"enabled"`
+	// Device is the ALSA capture device, e.g. "default" or "hw:CARD=MS2109,DEV=0".
+	Device string `yaml:"device"`
+	// SampleRate / Channels describe the ALSA capture format. Opus output is always
+	// 48 kHz stereo on the wire.
+	SampleRate int `yaml:"sample_rate"`
+	Channels   int `yaml:"channels"`
+	// Bitrate is the target Opus bitrate in bits per second.
+	Bitrate int `yaml:"bitrate"`
+	// FFmpegPath overrides the ffmpeg binary used for audio capture. Empty falls
+	// back to encoder.ffmpeg_path (and then "ffmpeg").
+	FFmpegPath string `yaml:"ffmpeg_path"`
+}
 
 // ABRConfig configures the adaptive-bitrate controller (T14). When disabled the
 // encoder runs at the fixed encoder.bitrate.
@@ -195,6 +215,13 @@ func Default() Config {
 			FFmpegPath:       "ffmpeg",
 			Codec:            CodecLibX264,
 		},
+		Audio: AudioConfig{
+			Enabled:    false,
+			Device:     "default",
+			SampleRate: 48000,
+			Channels:   2,
+			Bitrate:    128000,
+		},
 		ABR: ABRConfig{
 			Enabled:          false,
 			MinBitrate:       1_000_000,
@@ -273,6 +300,17 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("encoder codec must be one of %q/%q/%q/%q, got %q",
 			CodecLibX264, CodecV4L2M2M, CodecVAAPI, CodecNVENC, c.Encoder.Codec)
+	}
+	if c.Audio.Enabled {
+		if c.Audio.Device == "" {
+			return fmt.Errorf("audio.enabled requires a device")
+		}
+		if c.Audio.SampleRate <= 0 || c.Audio.Channels <= 0 {
+			return fmt.Errorf("audio sample_rate and channels must be positive when enabled (sample_rate=%d channels=%d)", c.Audio.SampleRate, c.Audio.Channels)
+		}
+		if c.Audio.Bitrate <= 0 {
+			return fmt.Errorf("audio bitrate must be positive when enabled, got %d", c.Audio.Bitrate)
+		}
 	}
 	if c.ABR.Enabled {
 		if c.ABR.MinBitrate <= 0 || c.ABR.MaxBitrate <= 0 {

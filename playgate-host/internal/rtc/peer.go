@@ -42,6 +42,7 @@ const (
 const (
 	videoTrackID  = "video"
 	videoStreamID = "playgate"
+	audioTrackID  = "audio"
 )
 
 // Config configures a Peer. The zero value is not valid; use DefaultConfig and
@@ -68,6 +69,12 @@ type Config struct {
 	// this to the encoder's ForceKeyframe so a decoder that lost an IDR recovers
 	// without waiting for the next scheduled one. Nil disables PLI handling.
 	OnKeyframeRequest func()
+
+	// EnableAudio adds an Opus audio track to the connection so the host can send
+	// captured game audio alongside the video. When false the peer is video-only
+	// (the SDP carries no audio m-line), preserving the prior behaviour for
+	// deployments that do not capture audio.
+	EnableAudio bool
 }
 
 // DefaultConfig returns a Config with a public Google STUN server and sensible
@@ -102,6 +109,7 @@ type Peer struct {
 	now   func() time.Time
 	pc    *webrtc.PeerConnection
 	video *webrtc.TrackLocalStaticSample
+	audio *webrtc.TrackLocalStaticSample // nil unless cfg.EnableAudio
 
 	// control is the reliable channel; populated either on create (offerer) or on
 	// OnDataChannel (answerer). Guarded by mu. closed guards the owned channels
@@ -188,6 +196,20 @@ func NewPeer(cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("rtc: register rtx codec: %w", err)
 	}
 
+	// Opus audio (48 kHz stereo). Registered unconditionally so an answerer/loopback
+	// can negotiate it; the actual audio track is only added when cfg.EnableAudio.
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, fmt.Errorf("rtc: register opus codec: %w", err)
+	}
+
 	ir := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(m, ir); err != nil {
 		return nil, fmt.Errorf("rtc: register interceptors: %w", err)
@@ -218,6 +240,12 @@ func NewPeer(cfg Config) (*Peer, error) {
 		_ = pc.Close()
 		return nil, err
 	}
+	if cfg.EnableAudio {
+		if err := p.setupAudioTrack(); err != nil {
+			_ = pc.Close()
+			return nil, err
+		}
+	}
 	if err := p.setupDataChannels(); err != nil {
 		_ = pc.Close()
 		return nil, err
@@ -241,6 +269,26 @@ func (p *Peer) setupVideoTrack() error {
 		return fmt.Errorf("rtc: add video track: %w", err)
 	}
 	p.video = track
+	go p.readSenderRTCP(sender)
+	return nil
+}
+
+// setupAudioTrack creates the Opus sample track and adds it to the connection.
+// Its sender RTCP is drained (like the video sender) so Pion's interceptors run;
+// there is no keyframe concept for audio, so PLI/FIR are simply ignored.
+func (p *Peer) setupAudioTrack() error {
+	track, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		audioTrackID, videoStreamID,
+	)
+	if err != nil {
+		return fmt.Errorf("rtc: create audio track: %w", err)
+	}
+	sender, err := p.pc.AddTrack(track)
+	if err != nil {
+		return fmt.Errorf("rtc: add audio track: %w", err)
+	}
+	p.audio = track
 	go p.readSenderRTCP(sender)
 	return nil
 }
@@ -437,6 +485,20 @@ func (p *Peer) ConnState() <-chan webrtc.PeerConnectionState { return p.connStat
 
 // VideoTrack exposes the underlying sample track (mainly for tests).
 func (p *Peer) VideoTrack() *webrtc.TrackLocalStaticSample { return p.video }
+
+// AudioTrack exposes the underlying Opus track, or nil when audio is disabled
+// (mainly for tests).
+func (p *Peer) AudioTrack() *webrtc.TrackLocalStaticSample { return p.audio }
+
+// WriteAudioSample pushes one Opus access unit (an Ogg page payload) onto the
+// audio track with the given presentation duration. It is a no-op when audio is
+// disabled, so callers can wire it unconditionally.
+func (p *Peer) WriteAudioSample(data []byte, duration time.Duration) error {
+	if p.audio == nil {
+		return nil
+	}
+	return p.audio.WriteSample(media.Sample{Data: data, Duration: duration})
+}
 
 // SendControl sends a reliable message on the control channel. It returns an
 // error if the channel is not yet open.

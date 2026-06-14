@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/playgate/playgate-host/internal/audio/opus"
 	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/heartbeat"
@@ -36,6 +37,9 @@ type Deps struct {
 	Capture core.CaptureSource
 	Encoder Encoder
 	Input   core.InputTarget
+	// Audio is the optional ALSA→Opus source. nil disables audio entirely (the
+	// peers stay video-only). When set, the host runs it and an AudioRouter.
+	Audio AudioSource
 	// Session is the single-controller gate; nil disables gating (pass-through).
 	Session *session.Manager
 	// Connect runs the per-viewer WebRTC connection loop against the signaling
@@ -51,9 +55,17 @@ type Encoder interface {
 	Packets() <-chan core.EncodedPacket
 }
 
+// AudioSource is the subset of the Opus audio source the host needs: a
+// core.Module that also exposes its Opus page output.
+type AudioSource interface {
+	core.Module
+	Packets() <-chan opus.Packet
+}
+
 // ConnectFunc runs the viewer connection lifecycle until ctx is cancelled. It is
-// the seam tests replace to avoid real WebRTC/signaling.
-type ConnectFunc func(ctx context.Context, router *VideoRouter, sink InputSink) error
+// the seam tests replace to avoid real WebRTC/signaling. arouter is nil when
+// audio is disabled.
+type ConnectFunc func(ctx context.Context, router *VideoRouter, arouter *AudioRouter, sink InputSink) error
 
 // InputSink receives gated input commands and session-event delivery. The
 // connection manager hands each new Peer an InputSink so commands flow to the
@@ -140,6 +152,19 @@ func (h *Host) Run(ctx context.Context) error {
 		router.Run(gctx, h.deps.Encoder.Packets())
 		return nil
 	})
+
+	// 3b. Optional audio pipeline: run the ALSA→Opus source and an AudioRouter
+	// that fans its Opus pages to the active viewer. arouter stays nil (and the
+	// peers stay video-only) when audio is disabled.
+	var arouter *AudioRouter
+	if h.deps.Audio != nil {
+		arouter = NewAudioRouter(h.log)
+		g.Go(func() error { return h.deps.Audio.Run(gctx) })
+		g.Go(func() error {
+			arouter.Run(gctx, h.deps.Audio.Packets())
+			return nil
+		})
+	}
 	g.Go(func() error {
 		drainStatus(gctx, h.log, h.deps.Input.Status())
 		return nil
@@ -176,7 +201,7 @@ func (h *Host) Run(ctx context.Context) error {
 			<-gctx.Done()
 			return nil
 		}
-		return h.deps.Connect(gctx, router, sink)
+		return h.deps.Connect(gctx, router, arouter, sink)
 	})
 
 	err := g.Wait()

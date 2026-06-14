@@ -44,8 +44,10 @@
   <span class="stat">remaining: <b id="remaining">-</b></span>
   <span class="stat">control RTT: <b id="rtt">-</b></span>
   <span class="stat">video: <b id="vstat">-</b></span>
+  <span class="stat">audio: <b id="astat">-</b></span>
 </div>
 <video id="video" playsinline autoplay muted></video>
+<button id="unmute" onclick="var v=document.getElementById('video'); v.muted=!v.muted; this.textContent=v.muted?'🔇 開啟聲音':'🔊 靜音';">🔇 開啟聲音</button>
 <p>Keys: <kbd>WASD</kbd> left stick · <kbd>arrows</kbd> right stick ·
 <kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd>/<kbd>I</kbd> = A/B/X/Y ·
 <kbd>Q</kbd>/<kbd>E</kbd> = L/R · <kbd>1</kbd>/<kbd>3</kbd> = ZL/ZR ·
@@ -123,7 +125,14 @@ $("connect").onclick = async () => {
   active = { pc, timers };
   const isActive = () => active?.pc === pc;
 
-  pc.ontrack = ev => { if (isActive() && ev.streams[0]) $("video").srcObject = ev.streams[0]; };
+  pc.ontrack = ev => {
+    if (!isActive()) return;
+    if (ev.streams[0]) $("video").srcObject = ev.streams[0];
+    if (ev.track.kind === "audio") {
+      $("astat").textContent = "track received (click 開啟聲音)";
+      log("audio track received");
+    }
+  };
   pc.onconnectionstatechange = () => { if (isActive()) setState(pc.connectionState); };
 
   // Show the *negotiated* inbound video codec + live fps on the page, so the
@@ -133,14 +142,25 @@ $("connect").onclick = async () => {
     if (!isActive() || pc.connectionState !== "connected") return;
     try {
       const stats = await pc.getStats();
-      let inb = null, codec = null;
-      stats.forEach(s => { if (s.type === "inbound-rtp" && s.kind === "video") inb = s; });
+      let inb = null, codec = null, ainb = null, acodec = null;
+      stats.forEach(s => {
+        if (s.type === "inbound-rtp" && s.kind === "video") inb = s;
+        if (s.type === "inbound-rtp" && s.kind === "audio") ainb = s;
+      });
       if (inb && inb.codecId) codec = stats.get(inb.codecId);
       if (inb) {
         const fmt = codec?.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
         $("vstat").textContent =
           `${(codec?.mimeType || "?")} ${fmt || ""} | ${inb.framesPerSecond ?? 0} fps | ` +
           `dec ${inb.framesDecoded ?? 0} (key ${inb.keyFramesDecoded ?? 0})`;
+      }
+      // Audio: packetsReceived rising => Opus RTP is actually flowing; if it stays
+      // 0 the host is not sending audio (e.g. ffmpeg failed to open ALSA).
+      if (ainb && ainb.codecId) acodec = stats.get(ainb.codecId);
+      if (ainb) {
+        $("astat").textContent =
+          `${(acodec?.mimeType || "?")} | pkts ${ainb.packetsReceived ?? 0} | ` +
+          `${Math.round((ainb.bytesReceived ?? 0) / 1024)} KB`;
       }
     } catch { /* ignore transient getStats errors */ }
   }, 1000));

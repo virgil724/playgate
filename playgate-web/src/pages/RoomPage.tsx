@@ -38,6 +38,9 @@ export function RoomPage() {
   const [remaining, setRemaining] = useState<number | null>(null);
   const [queuePos, setQueuePos] = useState<number | null>(null);
   const [statusMsg, setStatusMsg] = useState("");
+  // The <video> starts muted so the browser allows autoplay; the host now sends
+  // an Opus audio track, so expose a toggle to unmute after a user gesture.
+  const [audioMuted, setAudioMuted] = useState(true);
   const [code, setCode] = useState("");
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
@@ -252,6 +255,20 @@ export function RoomPage() {
             <div className="status-pill">{CONN_LABEL[conn]}</div>
             {connDetail && <div className="muted">{connDetail}</div>}
           </div>
+        )}
+        {conn === "connected" && (
+          <button
+            className="btn-primary"
+            style={{ position: "absolute", right: 12, bottom: 12, zIndex: 2 }}
+            onClick={() => {
+              const v = videoRef.current;
+              if (!v) return;
+              v.muted = !v.muted;
+              setAudioMuted(v.muted);
+            }}
+          >
+            {audioMuted ? "🔇 開啟聲音" : "🔊 靜音"}
+          </button>
         )}
       </div>
 

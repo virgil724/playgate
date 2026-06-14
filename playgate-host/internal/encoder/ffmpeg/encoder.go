@@ -443,9 +443,22 @@ func (e *Encoder) emitPacket(ctx context.Context, au accessUnit) {
 		return
 	default:
 	}
-	// Channel full: drop the oldest queued packet, then enqueue the new one.
+	// Channel full: drop the oldest queued packet to make room for the newer one,
+	// favouring fresh frames so the viewer's fps holds up under a slow consumer.
+	// A keyframe must never be dropped: a 1080p IDR spans hundreds of RTP packets
+	// and losing it freezes the decoder (green/stuck frame) until the next GOP —
+	// the exact opposite of smooth playback. If the oldest queued packet is a
+	// keyframe, put it back and drop the incoming inter-frame instead.
 	select {
-	case <-e.packets:
+	case old := <-e.packets:
+		if old.IsKeyframe {
+			select {
+			case e.packets <- old:
+			default:
+			}
+			e.log.Debug("dropped encoded packet to preserve queued keyframe")
+			return
+		}
 	default:
 	}
 	select {

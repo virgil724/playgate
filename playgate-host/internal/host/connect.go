@@ -26,7 +26,7 @@ var errTimeoutNoAnswer = errors.New("host: timed out waiting for viewer answer")
 // to the router and input sink, and tears down on disconnect so the next viewer
 // can connect.
 func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Collector, enc BitrateController) ConnectFunc {
-	return func(ctx context.Context, router *VideoRouter, sink InputSink) error {
+	return func(ctx context.Context, router *VideoRouter, arouter *AudioRouter, sink InputSink) error {
 		client, err := signaling.New(signaling.Config{
 			BaseURL: cfg.Signaling.URL,
 			RoomID:  cfg.Signaling.RoomID,
@@ -48,11 +48,12 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			cfg:    cfg,
 			mc:     mc,
 			enc:    enc,
-			client: client,
-			router: router,
-			sink:   sink.(*inputSink),
-			ice:    ice,
-			poll:   poll,
+			client:  client,
+			router:  router,
+			arouter: arouter,
+			sink:    sink.(*inputSink),
+			ice:     ice,
+			poll:    poll,
 		}
 		return cm.loop(ctx)
 	}
@@ -95,11 +96,12 @@ type connManager struct {
 	cfg    config.Config
 	mc     *metrics.Collector
 	enc    BitrateController // ABR target; nil disables adaptive bitrate
-	client *signaling.Client
-	router *VideoRouter
-	sink   *inputSink
-	ice    []webrtc.ICEServer
-	poll   time.Duration
+	client  *signaling.Client
+	router  *VideoRouter
+	arouter *AudioRouter // nil when audio is disabled
+	sink    *inputSink
+	ice     []webrtc.ICEServer
+	poll    time.Duration
 }
 
 // loop repeatedly serves a single viewer connection until ctx is cancelled.
@@ -125,7 +127,7 @@ func (c *connManager) serveOne(ctx context.Context) error {
 	// mid-stream restart (new SPS/PPS, PTS reset) makes Chrome's hardware decoder
 	// drop the stream. A continuous stream with periodic GOP keyframes decodes far
 	// better. The peer still drains sender RTCP so the interceptors run.
-	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: c.log})
+	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: c.log, EnableAudio: c.arouter != nil})
 	if err != nil {
 		return err
 	}
@@ -138,6 +140,12 @@ func (c *connManager) serveOne(ctx context.Context) error {
 	// Register the peer as the active video sink and clear it on teardown.
 	c.router.SetSink(peer)
 	defer c.router.Clear()
+
+	// Same for audio when enabled: the peer carries an Opus track to write to.
+	if c.arouter != nil {
+		c.arouter.SetSink(peer)
+		defer c.arouter.Clear()
+	}
 
 	// Wire input: gated or pass-through depending on session config.
 	c.wireInput(connCtx, peer)

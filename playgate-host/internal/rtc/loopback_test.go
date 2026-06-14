@@ -170,6 +170,119 @@ func TestLoopback(t *testing.T) {
 	}
 }
 
+// TestAudioTrackGating verifies the Opus track is created only when EnableAudio
+// is set, and that WriteAudioSample is a safe no-op on a video-only peer.
+func TestAudioTrackGating(t *testing.T) {
+	videoOnly, err := NewPeer(Config{ICEServers: nil})
+	if err != nil {
+		t.Fatalf("NewPeer (video-only): %v", err)
+	}
+	defer videoOnly.Close()
+	if videoOnly.AudioTrack() != nil {
+		t.Fatal("AudioTrack should be nil when EnableAudio is false")
+	}
+	if err := videoOnly.WriteAudioSample([]byte{0x00}, 20*time.Millisecond); err != nil {
+		t.Fatalf("WriteAudioSample on video-only peer should be a no-op, got %v", err)
+	}
+
+	withAudio, err := NewPeer(Config{ICEServers: nil, EnableAudio: true})
+	if err != nil {
+		t.Fatalf("NewPeer (audio): %v", err)
+	}
+	defer withAudio.Close()
+	if withAudio.AudioTrack() == nil {
+		t.Fatal("AudioTrack should be non-nil when EnableAudio is true")
+	}
+}
+
+// TestLoopbackAudio wires an audio-enabled host Peer to a bare answerer and
+// verifies the Opus track negotiates and that an Opus sample written to it is
+// received as RTP on the browser side's audio track.
+func TestLoopbackAudio(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	host, err := NewPeer(Config{ICEServers: nil, EnableAudio: true})
+	if err != nil {
+		t.Fatalf("NewPeer: %v", err)
+	}
+	defer host.Close()
+
+	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatalf("browser pc: %v", err)
+	}
+	defer browser.Close()
+
+	gotAudioRTP := make(chan struct{}, 1)
+	browser.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		// Only the audio track should signal success; drain video too so its
+		// receiver does not stall.
+		isAudio := tr.Kind() == webrtc.RTPCodecTypeAudio
+		for {
+			if _, _, err := tr.ReadRTP(); err != nil {
+				return
+			}
+			if isAudio {
+				select {
+				case gotAudioRTP <- struct{}{}:
+				default:
+				}
+			}
+		}
+	})
+
+	// --- Signaling handshake ---
+	offer, err := host.CreateOffer(ctx)
+	if err != nil {
+		t.Fatalf("CreateOffer: %v", err)
+	}
+	if err := browser.SetRemoteDescription(offer); err != nil {
+		t.Fatalf("browser SetRemoteDescription: %v", err)
+	}
+	browserGather := webrtc.GatheringCompletePromise(browser)
+	answer, err := browser.CreateAnswer(nil)
+	if err != nil {
+		t.Fatalf("browser CreateAnswer: %v", err)
+	}
+	if err := browser.SetLocalDescription(answer); err != nil {
+		t.Fatalf("browser SetLocalDescription: %v", err)
+	}
+	select {
+	case <-browserGather:
+	case <-ctx.Done():
+		t.Fatal("timeout gathering browser candidates")
+	}
+	if err := host.SetRemoteDescription(*browser.LocalDescription()); err != nil {
+		t.Fatalf("host SetRemoteDescription: %v", err)
+	}
+
+	waitConnected(ctx, t, host.ConnState())
+
+	// Feed Opus samples until RTP is observed on the browser's audio track. The
+	// payload bytes are arbitrary: RTP carries them verbatim, which is all the
+	// transport-level assertion needs.
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = host.WriteAudioSample([]byte{0xf8, 0xff, 0xfe}, 20*time.Millisecond)
+			}
+		}
+	}()
+
+	select {
+	case <-gotAudioRTP:
+		// success: Opus media flowed end to end on its own track.
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for audio RTP on browser track")
+	}
+}
+
 // TestKeyframeGating verifies WriteSample drops packets until the first keyframe.
 func TestKeyframeGating(t *testing.T) {
 	p, err := NewPeer(Config{ICEServers: nil})

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/playgate/playgate-host/internal/audio/opus"
 	"github.com/playgate/playgate-host/internal/capture/synthetic"
 	"github.com/playgate/playgate-host/internal/capture/v4l2"
 	"github.com/playgate/playgate-host/internal/config"
@@ -62,6 +63,9 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	// encode-stage latency can be recorded as packets emerge.
 	encWrap := newEncoderWrapper(log, mc, capture, tap, enc)
 
+	// --- optional audio source (ALSA→Opus) ---
+	audioSrc := buildAudio(log, cfg)
+
 	// --- input target ---
 	input, err := buildInput(log, cfg)
 	if err != nil {
@@ -77,10 +81,32 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	return Deps{
 		Capture: capture,
 		Encoder: encWrap,
+		Audio:   audioSrc,
 		Input:   input,
 		Session: mgr,
 		Connect: makeSignalingConnect(log, cfg, mc, encWrap),
 	}, nil
+}
+
+// buildAudio constructs the ALSA→Opus source when audio is enabled, else returns
+// a nil AudioSource (interface nil, so host.Run's nil check works — returning a
+// typed nil *opus.Source would defeat it). It falls back to the encoder's ffmpeg
+// path when audio.ffmpeg_path is unset.
+func buildAudio(log *slog.Logger, cfg config.Config) AudioSource {
+	if !cfg.Audio.Enabled {
+		return nil
+	}
+	ffmpegPath := cfg.Audio.FFmpegPath
+	if ffmpegPath == "" {
+		ffmpegPath = cfg.Encoder.FFmpegPath
+	}
+	return opus.New(log, opus.Config{
+		FFmpegPath: ffmpegPath,
+		Device:     cfg.Audio.Device,
+		SampleRate: cfg.Audio.SampleRate,
+		Channels:   cfg.Audio.Channels,
+		Bitrate:    cfg.Audio.Bitrate,
+	})
 }
 
 // detectCodec runs the best-effort `ffmpeg -encoders` probe and logs a clear,

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/playgate/playgate-host/internal/audio/opus"
 	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/metrics"
 )
@@ -94,6 +95,70 @@ func (r *VideoRouter) forward(pkt core.EncodedPacket) {
 	}
 	if r.metrics != nil {
 		r.metrics.RTC.Observe(time.Since(start))
+	}
+}
+
+// AudioSink is the subset of *rtc.Peer the audio router writes to. The active
+// viewer connection registers itself as the sink; the router forwards every Opus
+// page to it.
+type AudioSink interface {
+	WriteAudioSample(data []byte, duration time.Duration) error
+}
+
+// AudioRouter consumes the audio source's Opus page stream once and forwards each
+// page to the currently-registered viewer sink, discarding pages when no viewer
+// is connected. It is the audio analogue of VideoRouter and is created only when
+// audio capture is enabled.
+type AudioRouter struct {
+	log *slog.Logger
+
+	mu   sync.Mutex
+	sink AudioSink
+}
+
+// NewAudioRouter constructs an audio router.
+func NewAudioRouter(log *slog.Logger) *AudioRouter {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &AudioRouter{log: log.With("module", "audio-router")}
+}
+
+// SetSink registers the active viewer sink.
+func (r *AudioRouter) SetSink(s AudioSink) {
+	r.mu.Lock()
+	r.sink = s
+	r.mu.Unlock()
+}
+
+// Clear removes the active sink (viewer disconnected).
+func (r *AudioRouter) Clear() {
+	r.mu.Lock()
+	r.sink = nil
+	r.mu.Unlock()
+}
+
+// Run drains Opus pages until the channel closes or ctx is cancelled, forwarding
+// each to the active sink (if any).
+func (r *AudioRouter) Run(ctx context.Context, packets <-chan opus.Packet) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case pkt, ok := <-packets:
+			if !ok {
+				return
+			}
+			r.mu.Lock()
+			sink := r.sink
+			r.mu.Unlock()
+			if sink == nil {
+				continue
+			}
+			if err := sink.WriteAudioSample(pkt.Data, pkt.Duration); err != nil {
+				r.log.Debug("write audio sample failed", "err", err)
+			}
+		}
 	}
 }
 

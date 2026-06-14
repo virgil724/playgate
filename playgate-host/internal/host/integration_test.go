@@ -39,7 +39,7 @@ func TestEndToEndLoopback(t *testing.T) {
 	// connectReady signals the test that the peer is wired so it can drive input.
 	connectErr := make(chan error, 1)
 
-	connect := func(ctx context.Context, router *VideoRouter, sink InputSink) error {
+	connect := func(ctx context.Context, router *VideoRouter, arouter *AudioRouter, sink InputSink) error {
 		peer, err := rtc.NewPeer(rtc.Config{ICEServers: nil, Logger: discardLogger()})
 		if err != nil {
 			connectErr <- err

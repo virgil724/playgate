@@ -29,6 +29,17 @@ encoder:
   codec: libx264
   vaapi_device: /dev/dri/renderD128   # DRM render node (h264_vaapi only)
 
+# Audio capture (ALSA -> Opus). Sent on its own WebRTC track alongside the video;
+# the browser resynchronises A/V from each track's RTP timestamps. Disabled by
+# default so video-only setups are unaffected.
+audio:
+  enabled: false
+  device: default            # ALSA device, e.g. "hw:CARD=MS2109,DEV=0" for an HDMI grabber
+  sample_rate: 48000         # ALSA capture rate (Opus is always 48 kHz on the wire)
+  channels: 2
+  bitrate: 128000            # Opus bitrate (bits/sec)
+  # ffmpeg_path:             # optional; defaults to encoder.ffmpeg_path
+
 # Adaptive bitrate (T14). When enabled the host samples WebRTC stats (packet
 # loss, RTT) and adjusts the encoder bitrate within [min_bitrate, max_bitrate]
 # using AIMD: loss above loss_threshold -> multiplicative decrease; a sustained
