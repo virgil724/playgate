@@ -66,6 +66,8 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DOCKER_API_VERSION: "1.41"
     # Only touch containers that opted in via label; prune old images.
     command: --label-enable --interval 300 --cleanup
 
