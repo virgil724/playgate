@@ -175,10 +175,17 @@ export function RoomPage() {
         if (inb && inb.codecId) codec = stats.get(inb.codecId);
         if (inb) {
           const fmt = codec?.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
+          // Browser-side latency: average jitter-buffer delay and decode time
+          // (cumulative counters → per-frame average). These are the streaming-
+          // added latency the host pipeline can't see; the dominant chunk vs a
+          // local capture preview.
+          const jbCount = inb.jitterBufferEmittedCount ?? 0;
+          const jbMs = jbCount > 0 ? (inb.jitterBufferDelay / jbCount) * 1000 : 0;
+          const decFrames = inb.framesDecoded ?? 0;
+          const decMs = decFrames > 0 ? (inb.totalDecodeTime / decFrames) * 1000 : 0;
           setVideoStats(
-            `${codec?.mimeType || "?"} ${fmt || ""} | ${inb.framesPerSecond ?? 0} fps | dec ${
-              inb.framesDecoded ?? 0
-            } (key ${inb.keyFramesDecoded ?? 0})`
+            `${codec?.mimeType || "?"} ${fmt || ""} | ${inb.framesPerSecond ?? 0} fps | ` +
+              `jitter ${jbMs.toFixed(1)}ms | decode ${decMs.toFixed(1)}ms`
           );
         }
         if (ainb && ainb.codecId) acodec = stats.get(ainb.codecId);
