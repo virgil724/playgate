@@ -86,6 +86,9 @@ signaling:
 # Pipeline latency reporting (capture -> encode -> track, p50/p95 logged).
 metrics:
   report_interval_seconds: 5
+  # Live per-stage latency snapshot as JSON at GET /metrics on this address.
+  # Localhost-only (unauthenticated). Empty string disables it.
+  listen_addr: "127.0.0.1:9091"
 
 # playgate-server integration (optional). When url is set the host periodically
 # POSTs a heartbeat so the streamer console can show the room online/offline

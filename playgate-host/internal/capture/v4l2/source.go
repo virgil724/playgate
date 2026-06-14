@@ -212,6 +212,16 @@ func classifyDQErr(err error) error {
 // forward copies a dequeued mmap buffer into a core.VideoFrame and pushes it
 // onto the output channel with a drop-oldest policy. The mmap region is reused
 // once the buffer is requeued, so we always copy before returning.
+// monotonicNow returns the current CLOCK_MONOTONIC reading as a Duration since
+// boot, or 0 on error. Used to convert V4L2 buffer timestamps to wall-clock.
+func monotonicNow() time.Duration {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0
+	}
+	return time.Duration(ts.Sec)*time.Second + time.Duration(ts.Nsec)*time.Nanosecond
+}
+
 func (s *Source) forward(ctx context.Context, buf v4l2Buffer) {
 	idx := int(buf.Index)
 	if idx < 0 || idx >= len(s.dev.buffers) {
@@ -223,10 +233,18 @@ func (s *Source) forward(ctx context.Context, buf v4l2Buffer) {
 		return
 	}
 
-	// Build a timestamp: prefer the kernel-supplied capture time, else now.
+	// Build a wall-clock capture timestamp. V4L2's buf.Timestamp is CLOCK_MONOTONIC
+	// (seconds since boot), NOT Unix epoch — feeding it to time.Unix would yield a
+	// ~1970 time and make latency stats read as ~56 years. Convert by anchoring the
+	// monotonic capture instant to wall-clock via the current monotonic↔wall offset:
+	//   wall_capture = now - (mono_now - mono_capture)
+	// so latency taps measure the real driver/USB capture-to-process delay.
 	ts := time.Now()
 	if buf.Timestamp.Sec != 0 || buf.Timestamp.Usec != 0 {
-		ts = time.Unix(buf.Timestamp.Sec, buf.Timestamp.Usec*1000)
+		capMono := time.Duration(buf.Timestamp.Sec)*time.Second + time.Duration(buf.Timestamp.Usec)*time.Microsecond
+		if nowMono := monotonicNow(); nowMono > 0 && capMono > 0 && capMono <= nowMono {
+			ts = time.Now().Add(-(nowMono - capMono))
+		}
 	}
 
 	frame := core.VideoFrame{

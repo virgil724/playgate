@@ -177,6 +177,10 @@ type MetricsConfig struct {
 	// ReportIntervalSeconds is how often pipeline latency p50/p95 are logged.
 	// 0 uses the 5s default.
 	ReportIntervalSeconds int `yaml:"report_interval_seconds"`
+	// ListenAddr, when non-empty, serves the live per-stage latency snapshot as
+	// JSON at GET /metrics on this address. Use a localhost address — the data is
+	// unauthenticated. Empty disables the endpoint.
+	ListenAddr string `yaml:"listen_addr"`
 }
 
 // ServerConfig configures the optional connection to playgate-server. When URL
@@ -250,6 +254,7 @@ func Default() Config {
 		},
 		Metrics: MetricsConfig{
 			ReportIntervalSeconds: 5,
+			ListenAddr:            "127.0.0.1:9091",
 		},
 		Server: ServerConfig{
 			HeartbeatIntervalSeconds: 30,

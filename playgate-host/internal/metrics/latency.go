@@ -18,7 +18,9 @@ package metrics
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -120,6 +122,33 @@ func NewCollector() *Collector {
 		RTC:     NewHistogram(),
 		E2ERTT:  NewHistogram(),
 	}
+}
+
+// stageJSON is one stage's snapshot in the /metrics JSON, with durations in
+// milliseconds for easy reading.
+type stageJSON struct {
+	N     int     `json:"n"`
+	P50ms float64 `json:"p50_ms"`
+	P95ms float64 `json:"p95_ms"`
+}
+
+func toStageJSON(s Stats) stageJSON {
+	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+	return stageJSON{N: s.Count, P50ms: ms(s.P50), P95ms: ms(s.P95)}
+}
+
+// ServeMetrics is an http.HandlerFunc that returns the current per-stage latency
+// snapshot as JSON. Intended to be served on a localhost-only address so the
+// pipeline latency can be inspected live without parsing logs.
+func (c *Collector) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
+	body := map[string]stageJSON{
+		"capture": toStageJSON(c.Capture.Snapshot()),
+		"encode":  toStageJSON(c.Encode.Snapshot()),
+		"rtc":     toStageJSON(c.RTC.Snapshot()),
+		"e2e_rtt": toStageJSON(c.E2ERTT.Snapshot()),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // Report logs a one-line summary of every stage at level Info. It is safe to

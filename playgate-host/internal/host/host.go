@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -176,6 +177,24 @@ func (h *Host) Run(ctx context.Context) error {
 			time.Duration(h.cfg.Metrics.ReportIntervalSeconds)*time.Second)
 		return nil
 	})
+
+	// 4a. Optional localhost /metrics endpoint for live latency inspection.
+	if addr := h.cfg.Metrics.ListenAddr; addr != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/metrics", h.metrics.ServeMetrics)
+		srv := &http.Server{Addr: addr, Handler: mux}
+		g.Go(func() error {
+			go func() {
+				<-gctx.Done()
+				_ = srv.Shutdown(context.Background())
+			}()
+			h.log.Info("metrics endpoint listening", "addr", addr)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				h.log.Warn("metrics endpoint error", "err", err)
+			}
+			return nil
+		})
+	}
 
 	// 4b. Session manager (only when gating is enabled).
 	if h.session != nil {
