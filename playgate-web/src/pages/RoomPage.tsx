@@ -54,6 +54,9 @@ export function RoomPage() {
   const [rtt, setRtt] = useState<string>("-");
   const [videoStats, setVideoStats] = useState<string>("-");
   const [audioStats, setAudioStats] = useState<string>("-");
+  // Previous cumulative counters, so jitter/decode are shown as the CURRENT
+  // per-interval value (delta) rather than a session average that hides drift.
+  const statsPrevRef = useRef({ jbDelay: 0, jbCount: 0, decTime: 0, decFrames: 0 });
   const [showGamepad, setShowGamepad] = useState(() => {
     if (typeof window !== "undefined") {
       return "ontouchstart" in window || navigator.maxTouchPoints > 0;
@@ -180,9 +183,20 @@ export function RoomPage() {
           // added latency the host pipeline can't see; the dominant chunk vs a
           // local capture preview.
           const jbCount = inb.jitterBufferEmittedCount ?? 0;
-          const jbMs = jbCount > 0 ? (inb.jitterBufferDelay / jbCount) * 1000 : 0;
+          const jbDelay = inb.jitterBufferDelay ?? 0;
           const decFrames = inb.framesDecoded ?? 0;
-          const decMs = decFrames > 0 ? (inb.totalDecodeTime / decFrames) * 1000 : 0;
+          const decTime = inb.totalDecodeTime ?? 0;
+          const prev = statsPrevRef.current;
+          const dCount = jbCount - prev.jbCount;
+          const dFrames = decFrames - prev.decFrames;
+          // Per-interval (current) averages; fall back to cumulative on first sample.
+          const jbMs =
+            dCount > 0 ? ((jbDelay - prev.jbDelay) / dCount) * 1000
+            : jbCount > 0 ? (jbDelay / jbCount) * 1000 : 0;
+          const decMs =
+            dFrames > 0 ? ((decTime - prev.decTime) / dFrames) * 1000
+            : decFrames > 0 ? (decTime / decFrames) * 1000 : 0;
+          statsPrevRef.current = { jbDelay, jbCount, decTime, decFrames };
           setVideoStats(
             `${codec?.mimeType || "?"} ${fmt || ""} | ${inb.framesPerSecond ?? 0} fps | ` +
               `jitter ${jbMs.toFixed(1)}ms | decode ${decMs.toFixed(1)}ms`
