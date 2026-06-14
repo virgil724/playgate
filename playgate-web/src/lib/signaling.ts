@@ -50,6 +50,11 @@ export interface SignalingOptions {
   /** Optional bearer token (session JWT / HMAC) for auth-enabled deployments. */
   token?: string;
   /**
+   * Stable per-viewer id. The host runs one peer per viewerId, so every viewer
+   * in a room needs a distinct one. Auto-generated when omitted.
+   */
+  viewerId?: string;
+  /**
    * Injectable WebSocket constructor/factory.  Defaults to globalThis.WebSocket.
    * Pass a fake in tests; pass undefined to force HTTP-only mode.
    */
@@ -72,6 +77,8 @@ export class SignalingClient {
   private peer: "viewer" | "host";
   private token?: string;
   private wsFactory: WebSocketFactory | null;
+  /** This viewer's id; tagged onto every outbound message (see push). */
+  readonly viewerId: string;
 
   // Delivery state
   private since = -1;
@@ -102,6 +109,7 @@ export class SignalingClient {
     this.roomId = opts.roomId;
     this.peer = opts.peer ?? "viewer";
     this.token = opts.token;
+    this.viewerId = opts.viewerId ?? generateViewerId();
 
     // Resolve wsFactory: explicit null → HTTP only; undefined → use global.
     if (opts.wsFactory === null) {
@@ -126,21 +134,33 @@ export class SignalingClient {
     return h;
   }
 
-  /** Push a JSON payload (SDP offer/answer or ICE candidate) as our peer.
-   *  When the WS is open the payload is sent over the socket; otherwise HTTP POST. */
+  /** Push a JSON payload (SDP answer, ICE candidate, or hello) as our peer.
+   *  When the WS is open the payload is sent over the socket; otherwise HTTP POST.
+   *  As a viewer we tag every object payload with our viewerId so the host can
+   *  tell which viewer's session it belongs to (mesh multi-viewer). */
   async push(payload: unknown): Promise<void> {
+    const body =
+      this.peer === "viewer" && payload && typeof payload === "object" && !Array.isArray(payload)
+        ? { ...(payload as Record<string, unknown>), viewerId: this.viewerId }
+        : payload;
     if (this.wsOpen && this.ws) {
-      this.ws.send(JSON.stringify(payload));
+      this.ws.send(JSON.stringify(body));
       return;
     }
     const res = await fetch(`${this.baseUrl}/rooms/${this.roomId}/${this.peer}`, {
       method: "POST",
       headers: this.headers(),
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       throw new Error(`signaling push failed: ${res.status}`);
     }
+  }
+
+  /** Announce this viewer to the host so it sends us an offer. Idempotent on the
+   *  host side (a repeat hello for an existing session is ignored). */
+  async hello(): Promise<void> {
+    await this.push({ kind: "hello" });
   }
 
   /**
@@ -370,6 +390,13 @@ export class SignalingClient {
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/** Generate a random viewer id (per browser tab / connection). */
+function generateViewerId(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  return `v-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+}
 
 /** Classify a signaling payload by shape. */
 export function classifySignal(

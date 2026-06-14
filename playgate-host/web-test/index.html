@@ -89,11 +89,13 @@ function encodeInput() {
 }
 
 // ---- signaling (playgate-signaling Worker, viewer peer) ----
-let base, room;
+// viewerId tags our messages so the host runs a dedicated peer for us (the host
+// now serves many viewers at once); set per Connect click.
+let base, room, viewerId;
 async function push(payload) {
   await fetch(`${base}/rooms/${room}/viewer`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, viewerId }),
   });
 }
 async function iceServers() {
@@ -118,6 +120,7 @@ $("connect").onclick = async () => {
   }
   base = $("url").value.replace(/\/+$/, "");
   room = $("room").value.trim();
+  viewerId = (crypto.randomUUID?.() ?? "v-" + Math.random().toString(36).slice(2));
   const token = $("token").value.trim();
   setState("fetching ICE");
   const pc = new RTCPeerConnection({ iceServers: await iceServers() });
@@ -190,6 +193,9 @@ $("connect").onclick = async () => {
     }
   };
 
+  // Announce ourselves so the host sends us a per-viewer offer.
+  push({ kind: "hello" }).catch(e => log("hello failed: " + e));
+
   // Poll the host's offer (+ICE), answer once.
   setState("waiting for offer");
   let since = -1, answered = false;
@@ -199,9 +205,12 @@ $("connect").onclick = async () => {
       if (!r.ok || !isActive()) return;
       const j = await r.json();
       since = j.nextSince;
-      // Answer the NEWEST offer in the batch: older ones belong to recycled
+      // The host queue is shared by all viewers; take the newest offer addressed
+      // to us (or an untargeted legacy offer). Older offers belong to recycled
       // host peers (stale ICE creds + DTLS fingerprint) and never connect.
-      const p = (j.messages || []).filter(m => m.payload?.type === "offer").pop()?.payload;
+      const p = (j.messages || [])
+        .filter(m => m.payload?.type === "offer" && (!m.payload.to || m.payload.to === viewerId))
+        .pop()?.payload;
       if (p && !answered) {
         answered = true;
         clearInterval(poll);

@@ -141,6 +141,10 @@ export class ViewerConnection {
       (msg) => void this.handleSignal(msg),
       (err) => this.setState("connecting", `signaling: ${String(err)}`),
     );
+
+    // Announce ourselves so the host sends us a (per-viewer) offer. The host no
+    // longer broadcasts a single offer to the room; it offers per viewerId.
+    void this.signaling.hello().catch((err) => dlog("webrtc", "hello failed:", err));
   }
 
   /** (Re)build the RTCPeerConnection. Called once from start() and again when
@@ -221,6 +225,13 @@ export class ViewerConnection {
     dlog("webrtc", `signal seq=${msg.seq} ts=${msg.ts} kind=${kind}`);
     try {
       if (kind === "offer") {
+        // The host queue is shared by all viewers; ignore offers addressed to a
+        // different viewerId (an offer with no `to` is a legacy 1:1 broadcast).
+        const to = (msg.payload as { to?: string }).to;
+        if (to && to !== this.signaling.viewerId) {
+          dlog("webrtc", `ignoring offer for other viewer ${to}`);
+          return;
+        }
         await this.handleOffer(msg.payload as RTCSessionDescriptionInit, msg.ts);
       } else if (kind === "candidate") {
         await this.addCandidate(msg.payload as RTCIceCandidateInit);
