@@ -24,9 +24,24 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
+  # ── init: fix volume ownership for nonroot (UID 65534) ───────────────────
+  # The distroless runtime image runs as nonroot:nonroot. Docker named volumes
+  # are created with root ownership, so the server process cannot open or
+  # create the SQLite database. This one-shot container sets the correct owner
+  # before the server starts.
+  init-permissions:
+    image: busybox:stable
+    volumes:
+      - server-data:/data
+    command: chown -R 65534:65534 /data
+    restart: "no"
+
   server:
     image: ghcr.io/virgil724/playgate-server:latest
     restart: unless-stopped
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
     # No ports: published only through the tunnel on the compose network.
     volumes:
       - server-data:/data

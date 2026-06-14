@@ -10,6 +10,18 @@
 
 services:
 
+  # ── init: fix volume ownership for nonroot (UID 65534) ───────────────────
+  # The distroless runtime image runs as nonroot:nonroot. Docker named volumes
+  # are created with root ownership, so the server process cannot open or
+  # create the SQLite database. This one-shot container sets the correct owner
+  # before the server starts.
+  init-permissions:
+    image: busybox:stable
+    volumes:
+      - server-data:/data
+    command: chown -R 65534:65534 /data
+    restart: "no"
+
   # ── playgate-server ────────────────────────────────────────────────────────
   # Minimal REST API: manages sessions and vends JWT tokens.
   # Data (SQLite + ed25519 key) lives in the named volume "server-data".
@@ -20,6 +32,9 @@ services:
     #   context: ..
     #   dockerfile: docker/server.Dockerfile
     restart: unless-stopped
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
     ports:
       - "8080:8080"          # expose REST API to LAN / reverse proxy
     volumes:
