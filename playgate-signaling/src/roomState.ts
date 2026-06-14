@@ -67,6 +67,19 @@ export function isOfferPayload(payload: unknown): boolean {
   );
 }
 
+/**
+ * Read a non-empty string field from a JSON-object payload, else undefined.
+ * Used for the multi-viewer addressing convention: host→viewer messages carry
+ * `to` (target viewerId); viewer→host messages carry `viewerId` (sender).
+ */
+function payloadString(payload: unknown, field: "to" | "viewerId"): string | undefined {
+  if (typeof payload === "object" && payload !== null) {
+    const v = (payload as Record<string, unknown>)[field];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+}
+
 export class RoomState {
   constructor(private readonly storage: RoomStorage) {}
 
@@ -103,9 +116,25 @@ export class RoomState {
     };
 
     if (peer === "host" && isOfferPayload(payload)) {
-      // Fresh signaling session: keep only the new offer, drop the viewer queue.
-      await this.storage.put(key, [msg]);
-      await this.storage.delete(queueKey("viewer"));
+      const target = payloadString(payload, "to");
+      if (target !== undefined) {
+        // Multi-viewer: a targeted offer resets ONLY that viewer's session —
+        // drop the target's prior host offers/ICE and the target viewer's prior
+        // answers/ICE, leaving every other viewer's queued messages intact.
+        const hostQueue = queue.filter((m) => payloadString(m.payload, "to") !== target);
+        hostQueue.push(msg);
+        await this.storage.put(key, hostQueue);
+
+        const viewerQueue = await this.loadQueue("viewer");
+        await this.storage.put(
+          queueKey("viewer"),
+          viewerQueue.filter((m) => payloadString(m.payload, "viewerId") !== target),
+        );
+      } else {
+        // Legacy 1:1: keep only the new offer and drop the whole viewer queue.
+        await this.storage.put(key, [msg]);
+        await this.storage.delete(queueKey("viewer"));
+      }
     } else {
       queue.push(msg);
       await this.storage.put(key, queue);

@@ -161,6 +161,45 @@ describe("RoomState host offer-reset", () => {
   });
 });
 
+describe("RoomState per-viewer offer-reset (multi-viewer)", () => {
+  let room: RoomState;
+  beforeEach(() => {
+    room = new RoomState(new FakeStorage());
+  });
+
+  const tosIn = (q: { payload: unknown }[]) =>
+    q.map((m) => (m.payload as { to?: string }).to);
+  const vidsIn = (q: { payload: unknown }[]) =>
+    q.map((m) => (m.payload as { viewerId?: string }).viewerId);
+
+  it("a targeted re-offer resets only that viewer, leaving others intact", async () => {
+    // Realistic order: host offers first, then each viewer answers.
+    await room.append("host", { type: "offer", sdp: "oA", to: "A" });
+    await room.append("host", { type: "offer", sdp: "oB", to: "B" });
+    await room.append("viewer", { type: "answer", sdp: "A1", viewerId: "A" });
+    await room.append("viewer", { type: "answer", sdp: "B1", viewerId: "B" });
+
+    // New offer to A: drops A's old offer + A's stale answer; B untouched.
+    await room.append("host", { type: "offer", sdp: "oA2", to: "A" });
+
+    const hostQ = await room.backlogFor("viewer"); // host→viewer queue
+    expect(tosIn(hostQ).filter((t) => t === "A")).toHaveLength(1);
+    expect(tosIn(hostQ).filter((t) => t === "B")).toHaveLength(1);
+    expect((hostQ.find((m) => (m.payload as { to?: string }).to === "A")!.payload as { sdp: string }).sdp).toBe("oA2");
+
+    const viewerQ = await room.backlogFor("host"); // viewer→host queue
+    expect(vidsIn(viewerQ)).toContain("B");
+    expect(vidsIn(viewerQ)).not.toContain("A");
+  });
+
+  it("host reads all viewers' messages tagged by viewerId", async () => {
+    await room.append("viewer", { type: "answer", viewerId: "A" });
+    await room.append("viewer", { type: "answer", viewerId: "B" });
+    const h = await room.poll("host", -1);
+    expect(vidsIn(h.messages).sort()).toEqual(["A", "B"]);
+  });
+});
+
 describe("RoomState.backlogFor", () => {
   it("returns the other peer's full queue", async () => {
     const room = new RoomState(new FakeStorage());
