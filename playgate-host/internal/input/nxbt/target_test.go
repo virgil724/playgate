@@ -224,10 +224,10 @@ func TestRateLimit_CoalescesBeyondCap(t *testing.T) {
 }
 
 func TestRateLimit_NoLimitPassesAll(t *testing.T) {
-	// 0 Hz = no rate limit. Send commands spaced further apart than the poll
-	// tick so each one gets its own flush cycle and none are coalesced.
-	// A concurrent goroutine drains the server side so net.Pipe writes don't
-	// block the Run goroutine.
+	// 0 Hz = no rate limit. Send commands spaced apart so the event-driven loop
+	// flushes each one before the next push overwrites the pending slot (which
+	// would coalesce them). A concurrent goroutine drains the server side so
+	// net.Pipe writes don't block the Run goroutine.
 	target, serverConn, cancel := makePipeTarget(t, 0)
 	defer cancel()
 	defer serverConn.Close()
@@ -248,8 +248,8 @@ func TestRateLimit_NoLimitPassesAll(t *testing.T) {
 	}()
 
 	const N = 5
-	// Space sends by 3× the poll interval so each command gets its own tick.
-	const spacing = sendPollInterval * 3
+	// Space sends so each command is flushed before the next overwrites pending.
+	const spacing = 10 * time.Millisecond
 	for i := range N {
 		_ = target.Send(core.InputCommand{Buttons: uint32(i + 1)})
 		time.Sleep(spacing)
@@ -265,6 +265,50 @@ func TestRateLimit_NoLimitPassesAll(t *testing.T) {
 		case <-deadline:
 			t.Errorf("no-limit: want ≥%d commands, got %d", N, count)
 			return
+		}
+	}
+}
+
+func TestEventDriven_FlushesWithinRateInterval(t *testing.T) {
+	// At 120 Hz the rate interval is ~8.33 ms. The event-driven loop should
+	// flush a freshly pushed command well within one interval, rather than
+	// waiting for a fixed poll tick.
+	target, serverConn, cancel := makePipeTarget(t, 120)
+	defer cancel()
+	defer serverConn.Close()
+
+	time.Sleep(50 * time.Millisecond) // let the session establish
+
+	start := time.Now()
+	_ = target.Send(core.InputCommand{Buttons: 1})
+
+	line := readLine(t, serverConn)
+	elapsed := time.Since(start)
+
+	var env envelope
+	if err := json.Unmarshal(line, &env); err != nil || env.Type != msgTypeInput {
+		t.Fatalf("expected input message, got %q (err=%v)", line, err)
+	}
+	// The first command after an idle period is sendable immediately, so it must
+	// arrive far quicker than the old 8 ms poll floor. Allow slack for CI.
+	if elapsed > 5*time.Millisecond {
+		t.Errorf("event-driven flush too slow: %v (want < 5ms)", elapsed)
+	}
+}
+
+func TestEventDriven_IdleSendsNothing(t *testing.T) {
+	// With no input pushed, the loop must stay quiet: only keepalive pings are
+	// allowed, and those are 5 s apart, so no input frame should appear.
+	_, serverConn, cancel := makePipeTarget(t, 120)
+	defer cancel()
+	defer serverConn.Close()
+
+	serverConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	scanner := bufio.NewScanner(serverConn)
+	for scanner.Scan() {
+		var env envelope
+		if json.Unmarshal(scanner.Bytes(), &env) == nil && env.Type == msgTypeInput {
+			t.Fatalf("idle loop emitted an input frame: %q", scanner.Bytes())
 		}
 	}
 }

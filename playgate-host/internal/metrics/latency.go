@@ -10,6 +10,9 @@
 //	encode   — wall time from a frame entering the encoder to its packet leaving
 //	rtc      — wall time from a packet leaving the encoder to being written to
 //	           the WebRTC track
+//	input    — wall time from the host decoding an InputCommand off the WebRTC
+//	           DataChannel to it being written to the nxbt daemon socket (covers
+//	           the coalescer/rate-limit delay)
 //	e2e_rtt  — application-level round trip measured by the control-channel ping
 //	           (see internal/rtc control ping handling)
 //
@@ -111,6 +114,7 @@ type Collector struct {
 	Capture *Histogram
 	Encode  *Histogram
 	RTC     *Histogram
+	Input   *Histogram
 	E2ERTT  *Histogram
 }
 
@@ -120,6 +124,7 @@ func NewCollector() *Collector {
 		Capture: NewHistogram(),
 		Encode:  NewHistogram(),
 		RTC:     NewHistogram(),
+		Input:   NewHistogram(),
 		E2ERTT:  NewHistogram(),
 	}
 }
@@ -154,11 +159,13 @@ func (c *Collector) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 // Report logs a one-line summary of every stage at level Info. It is safe to
 // call from any goroutine.
 func (c *Collector) Report(log *slog.Logger) {
-	cap, enc, rtc, e2e := c.Capture.Snapshot(), c.Encode.Snapshot(), c.RTC.Snapshot(), c.E2ERTT.Snapshot()
+	cap, enc, rtc := c.Capture.Snapshot(), c.Encode.Snapshot(), c.RTC.Snapshot()
+	in, e2e := c.Input.Snapshot(), c.E2ERTT.Snapshot()
 	log.Info("latency",
 		"capture_n", cap.Count, "capture_p50", cap.P50, "capture_p95", cap.P95,
 		"encode_n", enc.Count, "encode_p50", enc.P50, "encode_p95", enc.P95,
 		"rtc_n", rtc.Count, "rtc_p50", rtc.P50, "rtc_p95", rtc.P95,
+		"input_n", in.Count, "input_p50", in.P50, "input_p95", in.P95,
 		"e2e_rtt_n", e2e.Count, "e2e_rtt_p50", e2e.P50, "e2e_rtt_p95", e2e.P95,
 	)
 }

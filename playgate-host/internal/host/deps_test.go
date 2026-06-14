@@ -66,7 +66,7 @@ func TestBuildCaptureSynthetic(t *testing.T) {
 func TestBuildInputLog(t *testing.T) {
 	cfg := config.Default()
 	cfg.Input.Target = config.InputLog
-	tgt, err := buildInput(discardLogger(), cfg)
+	tgt, err := buildInput(discardLogger(), cfg, metrics.NewCollector())
 	if err != nil {
 		t.Fatalf("buildInput: %v", err)
 	}
