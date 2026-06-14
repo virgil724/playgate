@@ -3,8 +3,8 @@ package host
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -15,16 +15,12 @@ import (
 	"github.com/playgate/playgate-host/internal/signaling"
 )
 
-// errTimeoutNoAnswer is returned when no viewer answer arrives within the
-// per-connection deadline, so the manager recycles the peer and tries again.
-var errTimeoutNoAnswer = errors.New("host: timed out waiting for viewer answer")
-
-// makeSignalingConnect returns a ConnectFunc that drives the per-viewer WebRTC
-// lifecycle against the signaling Worker: build ICE config (TURN or STUN), then
-// loop accepting one viewer at a time. Each iteration creates a fresh rtc.Peer,
-// posts an offer, polls for the viewer's answer + ICE candidates, wires the peer
-// to the router and input sink, and tears down on disconnect so the next viewer
-// can connect.
+// makeSignalingConnect returns a ConnectFunc that drives the WebRTC lifecycle
+// against the signaling Worker: build ICE config (TURN or STUN), then read the
+// merged viewer feed and run one rtc.Peer per viewer concurrently (mesh
+// broadcast). Each viewer announces itself with a "hello"; the manager replies
+// with a per-viewer offer (addressed via the payload's "to"), wires the peer to
+// the routers and input sink, and tears it down on that viewer's disconnect.
 func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Collector, enc BitrateController) ConnectFunc {
 	return func(ctx context.Context, router *VideoRouter, arouter *AudioRouter, sink InputSink) error {
 		client, err := signaling.New(signaling.Config{
@@ -90,29 +86,66 @@ func resolveICEServers(ctx context.Context, log *slog.Logger, cfg config.Config,
 	return out
 }
 
-// connManager runs the accept-one-viewer-at-a-time loop.
+// connManager reads the merged viewer feed and runs one peer per viewer.
 type connManager struct {
-	log    *slog.Logger
-	cfg    config.Config
-	mc     *metrics.Collector
-	enc    BitrateController // ABR target; nil disables adaptive bitrate
+	log     *slog.Logger
+	cfg     config.Config
+	mc      *metrics.Collector
+	enc     BitrateController // ABR target; unused in multi-viewer (see runViewer)
 	client  *signaling.Client
 	router  *VideoRouter
 	arouter *AudioRouter // nil when audio is disabled
 	sink    *inputSink
 	ice     []webrtc.ICEServer
 	poll    time.Duration
+
+	mu       sync.Mutex
+	sessions map[string]*viewerSession // keyed by viewerId
 }
 
-// loop repeatedly serves a single viewer connection until ctx is cancelled.
+// viewerSession is one connected viewer's peer plus its answer-applied guard.
+type viewerSession struct {
+	mu       sync.Mutex
+	peer     *rtc.Peer
+	answered bool
+}
+
+func (s *viewerSession) setPeer(p *rtc.Peer) {
+	s.mu.Lock()
+	s.peer = p
+	s.mu.Unlock()
+}
+
+// viewerEnvelope is the JSON shape of a viewer→host signaling payload. viewerId
+// addresses which viewer's session a message belongs to; kind=="hello" announces
+// a new viewer so the host knows to send it an offer.
+type viewerEnvelope struct {
+	Kind     string `json:"kind"`
+	Type     string `json:"type"`
+	SDP      string `json:"sdp"`
+	ViewerID string `json:"viewerId"`
+}
+
+// viewerOffer is the host→viewer offer payload; To carries the target viewerId
+// so the Worker resets only that viewer's session and the browser can filter.
+type viewerOffer struct {
+	Type string `json:"type"`
+	SDP  string `json:"sdp"`
+	To   string `json:"to"`
+}
+
+// loop reads the merged viewer feed for the room's lifetime, reconnecting on
+// transport failure until ctx is cancelled.
 func (c *connManager) loop(ctx context.Context) error {
+	c.mu.Lock()
+	c.sessions = make(map[string]*viewerSession)
+	c.mu.Unlock()
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err := c.serveOne(ctx); err != nil && ctx.Err() == nil {
-			c.log.Warn("viewer session ended with error; will accept next viewer", "err", err)
-			// brief backoff to avoid a hot loop if signaling is down.
+		if err := c.runFeed(ctx); err != nil && ctx.Err() == nil {
+			c.log.Warn("signaling feed ended; retrying", "err", err)
 			if !sleepCtx(ctx, c.poll) {
 				return nil
 			}
@@ -120,62 +153,173 @@ func (c *connManager) loop(ctx context.Context) error {
 	}
 }
 
-// serveOne handles exactly one viewer connection from offer to disconnect.
-func (c *connManager) serveOne(ctx context.Context) error {
-	// NOTE: we intentionally do NOT wire OnKeyframeRequest to the encoder. The only
-	// way CLI ffmpeg can emit an on-demand IDR is to restart the subprocess, and a
-	// mid-stream restart (new SPS/PPS, PTS reset) makes Chrome's hardware decoder
-	// drop the stream. A continuous stream with periodic GOP keyframes decodes far
-	// better. The peer still drains sender RTCP so the interceptors run.
-	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: c.log, EnableAudio: c.arouter != nil})
+// runFeed reads the merged viewer→host feed (every viewer's hello/answer, each
+// tagged with viewerId) and dispatches each message. It prefers a WebSocket and
+// falls back to HTTP long-poll. Returns when the transport fails (caller retries)
+// or ctx is cancelled.
+func (c *connManager) runFeed(ctx context.Context) error {
+	if c.runFeedWS(ctx) {
+		return nil // ctx cancelled
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	return c.runFeedLongPoll(ctx)
+}
+
+// runFeedWS reads the feed over a WebSocket. Returns true only when ctx was
+// cancelled (clean stop); a dial/receive failure returns false so runFeed falls
+// back to long-poll. The Worker replays the viewer backlog on connect, so
+// reconnects re-dispatch already-handled messages — handleFeedMessage is
+// idempotent (existing sessions ignore repeat hellos/answers).
+func (c *connManager) runFeedWS(ctx context.Context) bool {
+	conn, err := c.client.DialWS(ctx, signaling.PeerHost)
 	if err != nil {
-		return err
+		c.log.Debug("ws dial failed; falling back to long-poll", "err", err)
+		return false
+	}
+	defer conn.Close()
+	c.log.Info("signaling feed connected", "transport", "websocket")
+	for {
+		m, err := conn.Receive(ctx)
+		if err != nil {
+			return ctx.Err() != nil
+		}
+		c.handleFeedMessage(ctx, m)
+	}
+}
+
+// runFeedLongPoll is the HTTP long-poll fallback for the feed.
+func (c *connManager) runFeedLongPoll(ctx context.Context) error {
+	since := -1
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		start := time.Now()
+		msgs, next, err := c.client.PollWait(ctx, signaling.PeerHost, since, longPollWait)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		since = next
+		for _, m := range msgs {
+			c.handleFeedMessage(ctx, m)
+		}
+		if len(msgs) == 0 && time.Since(start) < time.Second {
+			// Worker ignored the wait param (old server): throttle to poll cadence.
+			if !sleepCtx(ctx, c.poll) {
+				return nil
+			}
+		}
+	}
+}
+
+// handleFeedMessage routes one viewer message to its session, starting a new
+// session when an unknown viewer says hello.
+func (c *connManager) handleFeedMessage(ctx context.Context, m signaling.Message) {
+	var env viewerEnvelope
+	if err := json.Unmarshal(m.Payload, &env); err != nil || env.ViewerID == "" {
+		return
+	}
+	c.mu.Lock()
+	sess, ok := c.sessions[env.ViewerID]
+	if !ok {
+		// Only a hello starts a session; stray answers for unknown viewers (e.g.
+		// from a dead session) are ignored.
+		if env.Kind != "hello" {
+			c.mu.Unlock()
+			return
+		}
+		sess = &viewerSession{}
+		c.sessions[env.ViewerID] = sess
+		c.mu.Unlock()
+		go c.runViewer(ctx, env.ViewerID, sess)
+		return
+	}
+	c.mu.Unlock()
+	c.applyAnswer(sess, env)
+}
+
+// applyAnswer sets the viewer's SDP answer on its peer exactly once. ICE
+// candidates are ignored (the host gathers non-trickle, so candidates are in the
+// offer/answer SDP).
+func (c *connManager) applyAnswer(sess *viewerSession, env viewerEnvelope) {
+	if env.Type != "answer" || env.SDP == "" {
+		return
+	}
+	sess.mu.Lock()
+	peer := sess.peer
+	if peer == nil || sess.answered {
+		sess.mu.Unlock()
+		return
+	}
+	sess.answered = true
+	sess.mu.Unlock()
+	if err := peer.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  env.SDP,
+	}); err != nil {
+		c.log.Warn("set remote answer failed", "err", err)
+	}
+}
+
+// runViewer builds the peer for one viewer, registers it with the routers, sends
+// the offer, and waits for that viewer to disconnect, then cleans up.
+//
+// NOTE: we intentionally do NOT wire OnKeyframeRequest to the encoder — an
+// on-demand IDR means restarting ffmpeg (new SPS/PPS, PTS reset), which disrupts
+// every other viewer. A late joiner instead waits for the next scheduled GOP
+// keyframe (per-peer gating in rtc.Peer.WriteSample).
+//
+// ABR is intentionally not run per viewer: it drives the single shared encoder
+// bitrate, so N viewers would fight over it. Multi-viewer runs at fixed bitrate.
+func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSession) {
+	log := c.log.With("viewer", id)
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		c.mu.Lock()
+		delete(c.sessions, id)
+		c.mu.Unlock()
+	}()
+
+	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: log, EnableAudio: c.arouter != nil})
+	if err != nil {
+		log.Warn("create peer failed", "err", err)
+		return
 	}
 	defer peer.Close()
+	sess.setPeer(peer)
 
-	// Connection-scoped context so all per-viewer goroutines stop on disconnect.
-	connCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Register the peer as a video sink and remove it on teardown. The router
-	// fans out to every registered sink, so multiple viewers can watch at once.
 	c.router.AddSink(peer)
 	defer c.router.RemoveSink(peer)
-
-	// Same for audio when enabled: the peer carries an Opus track to write to.
 	if c.arouter != nil {
 		c.arouter.AddSink(peer)
 		defer c.arouter.RemoveSink(peer)
 	}
 
-	// Wire input: gated or pass-through depending on session config.
-	c.wireInput(connCtx, peer)
+	c.wireInput(sctx, peer)
 
-	// --- signaling: post offer, poll for answer + ICE ---
-	offer, err := peer.CreateOffer(ctx)
+	offer, err := peer.CreateOffer(sctx)
 	if err != nil {
-		return err
+		log.Warn("create offer failed", "err", err)
+		return
 	}
-	offerTs, err := c.client.PostOffer(ctx, signaling.SDPMessage{Type: offer.Type.String(), SDP: offer.SDP})
-	if err != nil {
-		return err
+	if err := c.client.PostMessage(sctx, viewerOffer{
+		Type: offer.Type.String(),
+		SDP:  offer.SDP,
+		To:   id,
+	}); err != nil {
+		log.Warn("post offer failed", "err", err)
+		return
 	}
-	c.log.Info("offer posted; waiting for viewer answer", "offer_ts", offerTs)
+	log.Info("offer posted to viewer; awaiting answer")
 
-	if err := c.pollForAnswer(connCtx, peer, offerTs); err != nil {
-		return err
-	}
-
-	// --- T14: adaptive bitrate. Sample this peer's WebRTC stats and drive the
-	// encoder bitrate for the connection lifetime. nil runner = ABR disabled. ---
-	if runner := newABRRunner(c.log, c.cfg, peer, c.enc); runner != nil {
-		go runner.run(connCtx)
-	}
-
-	// --- wait for the connection to terminate ---
-	c.awaitDisconnect(connCtx, peer)
-	c.log.Info("viewer disconnected; recycling peer")
-	return nil
+	c.awaitDisconnect(sctx, peer)
+	log.Info("viewer disconnected")
 }
 
 // wireInput connects the peer's command stream to the input sink. For the gated
@@ -217,164 +361,6 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 // longPollWait is the duration requested from the Durable Object Worker.
 // The server caps its own wait at 25s; we ask for exactly 25s.
 const longPollWait = 25 * time.Second
-
-// pollForAnswer polls the Worker for the viewer's answer and ICE candidates and
-// applies them, returning once the answer has been set or ctx is cancelled.
-// offerTs is the Worker-assigned timestamp of our own offer; answers older than
-// it are stale leftovers from previous attempts and are skipped ("" = unknown,
-// apply unconditionally).
-//
-// Long-poll mode: each iteration calls PollWait(..., 25s) so a Durable Object
-// Worker can hold the request open until a message arrives. Old Workers that
-// ignore the wait param return immediately; the anti-hot-spin guard detects that
-// (round-trip < 1s with no messages) and sleeps c.poll before the next call,
-// degrading to the pre-existing polling behaviour.
-func (c *connManager) pollForAnswer(ctx context.Context, peer *rtc.Peer, offerTs string) error {
-	// Bound the wait for an answer so a stale room doesn't block forever; once an
-	// answer arrives we keep polling for trickle ICE within the connection ctx.
-	deadline := time.Now().Add(60 * time.Second)
-
-	// Prefer a WebSocket: an idle WS accrues zero Durable Object duration, whereas
-	// a held long-poll keeps the per-room DO awake. Dial once; on any failure fall
-	// back to the long-poll loop below (old Workers / test servers don't speak WS).
-	if c.receiveAnswerWS(ctx, peer, offerTs, deadline) {
-		return nil
-	}
-	if ctx.Err() != nil {
-		return nil
-	}
-	if !time.Now().Before(deadline) {
-		return errTimeoutNoAnswer
-	}
-
-	return c.pollForAnswerLongPoll(ctx, peer, offerTs, deadline)
-}
-
-// receiveAnswerWS dials the WebSocket and, on success, feeds replayed and live
-// viewer frames through applyViewerMessage until an answer is applied or the read
-// fails / the deadline passes. It returns true only when an answer was applied
-// (the caller is then done). A dial failure, a Receive error before any answer,
-// or ctx cancellation returns false so the caller can fall back to long-poll
-// (unless ctx was cancelled, which the caller re-checks).
-func (c *connManager) receiveAnswerWS(ctx context.Context, peer *rtc.Peer, offerTs string, deadline time.Time) bool {
-	wsCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-
-	conn, err := c.client.DialWS(wsCtx, signaling.PeerHost)
-	if err != nil {
-		c.log.Debug("ws dial failed; falling back to long-poll", "err", err)
-		return false
-	}
-	defer conn.Close()
-
-	for {
-		// Receive blocks on the socket but honours wsCtx, so a cancelled parent
-		// ctx or the elapsed deadline aborts the parked read promptly.
-		m, err := conn.Receive(wsCtx)
-		if err != nil {
-			if ctx.Err() == nil && time.Now().Before(deadline) {
-				c.log.Debug("ws receive failed; falling back to long-poll", "err", err)
-			}
-			return false
-		}
-		if c.applyViewerMessage(peer, m, offerTs) {
-			// applyViewerMessage already logged the apply; just note the transport.
-			c.log.Info("answer transport", "transport", "websocket")
-			return true
-		}
-	}
-}
-
-// pollForAnswerLongPoll is the original HTTP long-poll path, retained as a
-// fallback for Workers that do not speak WebSocket. It runs until an answer is
-// applied, the deadline passes (errTimeoutNoAnswer), or ctx is cancelled.
-func (c *connManager) pollForAnswerLongPoll(ctx context.Context, peer *rtc.Peer, offerTs string, deadline time.Time) error {
-	since := -1
-	gotAnswer := false
-	longPollLogged := false
-
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-
-		start := time.Now()
-		msgs, next, err := c.client.PollWait(ctx, signaling.PeerHost, since, longPollWait)
-		elapsed := time.Since(start)
-
-		if err != nil {
-			// ctx cancellation — exit cleanly.
-			if ctx.Err() != nil {
-				return nil
-			}
-			c.log.Debug("poll failed", "err", err)
-			// Throttle errors so they don't hot-loop.
-			if !sleepCtx(ctx, c.poll) {
-				return nil
-			}
-			continue
-		}
-
-		since = next
-
-		if len(msgs) > 0 {
-			if !longPollLogged {
-				longPollLogged = true
-				c.log.Info("long-poll mode active", "first_wait", elapsed.Round(time.Millisecond))
-			}
-			for _, m := range msgs {
-				if c.applyViewerMessage(peer, m, offerTs) {
-					gotAnswer = true
-				}
-			}
-		} else if elapsed < time.Second {
-			// Server returned immediately with no messages — it does not understand
-			// the wait parameter (old Worker). Log once and degrade to polling cadence.
-			c.log.Debug("server ignored long-poll wait; degrading to short-poll", "elapsed", elapsed.Round(time.Millisecond))
-			if !sleepCtx(ctx, c.poll) {
-				return nil
-			}
-		}
-		// If elapsed >= 1s and no messages, the server held and timed out on its
-		// end — that's normal; loop immediately for the next long-poll.
-
-		if !gotAnswer && time.Now().After(deadline) {
-			return errTimeoutNoAnswer
-		}
-		if gotAnswer {
-			// Answer applied; ICE is non-trickle on both ends so we can stop.
-			return nil
-		}
-	}
-}
-
-// applyViewerMessage interprets one polled message as either an SDP answer or an
-// ICE candidate and applies it. It returns true if an answer was applied.
-// Answers timestamped before offerTs are stale (they answer a previous, dead
-// peer's offer) and are skipped; both timestamps were assigned by the Worker's
-// clock, so a lexicographic ISO-8601 comparison is safe — no host/Worker clock
-// skew is involved. offerTs=="" (older Worker that returned no ts) disables the
-// check for backward compatibility.
-func (c *connManager) applyViewerMessage(peer *rtc.Peer, msg signaling.Message, offerTs string) bool {
-	var sdp signaling.SDPMessage
-	if err := json.Unmarshal(msg.Payload, &sdp); err == nil && sdp.Type == "answer" && sdp.SDP != "" {
-		if offerTs != "" && msg.Ts != "" && msg.Ts < offerTs {
-			c.log.Info("ignoring stale viewer answer", "answer_ts", msg.Ts, "offer_ts", offerTs)
-			return false
-		}
-		if err := peer.SetRemoteDescription(webrtc.SessionDescription{
-			Type: webrtc.SDPTypeAnswer,
-			SDP:  sdp.SDP,
-		}); err != nil {
-			c.log.Warn("set remote answer failed", "err", err)
-			return false
-		}
-		c.log.Info("viewer answer applied")
-		return true
-	}
-	// Otherwise it may be a trickle ICE candidate; non-trickle hosts ignore these.
-	return false
-}
 
 // awaitDisconnect blocks until the peer reaches a terminal connection state or
 // ctx is cancelled.
