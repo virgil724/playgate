@@ -109,7 +109,13 @@ func (s *inputSink) forwardEvents(ctx context.Context, sendControl func([]byte) 
 	if sendControl == nil {
 		return
 	}
-	events := s.manager.Events()
+	// Each viewer connection gets its own event subscription (fan-out) so every
+	// viewer receives every event and filters to its own viewer_id client-side.
+	// Using the single shared Events() channel here would split events randomly
+	// across viewers (and the sunshine agent), so a controller could miss its own
+	// ticks while another viewer received them.
+	events, unsubscribe := s.manager.Subscribe()
+	defer unsubscribe()
 	for {
 		select {
 		case <-ctx.Done():

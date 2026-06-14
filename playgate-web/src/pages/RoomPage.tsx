@@ -77,8 +77,12 @@ export function RoomPage() {
   const onChange = useCallback(() => forceRender((n) => n + 1), []);
 
   const handleControlEvent = useCallback((ev: ControlEvent) => {
-    setStatusMsg(describeEvent(ev));
     const viewerId = sessionRef.current?.viewerId ?? "";
+    // Events are broadcast to every viewer on the control channel; only react to
+    // the ones addressed to our own session. Without this, all clients would
+    // share the controller's countdown / queue position.
+    if (viewerId === "" || ev.viewerId !== viewerId) return;
+    setStatusMsg(describeEvent(ev));
     if (ev.kind === "granted" && grantsControl(ev, viewerId)) {
       grantedRef.current = true;
       setGranted(true);

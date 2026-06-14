@@ -99,6 +99,14 @@ type Manager struct {
 	queue     []*sessionEntry // waiting claimants in FIFO order
 	eventsOut chan SessionEvent
 	stopped   bool // set to true by Run before closing eventsOut
+
+	// subscribers each receive a copy of every event (fan-out). Unlike eventsOut
+	// (a single shared channel that multiple consumers would split), this lets
+	// every viewer's control-channel forwarder receive every event so it can
+	// filter to its own viewer_id. Guarded by subMu (never taken while another
+	// goroutine holds subMu and wants mu).
+	subMu       sync.Mutex
+	subscribers map[chan SessionEvent]struct{}
 }
 
 // sessionEntry is the internal state for one viewer claim.
@@ -165,6 +173,31 @@ func NewManager(cfg Config) (*Manager, error) {
 // the session goroutines.
 func (m *Manager) Events() <-chan SessionEvent {
 	return m.eventsOut
+}
+
+// Subscribe returns a fresh channel that receives a copy of every SessionEvent,
+// plus an unsubscribe function to release it. Each caller gets an independent
+// channel (fan-out), so multiple viewers' control-channel forwarders all receive
+// every event instead of stealing them from one another. A subscriber whose
+// buffer is full drops events rather than blocking the session goroutines.
+func (m *Manager) Subscribe() (<-chan SessionEvent, func()) {
+	ch := make(chan SessionEvent, 64)
+	m.subMu.Lock()
+	if m.subscribers == nil {
+		m.subscribers = make(map[chan SessionEvent]struct{})
+	}
+	m.subscribers[ch] = struct{}{}
+	m.subMu.Unlock()
+
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() {
+			m.subMu.Lock()
+			delete(m.subscribers, ch)
+			close(ch)
+			m.subMu.Unlock()
+		})
+	}
 }
 
 // CurrentViewerID returns the viewer_id of the viewer currently holding
@@ -441,6 +474,16 @@ func (m *Manager) emitEvent(ev SessionEvent) {
 	default:
 		// Drop — slow consumer.
 	}
+	// Fan out to per-viewer subscribers (each filters to its own viewer_id).
+	m.subMu.Lock()
+	for ch := range m.subscribers {
+		select {
+		case ch <- ev:
+		default:
+			// Drop for this slow subscriber.
+		}
+	}
+	m.subMu.Unlock()
 }
 
 // --- goroutines ---
