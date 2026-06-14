@@ -130,6 +130,12 @@ func TestProtocol_InputMessageShape(t *testing.T) {
 	if got.LX != cmd.LX {
 		t.Errorf("lx = %v, want %v", got.LX, cmd.LX)
 	}
+	if got.LY != -cmd.LY {
+		t.Errorf("ly = %v, want %v", got.LY, -cmd.LY)
+	}
+	if got.RY != -cmd.RY {
+		t.Errorf("ry = %v, want %v", got.RY, -cmd.RY)
+	}
 }
 
 func TestProtocol_PingPong(t *testing.T) {

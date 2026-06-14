@@ -123,10 +123,14 @@ type sessionEntry struct {
 	gates     []*gateHandle
 }
 
-// gateHandle holds a Gate output channel and a once-close guard.
+// gateHandle holds a Gate output channel and a once-close guard. done is closed
+// alongside ch so the Gate goroutine stops consuming the shared command stream
+// the moment the session ends — otherwise a re-authorization on the same
+// connection would leave the old goroutine competing for peer.Commands().
 type gateHandle struct {
 	mu     sync.Mutex
 	ch     chan core.InputCommand
+	done   chan struct{}
 	closed bool
 }
 
@@ -135,6 +139,7 @@ func (g *gateHandle) close() {
 	defer g.mu.Unlock()
 	if !g.closed {
 		close(g.ch)
+		close(g.done)
 		g.closed = true
 	}
 }
@@ -228,6 +233,34 @@ func (m *Manager) Claim(token string) (*Session, error) {
 	return &Session{entry: entry, manager: m}, nil
 }
 
+// Release ends the session for s if it currently holds control (promoting the
+// next queued viewer), or removes it from the wait queue if it is still waiting.
+// It is the host's signal that this viewer's command stream has ended (the viewer
+// disconnected), so the controller slot is freed immediately instead of lingering
+// until the JWT's session_seconds (or idle timeout) elapses and blocking the next
+// viewer in the queue. No-op if the session already ended. Safe for concurrent use.
+func (m *Manager) Release(s *Session) {
+	if s == nil {
+		return
+	}
+	entry := s.entry
+	m.mu.Lock()
+	if m.active == entry {
+		m.mu.Unlock()
+		m.endSession(entry, EventExpired)
+		return
+	}
+	for i, e := range m.queue {
+		if e == entry {
+			m.queue = append(m.queue[:i], m.queue[i+1:]...)
+			e.cancel()
+			e.closeGates()
+			break
+		}
+	}
+	m.mu.Unlock()
+}
+
 // Gate creates a command-forwarding goroutine for the given viewer. Commands
 // received on rawIn are forwarded to the returned channel only while viewerID
 // is the active controller. The returned channel is closed when:
@@ -248,7 +281,7 @@ func (m *Manager) Claim(token string) (*Session, error) {
 //	}
 func (m *Manager) Gate(viewerID string, rawIn <-chan core.InputCommand) <-chan core.InputCommand {
 	outCh := make(chan core.InputCommand, 8)
-	handle := &gateHandle{ch: outCh}
+	handle := &gateHandle{ch: outCh, done: make(chan struct{})}
 
 	m.mu.Lock()
 	entry := m.findEntryLocked(viewerID)
@@ -266,7 +299,20 @@ func (m *Manager) Gate(viewerID string, rawIn <-chan core.InputCommand) <-chan c
 
 	go func() {
 		defer handle.close() // safe: mutex-protected inside
-		for cmd := range rawIn {
+		for {
+			var cmd core.InputCommand
+			var ok bool
+			select {
+			case <-handle.done:
+				// Session ended: stop consuming the shared command stream so a
+				// re-authorized session can take it over cleanly.
+				return
+			case cmd, ok = <-rawIn:
+				if !ok {
+					return // viewer disconnected
+				}
+			}
+
 			// Refresh idle timer on every incoming command.
 			m.mu.Lock()
 			cur := m.findEntryLocked(viewerID)

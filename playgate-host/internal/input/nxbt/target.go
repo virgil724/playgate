@@ -248,9 +248,9 @@ func (t *Target) writeInput(conn net.Conn, cmd core.InputCommand) error {
 		Type:    msgTypeInput,
 		Buttons: cmd.Buttons,
 		LX:      cmd.LX,
-		LY:      cmd.LY,
+		LY:      -cmd.LY,
 		RX:      cmd.RX,
-		RY:      cmd.RY,
+		RY:      -cmd.RY,
 	})
 	if err != nil {
 		return err

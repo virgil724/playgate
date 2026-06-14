@@ -58,8 +58,16 @@ func (s *inputSink) HandleCommands(ctx context.Context, raw <-chan core.InputCom
 }
 
 // drainToTarget forwards every command on raw to the input target until raw
-// closes or ctx is cancelled.
+// closes or ctx is cancelled. On ANY exit — channel close (session expiry/kick)
+// OR ctx cancel (viewer disconnect / shutdown) — it sends a neutral (all-released)
+// command so a button held at the moment control is lost does not stick down on
+// the Switch. The defer covers the ctx-cancel race that a close-only reset misses.
 func (s *inputSink) drainToTarget(ctx context.Context, raw <-chan core.InputCommand) {
+	defer func() {
+		if err := s.target.Send(core.InputCommand{}); err != nil {
+			s.log.Debug("neutral reset send failed", "err", err)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,6 +94,11 @@ func (s *inputSink) Authorize(ctx context.Context, token string, raw <-chan core
 	s.log.Info("viewer authorized", "viewer", sess.ViewerID())
 	gated := s.manager.Gate(sess.ViewerID(), raw)
 	s.drainToTarget(ctx, gated)
+	// drainToTarget returned: either the session ended (gate closed) or the
+	// viewer's stream/ctx ended (disconnect). Free the controller slot now so a
+	// queued viewer is promoted immediately instead of waiting for this viewer's
+	// JWT to expire. No-op if the session already ended on its own.
+	s.manager.Release(sess)
 	return nil
 }
 

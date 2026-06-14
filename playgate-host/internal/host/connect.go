@@ -336,24 +336,33 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 	// Gated: forward session events for the connection lifetime.
 	go c.sink.HandleCommands(ctx, peer.Commands(), sendControl)
 
-	// Capture the auth token from the control channel exactly once, then start
-	// authorization which drains the gated command stream.
-	authorized := make(chan struct{})
+	// Authorize on each auth token. A viewer may redeem more than one token over a
+	// single connection (play a session, let it end, redeem again), so we re-arm
+	// after each authorization finishes rather than accepting only the first.
+	// Only one authorization runs at a time: Authorize drains the single Commands
+	// stream, so a second concurrent one would split it. While one is in flight,
+	// further tokens are ignored; the next is honoured once it ends.
+	var authMu sync.Mutex
+	authorizing := false
 	peer.OnControlMessage(func(data []byte) {
 		var msg authMessage
 		if err := json.Unmarshal(data, &msg); err != nil || msg.Kind != "auth" || msg.Token == "" {
 			return
 		}
-		select {
-		case <-authorized:
-			return // already authorized
-		default:
+		authMu.Lock()
+		if authorizing {
+			authMu.Unlock()
+			return
 		}
-		close(authorized)
+		authorizing = true
+		authMu.Unlock()
 		go func() {
 			if err := c.sink.Authorize(ctx, msg.Token, peer.Commands()); err != nil {
 				c.log.Warn("viewer authorization failed", "err", err)
 			}
+			authMu.Lock()
+			authorizing = false
+			authMu.Unlock()
 		}()
 	})
 }
