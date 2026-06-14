@@ -67,7 +67,7 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	audioSrc := buildAudio(log, cfg)
 
 	// --- input target ---
-	input, err := buildInput(log, cfg)
+	input, err := buildInput(log, cfg, mc)
 	if err != nil {
 		return Deps{}, err
 	}
@@ -157,13 +157,16 @@ func buildCapture(log *slog.Logger, cfg config.Config) (core.CaptureSource, erro
 }
 
 // buildInput selects the configured input backend.
-func buildInput(log *slog.Logger, cfg config.Config) (core.InputTarget, error) {
+func buildInput(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (core.InputTarget, error) {
 	switch cfg.InputTargetKind() {
 	case config.InputLog:
 		// Sample ~one log line per second at 60 Hz.
 		return logtarget.New(log, 60), nil
 	case config.InputNXBT:
-		return nxbt.New(log, cfg.Input.SocketPath, nxbt.WithRateHz(cfg.Input.RateHz)), nil
+		return nxbt.New(log, cfg.Input.SocketPath,
+			nxbt.WithRateHz(cfg.Input.RateHz),
+			nxbt.WithLatencyHistogram(mc.Input),
+		), nil
 	default:
 		return nil, fmt.Errorf("host: unknown input target %q", cfg.InputTargetKind())
 	}

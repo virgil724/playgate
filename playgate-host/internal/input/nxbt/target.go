@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/playgate/playgate-host/internal/core"
+	"github.com/playgate/playgate-host/internal/metrics"
 )
 
 const (
@@ -23,10 +24,6 @@ const (
 	// daemon per second.  Commands beyond this rate are coalesced (the latest
 	// value overwrites queued ones).
 	DefaultRateHz = 120
-
-	// sendPollInterval is how often the Run loop checks the coalescer for a
-	// pending command to flush, as well as how often it sends keepalive pings.
-	sendPollInterval = 8 * time.Millisecond // ~125 Hz poll, well above 120 Hz cap
 
 	// pingInterval is the wall-clock interval between keepalive pings.
 	pingInterval = 5 * time.Second
@@ -53,6 +50,11 @@ type Target struct {
 
 	coalescer *coalescer
 
+	// latency, when non-nil, records the time from a command being decoded off
+	// the WebRTC DataChannel (cmd.Timestamp) to it being written to the daemon
+	// socket. Covers the coalescer/rate-limit delay.
+	latency *metrics.Histogram
+
 	// dial is used to establish the connection. Defaults to dialUnixSocket.
 	dial DialFunc
 
@@ -74,6 +76,13 @@ func WithRateHz(hz int) Option {
 // Primarily intended for testing.
 func WithDialFunc(fn DialFunc) Option {
 	return func(t *Target) { t.dial = fn }
+}
+
+// WithLatencyHistogram records, for each command written to the daemon, the
+// elapsed time since cmd.Timestamp (when the host decoded it). Pass nil to
+// disable (the default).
+func WithLatencyHistogram(h *metrics.Histogram) Option {
+	return func(t *Target) { t.latency = h }
 }
 
 // New constructs a Target that will connect to the NXBT daemon at socketPath.
@@ -184,8 +193,57 @@ func (t *Target) runSession(ctx context.Context, conn net.Conn) error {
 
 	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
-	pollTicker := time.NewTicker(sendPollInterval)
-	defer pollTicker.Stop()
+
+	// flushTimer wakes the loop when a rate-limited command becomes sendable.
+	// It starts stopped/drained; armed tracks whether a fire is pending so we
+	// can Reset it safely (Stop+drain only when already armed).
+	flushTimer := time.NewTimer(0)
+	if !flushTimer.Stop() {
+		<-flushTimer.C
+	}
+	defer flushTimer.Stop()
+	armed := false
+
+	// rearm sets flushTimer to fire after d, draining any stale signal first.
+	rearm := func(d time.Duration) {
+		if armed && !flushTimer.Stop() {
+			select {
+			case <-flushTimer.C:
+			default:
+			}
+		}
+		flushTimer.Reset(d)
+		armed = true
+	}
+
+	// flush drains every sendable command from the coalescer. When the next
+	// pending command is rate-limited it arms flushTimer for the remaining
+	// interval instead of busy-waiting; when nothing is pending it returns and
+	// the loop sleeps until the next notify.
+	flush := func() error {
+		for {
+			if cmd, ok := t.coalescer.poll(); ok {
+				if err := t.writeInput(conn, cmd); err != nil {
+					return fmt.Errorf("write input: %w", err)
+				}
+				continue
+			}
+			switch d := t.coalescer.untilReady(); {
+			case d < 0:
+				return nil // nothing pending; wait for the next notify
+			case d == 0:
+				continue // became sendable; poll again
+			default:
+				rearm(d)
+				return nil
+			}
+		}
+	}
+
+	// Drain anything pushed before the connection was established.
+	if err := flush(); err != nil {
+		return err
+	}
 
 	var lastPingSent time.Time
 
@@ -205,11 +263,15 @@ func (t *Target) runSession(ctx context.Context, conn net.Conn) error {
 				t.log.Warn("inbound parse error", "err", err)
 			}
 
-		case <-pollTicker.C:
-			if cmd, ok := t.coalescer.poll(); ok {
-				if err := t.writeInput(conn, cmd); err != nil {
-					return fmt.Errorf("write input: %w", err)
-				}
+		case <-t.coalescer.notifyC():
+			if err := flush(); err != nil {
+				return err
+			}
+
+		case <-flushTimer.C:
+			armed = false
+			if err := flush(); err != nil {
+				return err
 			}
 
 		case <-pingTicker.C:
@@ -255,8 +317,13 @@ func (t *Target) writeInput(conn net.Conn, cmd core.InputCommand) error {
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(data)
-	return err
+	if _, err = conn.Write(data); err != nil {
+		return err
+	}
+	if t.latency != nil && !cmd.Timestamp.IsZero() {
+		t.latency.Observe(time.Since(cmd.Timestamp))
+	}
+	return nil
 }
 
 // writePing sends a ping to conn.
