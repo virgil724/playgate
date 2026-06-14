@@ -51,6 +51,16 @@ export function RoomPage() {
   const sessionRef = useRef(session);
   sessionRef.current = session;
   const [logs, setLogs] = useState<LogEntry[]>(() => logHistory());
+  const [rtt, setRtt] = useState<string>("-");
+  const [videoStats, setVideoStats] = useState<string>("-");
+  const [audioStats, setAudioStats] = useState<string>("-");
+  const [showGamepad, setShowGamepad] = useState(() => {
+    if (typeof window !== "undefined") {
+      return "ontouchstart" in window || navigator.maxTouchPoints > 0;
+    }
+    return false;
+  });
+  const [showLogs, setShowLogs] = useState(false);
   const logBoxRef = useRef<HTMLDivElement>(null);
   const [, forceRender] = useState(0);
 
@@ -114,16 +124,75 @@ export function RoomPage() {
         onState: (s, d) => {
           setConn(s);
           if (d) setConnDetail(d);
+          if (s !== "connected") {
+            setRtt("-");
+            setVideoStats("-");
+            setAudioStats("-");
+          }
         },
         onTrack: (stream) => {
           if (videoRef.current) videoRef.current.srcObject = stream;
         },
         onControlEvent: handleControlEvent,
+        onControlMessage: (data) => {
+          try {
+            const m = JSON.parse(data);
+            if (m.kind === "pong" && typeof m.ts === "number") {
+              setRtt((performance.now() - m.ts).toFixed(1) + " ms");
+            }
+          } catch {
+            // ignore
+          }
+        },
       },
     });
     connRef.current = connection;
     void connection.start();
+
+    const pingInterval = setInterval(() => {
+      const conn = connRef.current;
+      if (conn) {
+        conn.sendControl(JSON.stringify({ kind: "ping", ts: performance.now() }));
+      }
+    }, 2000);
+
+    const statsInterval = setInterval(async () => {
+      const conn = connRef.current;
+      if (!conn) return;
+      const pc = conn.peerConnection;
+      if (!pc || pc.connectionState !== "connected") return;
+      try {
+        const stats = await pc.getStats();
+        let inb: any = null, codec: any = null, ainb: any = null, acodec: any = null;
+        stats.forEach((s) => {
+          if (s.type === "inbound-rtp" && s.kind === "video") inb = s;
+          if (s.type === "inbound-rtp" && s.kind === "audio") ainb = s;
+        });
+        if (inb && inb.codecId) codec = stats.get(inb.codecId);
+        if (inb) {
+          const fmt = codec?.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
+          setVideoStats(
+            `${codec?.mimeType || "?"} ${fmt || ""} | ${inb.framesPerSecond ?? 0} fps | dec ${
+              inb.framesDecoded ?? 0
+            } (key ${inb.keyFramesDecoded ?? 0})`
+          );
+        }
+        if (ainb && ainb.codecId) acodec = stats.get(ainb.codecId);
+        if (ainb) {
+          setAudioStats(
+            `${acodec?.mimeType || "?"} | pkts ${ainb.packetsReceived ?? 0} | ${Math.round(
+              (ainb.bytesReceived ?? 0) / 1024
+            )} KB`
+          );
+        }
+      } catch {
+        // ignore transient getStats errors
+      }
+    }, 1000);
+
     return () => {
+      clearInterval(pingInterval);
+      clearInterval(statsInterval);
       connection.close();
       connRef.current = null;
     };
@@ -248,6 +317,42 @@ export function RoomPage() {
         )}
       </div>
 
+      <div className="stats-bar mono" style={{
+        display: "flex",
+        gap: 16,
+        padding: "6px 12px",
+        background: "var(--panel-2)",
+        borderBottom: "1px solid var(--border)",
+        fontSize: 12,
+        color: "var(--muted)",
+        flexWrap: "wrap",
+        alignItems: "center"
+      }}>
+        <span>RTT: <strong style={{ color: "var(--text)" }}>{rtt}</strong></span>
+        <span>Video: <strong style={{ color: "var(--text)" }}>{videoStats}</strong></span>
+        <span>Audio: <strong style={{ color: "var(--text)" }}>{audioStats}</strong></span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", userSelect: "none" }}>
+            <input
+              type="checkbox"
+              checked={showGamepad}
+              onChange={(e) => setShowGamepad(e.target.checked)}
+              style={{ margin: 0, width: "auto", height: "auto", padding: 0 }}
+            />
+            <span>虛擬手把</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", userSelect: "none" }}>
+            <input
+              type="checkbox"
+              checked={showLogs}
+              onChange={(e) => setShowLogs(e.target.checked)}
+              style={{ margin: 0, width: "auto", height: "auto", padding: 0 }}
+            />
+            <span>偵錯日誌</span>
+          </label>
+        </div>
+      </div>
+
       <div className="video-wrap">
         <video ref={videoRef} playsInline autoPlay muted />
         {conn !== "connected" && (
@@ -300,28 +405,32 @@ export function RoomPage() {
         </div>
       )}
 
-      <VirtualGamepad state={gamepadRef.current} enabled={granted} onChange={onChange} />
+      {showGamepad && (
+        <VirtualGamepad state={gamepadRef.current} enabled={granted} onChange={onChange} />
+      )}
 
-      <div
-        ref={logBoxRef}
-        className="mono"
-        style={{
-          margin: 12,
-          padding: 8,
-          maxHeight: 220,
-          overflowY: "auto",
-          fontSize: 12,
-          whiteSpace: "pre-wrap",
-          background: "rgba(0,0,0,.35)",
-          borderRadius: 6,
-        }}
-      >
-        {logs.map((l, i) => (
-          <div key={i}>
-            [{l.ts}] {l.tag}: {l.text}
-          </div>
-        ))}
-      </div>
+      {showLogs && (
+        <div
+          ref={logBoxRef}
+          className="mono"
+          style={{
+            margin: 12,
+            padding: 8,
+            maxHeight: 220,
+            overflowY: "auto",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+            background: "rgba(0,0,0,.35)",
+            borderRadius: 6,
+          }}
+        >
+          {logs.map((l, i) => (
+            <div key={i}>
+              [{l.ts}] {l.tag}: {l.text}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

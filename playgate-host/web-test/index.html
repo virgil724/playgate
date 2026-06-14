@@ -130,6 +130,8 @@ $("connect").onclick = async () => {
 
   pc.ontrack = ev => {
     if (!isActive()) return;
+    // Low-latency: shrink the receiver jitter/playout buffer (best-effort).
+    try { ev.receiver.jitterBufferTarget = 0; ev.receiver.playoutDelayHint = 0; } catch { /* unsupported */ }
     if (ev.streams[0]) $("video").srcObject = ev.streams[0];
     if (ev.track.kind === "audio") {
       $("astat").textContent = "track received (click 開啟聲音)";

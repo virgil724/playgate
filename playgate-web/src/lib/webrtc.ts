@@ -35,6 +35,7 @@ export interface WebRTCCallbacks {
   onControlEvent?: (event: ControlEvent) => void;
   onControlOpen?: () => void;
   onInputOpen?: () => void;
+  onControlMessage?: (data: string) => void;
 }
 
 export interface ViewerConnectionOptions {
@@ -104,6 +105,16 @@ export class ViewerConnection {
     }
   }
 
+  get peerConnection(): RTCPeerConnection | null {
+    return this.pc;
+  }
+
+  sendControl(msg: string): void {
+    if (this.controlChannel?.readyState === "open") {
+      this.controlChannel.send(msg);
+    }
+  }
+
   /** Authorize on the live connection (e.g. after redeeming a token code).
    * Sends the auth message immediately when the control channel is open;
    * otherwise it is sent on the next control-channel open. */
@@ -160,6 +171,19 @@ export class ViewerConnection {
 
     pc.ontrack = (ev) => {
       dlog("webrtc", `ontrack kind=${ev.track.kind} streams=${ev.streams.length}`);
+      // Minimise the receiver's jitter/playout buffer for interactive latency.
+      // jitterBufferTarget is the standardised knob; playoutDelayHint is the
+      // older Chrome equivalent. Both are best-effort and may be unsupported.
+      try {
+        const r = ev.receiver as RTCRtpReceiver & {
+          jitterBufferTarget?: number | null;
+          playoutDelayHint?: number | null;
+        };
+        r.jitterBufferTarget = 0;
+        r.playoutDelayHint = 0;
+      } catch {
+        /* unsupported: ignore */
+      }
       if (ev.streams[0]) this.cb.onTrack?.(ev.streams[0]);
     };
 
@@ -319,8 +343,10 @@ export class ViewerConnection {
       this.cb.onControlOpen?.();
     };
     ch.onmessage = (ev) => {
-      dlog("control", String(ev.data));
-      const event = parseControlEvent(ev.data);
+      const dataStr = String(ev.data);
+      dlog("control", dataStr);
+      this.cb.onControlMessage?.(dataStr);
+      const event = parseControlEvent(dataStr);
       if (event) this.cb.onControlEvent?.(event);
     };
   }
