@@ -4,7 +4,7 @@ import { ApiClient, API_BASE_URL, SIGNALING_BASE_URL, ApiError } from "../lib/ap
 import { SignalingClient } from "../lib/signaling";
 import { ViewerConnection, type ConnectionState } from "../lib/webrtc";
 import { GamepadState } from "../lib/gamepad-state";
-import { encodeInput } from "../lib/input-codec";
+import { encodeInput, type InputState } from "../lib/input-codec";
 import { pollPhysicalGamepad, mergeInput } from "../lib/physical-gamepad";
 import {
   type ControlEvent,
@@ -24,6 +24,10 @@ const CONN_LABEL: Record<ConnectionState, string> = {
   failed: "Connection failed",
   closed: "Disconnected",
 };
+
+const INPUT_BACKPRESSURE_BYTES = 2048;
+const ACTIVE_INPUT_REFRESH_MS = 1000 / 30;
+const NEUTRAL_RESEND_COUNT = 4;
 
 export function RoomPage() {
   const { roomId = "" } = useParams();
@@ -59,6 +63,13 @@ export function RoomPage() {
   const statsPrevRef = useRef({ jbDelay: 0, jbCount: 0, decTime: 0, decFrames: 0 });
   // Monotonic input sequence so the host can drop stale/reordered frames.
   const inputSeqRef = useRef(0);
+  const inputFramesSentRef = useRef(0);
+  const inputFramesDroppedRef = useRef(0);
+  const [inputStats, setInputStats] = useState({ sent: 0, dropped: 0 });
+  const lastSentInputRef = useRef<InputState | null>(null);
+  const neutralResendsRemainingRef = useRef(0);
+  const inputSendQueuedRef = useRef(false);
+  const sendNowRef = useRef<(force?: boolean) => boolean>(() => false);
   const [showGamepad, setShowGamepad] = useState(() => {
     if (typeof window !== "undefined") {
       return "ontouchstart" in window || navigator.maxTouchPoints > 0;
@@ -79,6 +90,58 @@ export function RoomPage() {
     if (box) box.scrollTop = box.scrollHeight;
   }, [logs]);
 
+  const currentInputState = useCallback(
+    () => mergeInput(gamepadRef.current.snapshot(), pollPhysicalGamepad()),
+    [],
+  );
+
+  const sendNow = useCallback(
+    (force = false): boolean => {
+      if (!grantedRef.current) return false;
+      const conn = connRef.current;
+      if (!conn || !conn.inputReady) return false;
+      if (conn.inputBufferedAmount > INPUT_BACKPRESSURE_BYTES) {
+        inputFramesDroppedRef.current++;
+        return false;
+      }
+
+      const state = currentInputState();
+      const previous = lastSentInputRef.current;
+      if (!force && previous && sameInputState(previous, state)) return false;
+
+      conn.sendInput(encodeInput(state, ++inputSeqRef.current));
+      inputFramesSentRef.current++;
+      lastSentInputRef.current = state;
+
+      if (isNeutralInput(state)) {
+        if (!previous || !isNeutralInput(previous)) {
+          neutralResendsRemainingRef.current = NEUTRAL_RESEND_COUNT;
+        }
+      } else {
+        neutralResendsRemainingRef.current = 0;
+      }
+      return true;
+    },
+    [currentInputState],
+  );
+  sendNowRef.current = sendNow;
+
+  const queueInputSend = useCallback(() => {
+    if (inputSendQueuedRef.current) return;
+    inputSendQueuedRef.current = true;
+    queueMicrotask(() => {
+      inputSendQueuedRef.current = false;
+      sendNowRef.current();
+    });
+  }, []);
+
+  useEffect(() => {
+    gamepadRef.current.onChange = queueInputSend;
+    return () => {
+      gamepadRef.current.onChange = undefined;
+    };
+  }, [queueInputSend]);
+
   const onChange = useCallback(() => forceRender((n) => n + 1), []);
 
   const handleControlEvent = useCallback((ev: ControlEvent) => {
@@ -89,6 +152,8 @@ export function RoomPage() {
     if (viewerId === "" || ev.viewerId !== viewerId) return;
     setStatusMsg(describeEvent(ev));
     if (ev.kind === "granted" && grantsControl(ev, viewerId)) {
+      lastSentInputRef.current = null;
+      neutralResendsRemainingRef.current = 0;
       grantedRef.current = true;
       setGranted(true);
       setQueuePos(null);
@@ -100,11 +165,12 @@ export function RoomPage() {
       setGranted(false);
       grantedRef.current = false;
     } else if (revokesControl(ev, viewerId)) {
+      gamepadRef.current.reset();
+      sendNowRef.current(true);
       grantedRef.current = false;
       setGranted(false);
       setRemaining(0);
       setQueuePos(null);
-      gamepadRef.current.reset();
       // The session is over and the JWT is spent — drop it so the redeem
       // panel reappears and the viewer can enter a fresh code without
       // reloading the page. The connection itself stays up (view-only).
@@ -166,6 +232,13 @@ export function RoomPage() {
     }, 2000);
 
     const statsInterval = setInterval(async () => {
+      setInputStats({
+        sent: inputFramesSentRef.current,
+        dropped: inputFramesDroppedRef.current,
+      });
+      inputFramesSentRef.current = 0;
+      inputFramesDroppedRef.current = 0;
+
       const conn = connRef.current;
       if (!conn) return;
       const pc = conn.peerConnection;
@@ -230,25 +303,45 @@ export function RoomPage() {
     if (session) connRef.current?.sendAuth(session.token);
   }, [session]);
 
-  // 60 Hz input loop: sample keyboard/virtual state, merge in the physical
-  // gamepad (Gamepad API), encode, send — only while granted.
+  // Event-driven input sends happen from GamepadState.onChange. This RAF loop
+  // is only the fallback: poll physical gamepads, refresh held states at a lower
+  // cadence, and resend neutral a few times so releases survive packet loss.
   useEffect(() => {
     let raf = 0;
-    let last = 0;
-    const interval = 1000 / 60;
+    let lastActiveRefresh = 0;
+    let lastNeutralResend = 0;
     const loop = (t: number) => {
       raf = requestAnimationFrame(loop);
-      if (t - last < interval) return;
-      last = t;
       if (!grantedRef.current) return;
       const conn = connRef.current;
       if (!conn || !conn.inputReady) return;
-      const state = mergeInput(gamepadRef.current.snapshot(), pollPhysicalGamepad());
-      conn.sendInput(encodeInput(state, ++inputSeqRef.current));
+
+      const state = currentInputState();
+      const lastSent = lastSentInputRef.current;
+      if (!lastSent || !sameInputState(lastSent, state)) {
+        sendNowRef.current();
+        if (!isNeutralInput(state)) lastActiveRefresh = t;
+        return;
+      }
+
+      if (!isNeutralInput(state)) {
+        if (t - lastActiveRefresh >= ACTIVE_INPUT_REFRESH_MS) {
+          sendNowRef.current(true);
+          lastActiveRefresh = t;
+        }
+        return;
+      }
+
+      if (neutralResendsRemainingRef.current > 0 && t - lastNeutralResend >= ACTIVE_INPUT_REFRESH_MS) {
+        if (sendNowRef.current(true)) {
+          neutralResendsRemainingRef.current--;
+          lastNeutralResend = t;
+        }
+      }
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [currentInputState]);
 
   // Physical gamepad connect/disconnect indicator.
   const [padName, setPadName] = useState<string | null>(null);
@@ -284,7 +377,11 @@ export function RoomPage() {
         onChange();
       }
     };
-    const blur = () => gamepadRef.current.reset();
+    const blur = () => {
+      gamepadRef.current.reset();
+      sendNowRef.current(true);
+      onChange();
+    };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
     window.addEventListener("blur", blur);
@@ -358,6 +455,7 @@ export function RoomPage() {
         <span>RTT: <strong style={{ color: "var(--text)" }}>{rtt}</strong></span>
         <span>Video: <strong style={{ color: "var(--text)" }}>{videoStats}</strong></span>
         <span>Audio: <strong style={{ color: "var(--text)" }}>{audioStats}</strong></span>
+        <span>Input: <strong style={{ color: "var(--text)" }}>{inputStats.sent} sent / {inputStats.dropped} dropped</strong></span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", userSelect: "none" }}>
             <input
@@ -459,5 +557,19 @@ export function RoomPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function isNeutralInput(s: InputState): boolean {
+  return s.buttons === 0 && s.lx === 0 && s.ly === 0 && s.rx === 0 && s.ry === 0;
+}
+
+function sameInputState(a: InputState, b: InputState): boolean {
+  return (
+    a.buttons === b.buttons &&
+    a.lx === b.lx &&
+    a.ly === b.ly &&
+    a.rx === b.rx &&
+    a.ry === b.ry
   );
 }

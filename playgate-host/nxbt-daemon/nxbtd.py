@@ -433,6 +433,7 @@ class ClientSession:
         self._status_event = status_event
         self._running = True
         self._drop_logged = False
+        self._input_lat_samples = 0
 
     def run(self) -> None:
         log.info("client connected")
@@ -476,6 +477,7 @@ class ClientSession:
                     self._drop_logged = True
                 return
             self._drop_logged = False
+            start = time.perf_counter()
             ctrl.apply_input(
                 buttons=int(msg.get("buttons", 0)),
                 lx=float(msg.get("lx", 0)),
@@ -483,6 +485,10 @@ class ClientSession:
                 rx=float(msg.get("rx", 0)),
                 ry=float(msg.get("ry", 0)),
             )
+            elapsed_us = int((time.perf_counter() - start) * 1_000_000)
+            self._input_lat_samples += 1
+            if self._input_lat_samples % 30 == 0:
+                self._send({"type": "input_lat", "us": elapsed_us})
         elif msg_type == "ping":
             self._send({"type": "pong"})
         else:

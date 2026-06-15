@@ -98,11 +98,15 @@ export class ViewerConnection {
     return this.inputChannel?.readyState === "open";
   }
 
-  /** Send a pre-encoded 13-byte input frame. No-op if channel not open. */
+  /** Send a pre-encoded 17-byte input frame. No-op if channel not open. */
   sendInput(frame: ArrayBuffer): void {
     if (this.inputChannel?.readyState === "open") {
       this.inputChannel.send(frame);
     }
+  }
+
+  get inputBufferedAmount(): number {
+    return this.inputChannel?.bufferedAmount ?? 0;
   }
 
   get peerConnection(): RTCPeerConnection | null {

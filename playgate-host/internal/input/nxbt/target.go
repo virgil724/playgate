@@ -55,6 +55,10 @@ type Target struct {
 	// socket. Covers the coalescer/rate-limit delay.
 	latency *metrics.Histogram
 
+	// daemonLatency, when non-nil, records daemon-local input apply latency
+	// reported by nxbtd.py via input_lat messages.
+	daemonLatency *metrics.Histogram
+
 	// dial is used to establish the connection. Defaults to dialUnixSocket.
 	dial DialFunc
 
@@ -83,6 +87,12 @@ func WithDialFunc(fn DialFunc) Option {
 // disable (the default).
 func WithLatencyHistogram(h *metrics.Histogram) Option {
 	return func(t *Target) { t.latency = h }
+}
+
+// WithDaemonHistogram records daemon-local receive-to-apply input latency
+// reported by nxbtd.py. Pass nil to disable (the default).
+func WithDaemonHistogram(h *metrics.Histogram) Option {
+	return func(t *Target) { t.daemonLatency = h }
 }
 
 // New constructs a Target that will connect to the NXBT daemon at socketPath.
@@ -300,6 +310,10 @@ func (t *Target) handleInbound(line []byte) error {
 		t.emitStatus(wireStateToTarget(m.State))
 	case pongMsg:
 		t.log.Debug("pong received")
+	case inputLatMsg:
+		if t.daemonLatency != nil && m.US >= 0 {
+			t.daemonLatency.Observe(time.Duration(m.US) * time.Microsecond)
+		}
 	}
 	return nil
 }

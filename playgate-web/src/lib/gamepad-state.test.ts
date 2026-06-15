@@ -111,3 +111,29 @@ describe("GamepadState lifecycle", () => {
     expect(g.isActive()).toBe(true);
   });
 });
+
+describe("GamepadState onChange", () => {
+  it("fires for button, axis, keyboard, and reset changes", () => {
+    let calls = 0;
+    const g = new GamepadState(() => calls++);
+
+    g.setButton("A", true);
+    g.setAxis("lx", 0.5);
+    g.handleKey("KeyW", true);
+    g.reset();
+
+    expect(calls).toBe(4);
+  });
+
+  it("does not fire when state is unchanged", () => {
+    let calls = 0;
+    const g = new GamepadState(() => calls++);
+
+    g.setButton("A", false);
+    g.setAxis("lx", 0);
+    g.handleKey("KeyW", false);
+    g.reset();
+
+    expect(calls).toBe(0);
+  });
+});

@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/playgate/playgate-host/internal/core"
+	"github.com/playgate/playgate-host/internal/metrics"
 )
 
 // makePipeTarget builds a Target backed by an in-memory net.Pipe() connection.
 // It returns the Target, the server-side Conn (simulating the daemon), and a
 // cancel function.  The Target's Run goroutine is started automatically; call
 // cancel() to shut it down.
-func makePipeTarget(t *testing.T, rateHz int) (*Target, net.Conn, context.CancelFunc) {
+func makePipeTarget(t *testing.T, rateHz int, opts ...Option) (*Target, net.Conn, context.CancelFunc) {
 	t.Helper()
 	clientConn, serverConn := net.Pipe()
 
@@ -32,12 +33,9 @@ func makePipeTarget(t *testing.T, rateHz int) (*Target, net.Conn, context.Cancel
 		return clientConn, nil
 	}
 
-	target := New(
-		testLogger(t),
-		"/tmp/test.sock",
-		WithRateHz(rateHz),
-		WithDialFunc(dialFn),
-	)
+	allOpts := []Option{WithRateHz(rateHz), WithDialFunc(dialFn)}
+	allOpts = append(allOpts, opts...)
+	target := New(testLogger(t), "/tmp/test.sock", allOpts...)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
@@ -150,6 +148,42 @@ func TestProtocol_PingPong(t *testing.T) {
 
 	// Just verifying no panic; a more rigorous check would inspect logs.
 	time.Sleep(20 * time.Millisecond)
+}
+
+func TestProtocol_DecodeInputLatency(t *testing.T) {
+	msg, err := decodeInbound([]byte(`{"type":"input_lat","us":1234}`))
+	if err != nil {
+		t.Fatalf("decodeInbound: %v", err)
+	}
+	got, ok := msg.(inputLatMsg)
+	if !ok {
+		t.Fatalf("type = %T, want inputLatMsg", msg)
+	}
+	if got.US != 1234 {
+		t.Errorf("us = %d, want 1234", got.US)
+	}
+}
+
+func TestProtocol_InputLatencyObserved(t *testing.T) {
+	h := metrics.NewHistogram()
+	_, serverConn, cancel := makePipeTarget(t, 0, WithDaemonHistogram(h))
+	defer cancel()
+	defer serverConn.Close()
+
+	time.Sleep(50 * time.Millisecond)
+	writeLine(t, serverConn, inputLatMsg{Type: msgTypeInputLat, US: 250})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := h.Snapshot(); s.Count == 1 {
+			if s.P50 != 250*time.Microsecond {
+				t.Errorf("p50 = %v, want 250us", s.P50)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timeout waiting for daemon latency observation")
 }
 
 func TestProtocol_StatusForwarding(t *testing.T) {
