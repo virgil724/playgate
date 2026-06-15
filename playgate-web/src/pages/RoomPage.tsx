@@ -26,7 +26,7 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 };
 
 const INPUT_BACKPRESSURE_BYTES = 2048;
-const ACTIVE_INPUT_REFRESH_MS = 1000 / 30;
+const ACTIVE_INPUT_REFRESH_MS = 1000 / 60;
 const NEUTRAL_RESEND_COUNT = 4;
 
 export function RoomPage() {
