@@ -13,19 +13,20 @@ import (
 type msgType string
 
 const (
-	msgTypeInput  msgType = "input"
-	msgTypePing   msgType = "ping"
-	msgTypeStatus msgType = "status"
-	msgTypePong   msgType = "pong"
+	msgTypeInput    msgType = "input"
+	msgTypePing     msgType = "ping"
+	msgTypeStatus   msgType = "status"
+	msgTypePong     msgType = "pong"
+	msgTypeInputLat msgType = "input_lat"
 )
 
 // wireState maps to the daemon's reported connection state string.
 type wireState string
 
 const (
-	wireStateConnecting    wireState = "connecting"
-	wireStateConnected     wireState = "connected"
-	wireStateDisconnected  wireState = "disconnected"
+	wireStateConnecting   wireState = "connecting"
+	wireStateConnected    wireState = "connected"
+	wireStateDisconnected wireState = "disconnected"
 )
 
 // ---- outbound (Go → daemon) -----------------------------------------------
@@ -76,6 +77,17 @@ type pongMsg struct {
 	Type msgType `json:"type"`
 }
 
+// inputLatMsg reports the daemon-local elapsed time from receiving an input
+// message to apply_input returning. US is microseconds.
+//
+// Wire example:
+//
+//	{"type":"input_lat","us":230}
+type inputLatMsg struct {
+	Type msgType `json:"type"`
+	US   int64   `json:"us"`
+}
+
 // envelope is used only to sniff the "type" field before full decoding.
 type envelope struct {
 	Type msgType `json:"type"`
@@ -115,6 +127,12 @@ func decodeInbound(line []byte) (interface{}, error) {
 		return m, nil
 	case msgTypePong:
 		return pongMsg{Type: msgTypePong}, nil
+	case msgTypeInputLat:
+		var m inputLatMsg
+		if err := json.Unmarshal(line, &m); err != nil {
+			return nil, fmt.Errorf("decode input latency: %w", err)
+		}
+		return m, nil
 	default:
 		return nil, fmt.Errorf("unknown inbound type %q", env.Type)
 	}

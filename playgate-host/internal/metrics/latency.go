@@ -111,21 +111,23 @@ func percentile(samples []time.Duration, p float64) time.Duration {
 
 // Collector groups the per-stage histograms for the host pipeline.
 type Collector struct {
-	Capture *Histogram
-	Encode  *Histogram
-	RTC     *Histogram
-	Input   *Histogram
-	E2ERTT  *Histogram
+	Capture     *Histogram
+	Encode      *Histogram
+	RTC         *Histogram
+	Input       *Histogram
+	DaemonApply *Histogram
+	E2ERTT      *Histogram
 }
 
 // NewCollector returns a Collector with all stages initialised.
 func NewCollector() *Collector {
 	return &Collector{
-		Capture: NewHistogram(),
-		Encode:  NewHistogram(),
-		RTC:     NewHistogram(),
-		Input:   NewHistogram(),
-		E2ERTT:  NewHistogram(),
+		Capture:     NewHistogram(),
+		Encode:      NewHistogram(),
+		RTC:         NewHistogram(),
+		Input:       NewHistogram(),
+		DaemonApply: NewHistogram(),
+		E2ERTT:      NewHistogram(),
 	}
 }
 
@@ -150,6 +152,8 @@ func (c *Collector) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		"capture": toStageJSON(c.Capture.Snapshot()),
 		"encode":  toStageJSON(c.Encode.Snapshot()),
 		"rtc":     toStageJSON(c.RTC.Snapshot()),
+		"input":   toStageJSON(c.Input.Snapshot()),
+		"daemon":  toStageJSON(c.DaemonApply.Snapshot()),
 		"e2e_rtt": toStageJSON(c.E2ERTT.Snapshot()),
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -160,12 +164,13 @@ func (c *Collector) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 // call from any goroutine.
 func (c *Collector) Report(log *slog.Logger) {
 	cap, enc, rtc := c.Capture.Snapshot(), c.Encode.Snapshot(), c.RTC.Snapshot()
-	in, e2e := c.Input.Snapshot(), c.E2ERTT.Snapshot()
+	in, daemon, e2e := c.Input.Snapshot(), c.DaemonApply.Snapshot(), c.E2ERTT.Snapshot()
 	log.Info("latency",
 		"capture_n", cap.Count, "capture_p50", cap.P50, "capture_p95", cap.P95,
 		"encode_n", enc.Count, "encode_p50", enc.P50, "encode_p95", enc.P95,
 		"rtc_n", rtc.Count, "rtc_p50", rtc.P50, "rtc_p95", rtc.P95,
 		"input_n", in.Count, "input_p50", in.P50, "input_p95", in.P95,
+		"daemon_n", daemon.Count, "daemon_p50", daemon.P50, "daemon_p95", daemon.P95,
 		"e2e_rtt_n", e2e.Count, "e2e_rtt_p50", e2e.P50, "e2e_rtt_p95", e2e.P95,
 	)
 }

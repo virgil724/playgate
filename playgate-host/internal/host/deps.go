@@ -166,6 +166,7 @@ func buildInput(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (cor
 		return nxbt.New(log, cfg.Input.SocketPath,
 			nxbt.WithRateHz(cfg.Input.RateHz),
 			nxbt.WithLatencyHistogram(mc.Input),
+			nxbt.WithDaemonHistogram(mc.DaemonApply),
 		), nil
 	default:
 		return nil, fmt.Errorf("host: unknown input target %q", cfg.InputTargetKind())

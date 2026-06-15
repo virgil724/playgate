@@ -399,6 +399,21 @@ class TestClientSessionHandleLine(unittest.TestCase):
 
         self.assertEqual(ctrl.calls[0]["buttons"], all_mask)
 
+    def test_input_latency_sample_reported_every_30_inputs(self):
+        session, a, b, ctrl = self._make()
+        try:
+            session._input_lat_samples = 29
+            session._handle_line(b'{"type":"input","buttons":1}')
+            data = a.recv(256)
+        finally:
+            a.close(); b.close()
+
+        parsed = json.loads(data.decode().strip())
+        self.assertEqual(parsed["type"], "input_lat")
+        self.assertIsInstance(parsed["us"], int)
+        self.assertGreaterEqual(parsed["us"], 0)
+        self.assertEqual(len(ctrl.calls), 1)
+
 
 # ---------------------------------------------------------------------------
 # Test: send_status (ClientSession helper)
@@ -1090,6 +1105,7 @@ class TestSessionLiveControllerRouting(unittest.TestCase):
 # Test: socket permissions (root daemon, non-root playgate-host client)
 # ---------------------------------------------------------------------------
 
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "AF_UNIX socket permissions are Unix-only")
 class TestSocketPermissions(unittest.TestCase):
     """Connecting to a UNIX socket needs WRITE permission on its inode, so
     the daemon must chmod (and optionally chgrp) the socket after bind."""
