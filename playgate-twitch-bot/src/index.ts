@@ -67,13 +67,21 @@ async function main(): Promise<void> {
     const bot = auth.getUser("bot")!;
     const broadcaster = auth.getUser("broadcaster")!;
 
+    // Default the chat channel + bot identity to the OAuth'd accounts — the
+    // broadcaster's login is the channel, the bot's login is who we connect as.
+    // config.yaml only overrides (rarely needed). This also guarantees the chat
+    // channel matches the account whose EventSub topics we subscribe to.
+    const channelLogin = file.twitch.channelLogin || broadcaster.login;
+    const botLogin = file.twitch.botLogin || bot.login;
+    log.info(`chat channel #${channelLogin}, bot identity ${botLogin}`);
+
     // Wire the chat ⇄ pipeline ⇄ delivery cycle. `pipeline` is referenced
     // lazily by the chat handler, which only fires after chat.start().
     let pipeline: GrantHandler;
     const chat = new ChatSource(
       auth,
-      file.twitch.channelLogin,
-      file.twitch.botLogin,
+      channelLogin,
+      botLogin,
       policy,
       (req) => pipeline(req),
       logger("chat"),

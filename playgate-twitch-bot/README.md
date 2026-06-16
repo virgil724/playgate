@@ -67,6 +67,11 @@ and **Connect Bot** to grant OAuth. The Twitch sources start automatically once
 both are connected — no restart needed. Tokens persist to `twitch.tokens.json`,
 so you only authorize once.
 
+The chat channel and bot connect-identity are taken from the authorized accounts
+(broadcaster's login = channel, bot's login = identity), so there is nothing else
+to set. Override only if needed via `twitch.channelLogin` / `twitch.botLogin` in
+config.yaml (or `TWITCH_CHANNEL_LOGIN` / `TWITCH_BOT_LOGIN`).
+
 ## Docker
 
 A multi-stage image and a standalone compose stack are provided. The image is

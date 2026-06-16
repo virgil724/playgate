@@ -14,8 +14,9 @@
 #        PLAYGATE_WEB_BASE=https://play.example.com           # your playgate-web
 #        TWITCH_CLIENT_ID=...
 #        TWITCH_CLIENT_SECRET=...
-#        TWITCH_CHANNEL_LOGIN=mychannel
-#        TWITCH_BOT_LOGIN=mybot         # must have a verified phone number
+#      (The chat channel + bot identity are auto-detected from the accounts you
+#       authorize below — no need to set TWITCH_CHANNEL_LOGIN / TWITCH_BOT_LOGIN.
+#       The bot account must have a verified phone number to send whispers.)
 #   3. docker compose -f compose.twitch-bot.yaml up -d
 #   4. Open http://localhost:8090 and click Connect Broadcaster + Connect Bot.
 #
@@ -71,8 +72,10 @@ services:
       PLAYGATE_WEB_BASE: ${PLAYGATE_WEB_BASE:-http://localhost:5173}
       TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
       TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
-      TWITCH_CHANNEL_LOGIN: ${TWITCH_CHANNEL_LOGIN}
-      TWITCH_BOT_LOGIN: ${TWITCH_BOT_LOGIN}
+      # Chat channel + bot identity are auto-detected from the OAuth'd accounts.
+      # To override, uncomment and set these:
+      # TWITCH_CHANNEL_LOGIN: ${TWITCH_CHANNEL_LOGIN}
+      # TWITCH_BOT_LOGIN: ${TWITCH_BOT_LOGIN}
       ADMIN_BIND: "0.0.0.0"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
