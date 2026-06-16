@@ -1,0 +1,30 @@
+{
+  "name": "playgate-twitch-bot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Twitch bot that auto-distributes PlayGate token codes to viewers via whisper.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "express": "^4.21.1",
+    "tmi.js": "^1.8.5",
+    "ws": "^8.18.0",
+    "yaml": "^2.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.5",
+    "@types/tmi.js": "^1.8.6",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.2"
+  }
+}

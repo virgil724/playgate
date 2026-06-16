@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { ApiClient, API_BASE_URL, SIGNALING_BASE_URL, ApiError } from "../lib/api";
 import { SignalingClient } from "../lib/signaling";
 import { ViewerConnection, type ConnectionState } from "../lib/webrtc";
@@ -31,6 +31,8 @@ const NEUTRAL_RESEND_COUNT = 4;
 
 export function RoomPage() {
   const { roomId = "" } = useParams();
+  // Pre-fill the code from ?code= so whisper/redeem links are one-click.
+  const [searchParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
   const connRef = useRef<ViewerConnection | null>(null);
   const gamepadRef = useRef(new GamepadState());
@@ -45,7 +47,7 @@ export function RoomPage() {
   // The <video> starts muted so the browser allows autoplay; the host now sends
   // an Opus audio track, so expose a toggle to unmute after a user gesture.
   const [audioMuted, setAudioMuted] = useState(true);
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(() => searchParams.get("code") ?? "");
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
   const [session, setSession] = useState<{ token: string; viewerId: string } | null>(null);

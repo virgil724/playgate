@@ -1,0 +1,43 @@
+# PlayGate Twitch Bot — configuration.
+# Copy to config.yaml. Non-secret tuning lives here; secrets live in .env.
+# The admin page (http://localhost:8090) edits the `policy` block and writes it
+# back here, so anything under `policy` may be overwritten by the UI.
+
+playgate:
+  apiBase: http://localhost:8080
+  webBase: http://localhost:5173 # base for redeem links: <webBase>/room/<roomId>?code=<code>
+  tokenPool:
+    batchSize: 20 # how many codes to pre-mint per refill
+    lowWatermark: 5 # refill when the buffer drops to/below this
+
+twitch:
+  channelLogin: mychannel # the broadcaster's channel (where chat + events live)
+  botLogin: mybot # the account that reads chat and sends whispers
+
+admin:
+  port: 8090 # local-only admin page; bound to 127.0.0.1
+
+policy:
+  global:
+    perUserCooldownSec: 1800 # one code per Twitch user per 30 min (across all sources)
+    maxPerStream: 200 # cap per stream session (reset from the admin page)
+    maxPerMinute: 10 # smooth the pace; also absorbs the whisper rate limit
+  sources:
+    command:
+      enabled: true
+      trigger: "!play"
+      eligibility: subscribers # everyone | subscribers | vips | mods
+    channel_points:
+      enabled: true
+      rewardId: "" # custom reward UUID that grants a code on redemption
+      eligibility: everyone
+      perUserCooldownSec: 600 # per-source override of global cooldown
+    subscription:
+      enabled: true
+      eligibility: everyone
+    cheer:
+      enabled: true
+      minBits: 100
+    raid:
+      enabled: false
+      minViewers: 5
