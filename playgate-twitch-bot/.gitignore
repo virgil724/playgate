@@ -1,0 +1,8 @@
+node_modules/
+dist/
+# Local runtime state — never commit secrets or grant history.
+config.yaml
+.env
+tokens.state.json
+grants.state.json
+twitch.tokens.json
