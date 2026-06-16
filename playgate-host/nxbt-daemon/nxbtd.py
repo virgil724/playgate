@@ -262,6 +262,17 @@ class NxbtController:
     """Wraps the real nuxbt library."""
 
     def __init__(self) -> None:
+        # nuxbt.create_logger() unconditionally addHandler()s onto the shared
+        # logging.getLogger('nuxbt') singleton every time Nuxbt() is built.
+        # That is fine for nuxbt's intended one-construction-per-process
+        # lifecycle, but this daemon rebuilds the controller on every retry
+        # inside one long-lived process, so the handlers stack and each
+        # "Initializing Nuxbt..." line gets re-emitted once per accumulated
+        # handler (1, 2, 3...). Reset to a clean slate before constructing.
+        nuxbt_logger = logging.getLogger("nuxbt")
+        for handler in list(nuxbt_logger.handlers):
+            nuxbt_logger.removeHandler(handler)
+            handler.close()
         self._nx = nuxbt.Nuxbt()
         self._index: Optional[int] = None
 
