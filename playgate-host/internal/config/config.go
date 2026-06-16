@@ -137,6 +137,9 @@ type InputConfig struct {
 	SocketPath string `yaml:"socket_path"`
 	// RateHz caps commands forwarded per second (nxbt only). 0 disables limiting.
 	RateHz int `yaml:"rate_hz"`
+	// DisabledButtons is a list of button names (e.g. "home", "capture", "plus")
+	// that will be silently dropped before forwarding to the target.
+	DisabledButtons []string `yaml:"disabled_buttons"`
 }
 
 // SessionConfig configures the single-controller session gate (T9). When no

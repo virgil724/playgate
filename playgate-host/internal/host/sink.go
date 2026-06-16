@@ -20,17 +20,28 @@ import (
 //   - session enabled: register OnControlMessage to capture the viewer's auth
 //     token, then call Authorize to obtain a gated channel and drain it.
 type inputSink struct {
-	log     *slog.Logger
-	target  core.InputTarget
-	manager *session.Manager // nil when gating is disabled
+	log          *slog.Logger
+	target       core.InputTarget
+	manager      *session.Manager // nil when gating is disabled
+	disabledMask uint32           // bits to clear from incoming commands
 }
 
 // newInputSink builds the host's InputSink from its deps and session config.
 func (h *Host) newInputSink() *inputSink {
+	var disabledMask uint32
+	for _, name := range h.cfg.Input.DisabledButtons {
+		if mask, ok := core.ParseButtonName(name); ok {
+			disabledMask |= mask
+		} else {
+			h.log.Warn("ignoring unknown disabled_buttons entry", "name", name)
+		}
+	}
+
 	return &inputSink{
-		log:     h.log.With("module", "input-sink"),
-		target:  h.deps.Input,
-		manager: h.session,
+		log:          h.log.With("module", "input-sink"),
+		target:       h.deps.Input,
+		manager:      h.session,
+		disabledMask: disabledMask,
 	}
 }
 
@@ -76,6 +87,7 @@ func (s *inputSink) drainToTarget(ctx context.Context, raw <-chan core.InputComm
 			if !ok {
 				return
 			}
+			cmd.Buttons &= ^s.disabledMask
 			if err := s.target.Send(cmd); err != nil {
 				s.log.Debug("input send failed", "err", err)
 			}

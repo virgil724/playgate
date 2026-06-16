@@ -18,7 +18,10 @@
 //	stops, drains, and closes its output channels before returning.
 package core
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // PixelFormat enumerates the raw pixel layouts a CaptureSource can emit.
 type PixelFormat int
@@ -146,5 +149,50 @@ func (s TargetStatus) String() string {
 		return "disconnected"
 	default:
 		return "unknown"
+	}
+}
+
+// ParseButtonName converts a case-insensitive button name (e.g., "home", "capture", "plus", "pause")
+// to its corresponding Button* bitmask. It returns the mask and true if recognized, or 0 and false if not.
+func ParseButtonName(name string) (uint32, bool) {
+	switch strings.ToLower(name) {
+	case "a":
+		return ButtonA, true
+	case "b":
+		return ButtonB, true
+	case "x":
+		return ButtonX, true
+	case "y":
+		return ButtonY, true
+	case "l":
+		return ButtonL, true
+	case "r":
+		return ButtonR, true
+	case "zl":
+		return ButtonZL, true
+	case "zr":
+		return ButtonZR, true
+	case "plus", "pause":
+		return ButtonPlus, true
+	case "minus":
+		return ButtonMinus, true
+	case "home":
+		return ButtonHome, true
+	case "capture", "screenshot":
+		return ButtonCapture, true
+	case "lstick", "l_stick":
+		return ButtonLStick, true
+	case "rstick", "r_stick":
+		return ButtonRStick, true
+	case "up", "dpad_up":
+		return ButtonDpadUp, true
+	case "down", "dpad_down":
+		return ButtonDpadDown, true
+	case "left", "dpad_left":
+		return ButtonDpadLeft, true
+	case "right", "dpad_right":
+		return ButtonDpadRight, true
+	default:
+		return 0, false
 	}
 }
