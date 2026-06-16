@@ -71,8 +71,10 @@ const configFileSchema = z.object({
     }),
   }),
   twitch: z.object({
-    channelLogin: z.string().min(1),
-    botLogin: z.string().min(1),
+    // Optional: default to the OAuth'd broadcaster/bot logins (see index.ts).
+    // Only set these to override the account auto-detected from authorization.
+    channelLogin: z.string().optional(),
+    botLogin: z.string().optional(),
   }),
   admin: z.object({ port: z.number().int().positive() }),
   policy: policySchema,

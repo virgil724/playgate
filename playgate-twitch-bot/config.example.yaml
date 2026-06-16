@@ -10,9 +10,14 @@ playgate:
     batchSize: 20 # how many codes to pre-mint per refill
     lowWatermark: 5 # refill when the buffer drops to/below this
 
-twitch:
-  channelLogin: mychannel # the broadcaster's channel (where chat + events live)
-  botLogin: mybot # the account that reads chat and sends whispers
+# channelLogin (chat channel) and botLogin (connect identity) are auto-detected
+# from the accounts you authorize in the admin page — broadcaster's login is the
+# channel, bot's login is who we connect as. Leave empty unless you need to
+# override; to override, replace the line below with explicit logins, e.g.:
+#   twitch:
+#     channelLogin: mychannel
+#     botLogin: mybot
+twitch: {}
 
 admin:
   port: 8090 # local-only admin page; bound to 127.0.0.1
