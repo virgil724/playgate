@@ -1,7 +1,6 @@
 // Package nxbt implements core.InputTarget backed by the NXBT Python daemon
-// over a Unix socket. This file contains the public API and platform-agnostic
-// logic; the actual net.Dial call is in dial_unix.go (linux) / dial_stub.go
-// (everything else) to allow compilation and testing on Windows and macOS.
+// over a Unix socket or TCP connection. This file contains the public API and
+// platform-agnostic logic; the net.Dial call is in dial.go.
 package nxbt
 
 import (
@@ -59,7 +58,7 @@ type Target struct {
 	// reported by nxbtd.py via input_lat messages.
 	daemonLatency *metrics.Histogram
 
-	// dial is used to establish the connection. Defaults to dialUnixSocket.
+	// dial is used to establish the connection. Defaults to dialSocket.
 	dial DialFunc
 
 	// connMu guards conn so Send and Run can both access it safely.
@@ -103,7 +102,7 @@ func New(log *slog.Logger, socketPath string, opts ...Option) *Target {
 		socketPath: socketPath,
 		rateHz:     DefaultRateHz,
 		statusCh:   make(chan core.TargetStatus, 4),
-		dial:       dialUnixSocket,
+		dial:       dialSocket,
 	}
 	for _, o := range opts {
 		o(t)

@@ -16,7 +16,7 @@ Protocol (Go ↔ daemon):
     {"type":"pong"}
 
 Run:
-  python3 nxbtd.py [--socket /run/nxbt/nxbt.sock]
+  python3 nxbtd.py [--socket /run/nxbt/nxbt.sock] [--tcp-bind 0.0.0.0:12345]
 
 In mock mode (nuxbt unavailable):
   python3 nxbtd.py --mock
@@ -518,12 +518,14 @@ class Daemon:
         skip_bluez_check: bool = False,
         socket_group: Optional[str] = None,
         socket_mode: int = 0o660,
+        tcp_bind: Optional[str] = None,
     ) -> None:
         self._socket_path = socket_path
         self._mock = mock or MOCK_MODE
         self._skip_bluez_check = skip_bluez_check
         self._socket_group = socket_group
         self._socket_mode = socket_mode
+        self._tcp_bind = tcp_bind
         self._shutdown = threading.Event()
         self._current_session: Optional[ClientSession] = None
         self._session_lock = threading.Lock()
@@ -655,21 +657,31 @@ class Daemon:
         os.chmod(self._socket_path, self._socket_mode)
 
     def run(self) -> None:
-        # Remove stale socket file.
-        try:
-            os.unlink(self._socket_path)
-        except FileNotFoundError:
-            pass
+        if self._tcp_bind:
+            host, port = self._tcp_bind.rsplit(":", 1)
+            addr = (host, int(port))
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(addr)
+            server.listen(1)
+            server.settimeout(1.0)
+            log.info("listening on tcp %s:%d (mock=%s)", host, port, self._mock)
+        else:
+            # Remove stale socket file.
+            try:
+                os.unlink(self._socket_path)
+            except FileNotFoundError:
+                pass
 
-        # Ensure parent directory exists.
-        os.makedirs(os.path.dirname(os.path.abspath(self._socket_path)), exist_ok=True)
+            # Ensure parent directory exists.
+            os.makedirs(os.path.dirname(os.path.abspath(self._socket_path)), exist_ok=True)
 
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(self._socket_path)
-        self._apply_socket_permissions()
-        server.listen(1)
-        server.settimeout(1.0)  # allow periodic shutdown checks
-        log.info("listening on %s (mock=%s)", self._socket_path, self._mock)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(self._socket_path)
+            self._apply_socket_permissions()
+            server.listen(1)
+            server.settimeout(1.0)  # allow periodic shutdown checks
+            log.info("listening on %s (mock=%s)", self._socket_path, self._mock)
 
         ctrl_thread = threading.Thread(target=self._run_controller, daemon=True, name="controller")
         ctrl_thread.start()
@@ -708,10 +720,11 @@ class Daemon:
                 t.start()
         finally:
             server.close()
-            try:
-                os.unlink(self._socket_path)
-            except FileNotFoundError:
-                pass
+            if not self._tcp_bind:
+                try:
+                    os.unlink(self._socket_path)
+                except FileNotFoundError:
+                    pass
             self._shutdown.set()
             ctrl_thread.join(timeout=5)
             # Mop up any multiprocessing children the controller thread's
@@ -828,6 +841,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--tcp-bind",
+        metavar="ADDR:PORT",
+        default=None,
+        help="TCP address to listen on instead of Unix socket (e.g., 0.0.0.0:12345)",
+    )
     return parser
 
 
@@ -843,6 +862,7 @@ def main() -> None:
         skip_bluez_check=args.skip_bluez_check,
         socket_group=args.socket_group,
         socket_mode=args.socket_mode,
+        tcp_bind=args.tcp_bind,
     )
 
     watchdog_armed = threading.Event()

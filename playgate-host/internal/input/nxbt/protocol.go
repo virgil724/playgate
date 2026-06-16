@@ -1,7 +1,7 @@
 // Package nxbt implements core.InputTarget by bridging to the NXBT Python
-// daemon over a Unix socket using newline-delimited JSON. This file contains
-// the protocol wire types shared by both the connection layer and tests; it
-// carries no build constraints and is safe to import on any platform.
+// daemon over a socket (TCP or Unix) using newline-delimited JSON. This file
+// contains the protocol wire types shared by both the connection layer and
+// tests; it carries no build constraints and is safe to import on any platform.
 package nxbt
 
 import (

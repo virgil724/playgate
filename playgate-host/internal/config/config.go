@@ -32,7 +32,7 @@ const (
 
 // Input target kinds.
 const (
-	// InputNXBT forwards commands to the NXBT daemon over a Unix socket (Linux).
+	// InputNXBT forwards commands to the NXBT daemon over a socket (TCP or Unix).
 	InputNXBT = "nxbt"
 	// InputLog logs commands instead of forwarding them (dev mode, any OS).
 	InputLog = "log"
@@ -133,7 +133,8 @@ type InputConfig struct {
 	// Target selects the input backend: "nxbt" (production Unix-socket bridge)
 	// or "log" (dev mode; logs commands instead of driving a Switch).
 	Target string `yaml:"target"`
-	// SocketPath is the Unix socket path of the NXBT bridge (nxbt only).
+	// SocketPath is the address of the NXBT bridge (nxbt only). Unix socket
+	// path (e.g. /run/nxbt/nxbt.sock) or TCP address (e.g. 192.168.1.5:12345).
 	SocketPath string `yaml:"socket_path"`
 	// RateHz caps commands forwarded per second (nxbt only). 0 disables limiting.
 	RateHz int `yaml:"rate_hz"`
