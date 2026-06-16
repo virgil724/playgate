@@ -607,9 +607,28 @@ class Daemon:
                     self._controller = ctrl
                 self._broadcast_status("connected", "Switch paired" if not self._mock else "mock mode")
                 backoff = RETRY_BACKOFF_INITIAL  # reset on success
-                # Keep the controller alive until shutdown or error.
+                # Keep the controller alive until shutdown or error. Monitor
+                # the nuxbt state so disconnects trigger an automatic retry
+                # (reconnect + exponential backoff) without user intervention.
+                not_connected_sec = 0
                 while not self._shutdown.is_set():
                     time.sleep(1)
+                    if not self._mock and ctrl is not None and ctrl._index is not None:
+                        try:
+                            state = ctrl._nx.state[ctrl._index]["state"]
+                        except Exception:
+                            state = "unknown"
+                        if state == "crashed":
+                            log.warning("controller crashed — triggering reconnect")
+                            raise OSError("controller crashed")
+                        if state != "connected":
+                            not_connected_sec += 1
+                            if not_connected_sec >= 30:
+                                log.warning("controller not connected for %ds (state=%s) — triggering reconnect",
+                                            not_connected_sec, state)
+                                raise OSError("controller reconnect timeout")
+                        else:
+                            not_connected_sec = 0
                 break
             except Exception as exc:
                 log.error("controller error: %s — retrying in %.0fs", exc, backoff)
@@ -665,7 +684,7 @@ class Daemon:
             server.bind(addr)
             server.listen(1)
             server.settimeout(1.0)
-            log.info("listening on tcp %s:%d (mock=%s)", host, port, self._mock)
+            log.info("listening on tcp %s:%s (mock=%s)", host, port, self._mock)
         else:
             # Remove stale socket file.
             try:
