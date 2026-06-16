@@ -20,7 +20,7 @@ export interface SubSpec {
 
 export type NotificationHandler = (subType: string, event: Record<string, unknown>) => void;
 
-const DEFAULT_URL = "wss://eventsub.ws.twitch.tv/ws";
+const DEFAULT_URL = "wss://eventsub.wss.twitch.tv/ws";
 
 export class EventSubClient {
   private ws?: WebSocket;

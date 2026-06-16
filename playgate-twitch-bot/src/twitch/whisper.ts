@@ -21,7 +21,7 @@ export class WhisperSender {
 
   constructor(
     private auth: TwitchAuth,
-    private fromUserId: string,
+    readonly fromUserId: string,
     private log: Logger,
     private minIntervalMs = 1100,
   ) {}
@@ -64,11 +64,18 @@ export class WhisperDelivery implements Delivery {
   ) {}
 
   async deliver(req: GrantRequest, code: string, redeemUrl: string): Promise<DeliveryResult> {
-    try {
-      await this.whisper.send(req.twitchUserId, buildWhisper(redeemUrl, code));
-      return "whisper";
-    } catch (e) {
-      this.log.warn(`whisper to ${req.twitchUsername} failed; trying chat fallback`, e);
+    // Twitch rejects whispering yourself — happens when the broadcaster and bot
+    // are the same account and that account triggers a grant. Skip straight to
+    // chat rather than burning an API call on a guaranteed 400.
+    if (req.twitchUserId !== this.whisper.fromUserId) {
+      try {
+        await this.whisper.send(req.twitchUserId, buildWhisper(redeemUrl, code));
+        return "whisper";
+      } catch (e) {
+        this.log.warn(`whisper to ${req.twitchUsername} failed; trying chat fallback`, e);
+      }
+    } else {
+      this.log.info(`${req.twitchUsername} is the bot's own account; can't whisper self, using chat`);
     }
     try {
       await this.chatSay(buildPublicFallback(req.twitchUsername, redeemUrl));
