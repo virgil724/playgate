@@ -5,6 +5,8 @@
 # relies on (each also opened as a standalone PR against upstream):
 #   - feat/event-driven-send-loop: select()-driven send loop (lower input latency)
 #   - fix/direct-input-plus-minus-swap: correct Plus/Minus bit packing
+#   - re-apply held direct input every cycle (the event-driven loop consumed
+#     the input, so held buttons/sticks stuttered between input events)
 # The Plus/Minus fix is why nxbtd.py no longer compensates for the swap; if you
 # repoint this at a nuxbt without that fix, restore the compensation first.
 # Switch 2 controller emulation is on the roadmap but not yet implemented.
@@ -24,4 +26,4 @@
 #   python3 -m venv --system-site-packages venv && source venv/bin/activate
 #   pip install -r requirements.txt
 
-nuxbt @ git+https://github.com/virgil724/nuxbt.git@881ff77  # Linux only — Bluetooth Switch Pro Controller emulation (fork deploy/playgate)
+nuxbt @ git+https://github.com/virgil724/nuxbt.git@bd5cce8  # Linux only — Bluetooth Switch Pro Controller emulation (fork deploy/playgate)
