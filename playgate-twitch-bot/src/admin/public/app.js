@@ -107,6 +107,20 @@ $("resetStream").addEventListener("click", async () => {
   refreshStatus();
 });
 
+// ---- delivery mode ----
+
+$("saveDelivery").addEventListener("click", async () => {
+  const msg = $("deliveryMsg");
+  msg.textContent = "Saving…";
+  const res = await fetch("/api/delivery", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: $("delivery_mode").value }),
+  });
+  msg.textContent = res.ok ? "Saved ✓ — restart bot to apply" : "Error: " + res.status;
+  setTimeout(() => (msg.textContent = ""), 5000);
+});
+
 // ---- status / dashboard ----
 
 function connBlock(label, role, user) {
@@ -132,6 +146,8 @@ async function refreshStatus() {
     connBlock("Broadcaster", "broadcaster", st.auth.broadcaster) +
     connBlock("Bot", "bot", st.auth.bot) +
     `<span class="${st.eventsub ? "ok" : "bad"}">EventSub: ${st.eventsub ? "connected" : "down"}</span>`;
+
+  if (st.delivery) $("delivery_mode").value = st.delivery.mode;
 
   const s = st.stats;
   $("stats").innerHTML = [

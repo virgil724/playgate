@@ -27,6 +27,20 @@
       </section>
 
       <section class="card">
+        <h2>Delivery</h2>
+        <p class="muted">How codes reach viewers. Restart bot to apply changes.</p>
+        <label>Mode
+          <select id="delivery_mode">
+            <option value="whisper">Whisper only (chat fallback on failure)</option>
+            <option value="chat">Chat only (no whisper)</option>
+            <option value="dual" selected>Dual (whisper first, delayed chat backup)</option>
+          </select>
+        </label>
+        <button id="saveDelivery">Save delivery</button>
+        <span id="deliveryMsg" class="muted"></span>
+      </section>
+
+      <section class="card">
         <h2>Policy</h2>
         <p class="muted">Changes apply immediately — no restart. Saved to config.yaml.</p>
 

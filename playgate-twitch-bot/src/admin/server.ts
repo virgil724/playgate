@@ -12,7 +12,7 @@
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
 import express from "express";
-import { savePolicy } from "../config.js";
+import { savePolicy, saveDeliveryConfig, loadDeliveryConfig } from "../config.js";
 import type { PolicyEngine } from "../grant/policy.js";
 import type { TokenPool } from "../playgate/tokenPool.js";
 import type { GrantStore } from "../store/grantStore.js";
@@ -63,6 +63,7 @@ export function startAdminServer(deps: AdminDeps): Server {
       streamStartedAt: deps.store.streamStartedAt(),
       totalUsers: deps.store.totalUsers(),
       eventsub: deps.eventsubConnected(),
+      delivery: loadDeliveryConfig(deps.configPath),
       auth: {
         broadcaster: deps.auth.getUser("broadcaster") ?? null,
         bot: deps.auth.getUser("bot") ?? null,
@@ -70,6 +71,20 @@ export function startAdminServer(deps: AdminDeps): Server {
       stats: deps.stats.snapshot(),
       recent: deps.store.recent(50),
     });
+  });
+
+  app.get("/api/delivery", (_req, res) => {
+    res.json(loadDeliveryConfig(deps.configPath));
+  });
+
+  app.put("/api/delivery", (req, res) => {
+    try {
+      const saved = saveDeliveryConfig(req.body, deps.configPath);
+      deps.log.info(`delivery mode updated to ${saved.mode}`);
+      res.json(saved);
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+    }
   });
 
   app.post("/api/reset-stream", (_req, res) => {

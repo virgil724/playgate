@@ -157,3 +157,21 @@ export function savePolicy(next: unknown, configPath = CONFIG_PATH): Policy {
   atomicWriteFile(configPath, stringify(doc));
   return policy;
 }
+
+const deliverySchema = z.object({ mode: z.enum(["whisper", "chat", "dual"]) });
+export type DeliveryConfig = z.infer<typeof deliverySchema>;
+
+/** Read just the delivery block from config.yaml. */
+export function loadDeliveryConfig(configPath = CONFIG_PATH): DeliveryConfig {
+  const raw = parse(readFileSync(configPath, "utf8"));
+  return deliverySchema.parse(raw?.delivery ?? { mode: "dual" });
+}
+
+/** Validate and persist a new delivery block, preserving every other key. */
+export function saveDeliveryConfig(next: unknown, configPath = CONFIG_PATH): DeliveryConfig {
+  const config = deliverySchema.parse(next);
+  const doc = (parse(readFileSync(configPath, "utf8")) ?? {}) as Record<string, unknown>;
+  doc.delivery = config;
+  atomicWriteFile(configPath, stringify(doc));
+  return config;
+}
