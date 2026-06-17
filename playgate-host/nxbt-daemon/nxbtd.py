@@ -205,15 +205,6 @@ def fill_input_packet(
             pkt["L_STICK"]["PRESSED"] = True
         elif name == "R_STICK":
             pkt["R_STICK"]["PRESSED"] = True
-        # Upstream nuxbt bug (v3.3.6): set_controller_input()'s shared-byte
-        # packing has PLUS and MINUS swapped relative to the Switch HID spec
-        # (its own macro path packs them correctly). Compensate here — at the
-        # nuxbt boundary — so protocol names stay truthful everywhere else.
-        # Remove once the fork fixes nuxbt/controller/input.py.
-        elif name == "PLUS":
-            pkt["MINUS"] = True
-        elif name == "MINUS":
-            pkt["PLUS"] = True
         else:
             pkt[name] = True
     pkt["L_STICK"]["X_VALUE"] = axis_to_nxbt(lx)

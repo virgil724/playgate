@@ -65,6 +65,12 @@ input:
   target: nxbt                    # nxbt (production, Linux) | log (dev, any OS)
   socket_path: /run/nxbt/nxbt.sock
   rate_hz: 120                    # max commands/second forwarded; 0 disables limiting
+  # disabled_buttons drops specific buttons so they are never sent to the Switch.
+  # disabled_buttons:
+  #   - home
+  #   - capture
+  #   - plus
+  #   - minus
 
 # Single-controller session gate (T9). Disabled by default: every viewer may
 # control directly (dev convenience). Enable in production and provide the

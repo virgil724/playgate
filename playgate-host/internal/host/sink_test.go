@@ -130,3 +130,45 @@ func TestSinkGatedAuthorize(t *testing.T) {
 	cancel()
 	<-authDone
 }
+
+// TestSinkDisabledButtons verifies that buttons specified in disabledMask are dropped.
+func TestSinkDisabledButtons(t *testing.T) {
+	in := newFakeInput()
+	// Set a mask that blocks ButtonHome and ButtonCapture
+	sink := &inputSink{
+		log:          discardLogger(),
+		target:       in,
+		manager:      nil,
+		disabledMask: core.ButtonHome | core.ButtonCapture,
+	}
+
+	raw := make(chan core.InputCommand, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sink.HandleCommands(ctx, raw, nil)
+
+	// Send a command with A, B, Home, Capture
+	raw <- core.InputCommand{Buttons: core.ButtonA | core.ButtonB | core.ButtonHome | core.ButtonCapture}
+	close(raw)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for in.count() < 2 { // wait for the command and the neutral reset on close
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 2 commands forwarded, got %d", in.count())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	in.mu.Lock()
+	defer in.mu.Unlock()
+
+	// first command should have Home and Capture stripped out
+	if in.got[0].Buttons != (core.ButtonA | core.ButtonB) {
+		t.Errorf("expected Buttons %d (A|B), got %d", core.ButtonA|core.ButtonB, in.got[0].Buttons)
+	}
+
+	// second command is the neutral reset
+	if in.got[1].Buttons != 0 {
+		t.Errorf("expected neutral reset, got %d", in.got[1].Buttons)
+	}
+}

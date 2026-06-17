@@ -1,0 +1,84 @@
+# docker/compose.twitch-bot.yaml — PlayGate Twitch Bot (standalone)
+# ─────────────────────────────────────────────────────────────────────────────
+# Runs the bot that auto-distributes codes to Twitch viewers. It talks to your
+# existing playgate-server over the network, so it can live anywhere — the same
+# host as the server, the streamer's PC, etc.
+#
+# Setup:
+#   1. In your Twitch app (https://dev.twitch.tv/console) add this OAuth
+#      Redirect URL:  http://localhost:8090/callback
+#   2. Create a .env next to this file:
+#        PLAYGATE_HOST_API_KEY=...      # from POST /api/hosts/register
+#        PLAYGATE_ROOM_ID=...           # the room to issue codes for
+#        PLAYGATE_API_BASE=https://playgate-api.example.com   # your server
+#        PLAYGATE_WEB_BASE=https://play.example.com           # your playgate-web
+#        TWITCH_CLIENT_ID=...
+#        TWITCH_CLIENT_SECRET=...
+#      (The chat channel + bot identity are auto-detected from the accounts you
+#       authorize below — no need to set TWITCH_CHANNEL_LOGIN / TWITCH_BOT_LOGIN.
+#       The bot account must have a verified phone number to send whispers.)
+#   3. docker compose -f compose.twitch-bot.yaml up -d
+#   4. Open http://localhost:8090 and click Connect Broadcaster + Connect Bot.
+#
+# The admin page is published to 127.0.0.1 only — not reachable from the network.
+# Policy edits in the UI are written to config.yaml inside the bot-data volume.
+#
+# Back up the "bot-data" volume: it holds config.yaml, the OAuth tokens
+# (twitch.tokens.json) and the cooldown/grant history (grants.state.json).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── init: fix volume ownership for the nonroot 'node' user (UID 1000) ──────
+  init-permissions:
+    image: busybox:stable
+    volumes:
+      - bot-data:/data
+    command: chown -R 1000:1000 /data
+    restart: "no"
+
+  # ── init: seed config.yaml into an empty volume (first run only) ───────────
+  init-config:
+    image: ghcr.io/virgil724/playgate-twitch-bot:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/twitch-bot.Dockerfile
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
+    volumes:
+      - bot-data:/data
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["test -f /data/config.yaml || cp /app/config.example.yaml /data/config.yaml"]
+    restart: "no"
+
+  # ── the bot ────────────────────────────────────────────────────────────────
+  twitch-bot:
+    image: ghcr.io/virgil724/playgate-twitch-bot:latest
+    # build:
+    #   context: ..
+    #   dockerfile: docker/twitch-bot.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8090:8090"   # admin page — localhost only
+    volumes:
+      - bot-data:/data          # config.yaml + grants.state.json + twitch.tokens.json
+    environment:
+      PLAYGATE_HOST_API_KEY: ${PLAYGATE_HOST_API_KEY}
+      PLAYGATE_ROOM_ID: ${PLAYGATE_ROOM_ID}
+      PLAYGATE_API_BASE: ${PLAYGATE_API_BASE:-http://localhost:8080}
+      PLAYGATE_WEB_BASE: ${PLAYGATE_WEB_BASE:-http://localhost:5173}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET}
+      # Chat channel + bot identity are auto-detected from the OAuth'd accounts.
+      # To override, uncomment and set these:
+      # TWITCH_CHANNEL_LOGIN: ${TWITCH_CHANNEL_LOGIN}
+      # TWITCH_BOT_LOGIN: ${TWITCH_BOT_LOGIN}
+      ADMIN_BIND: "0.0.0.0"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+volumes:
+  bot-data:

@@ -88,6 +88,23 @@ jobs:
       - run: npm test
       - run: npm run build # runs tsc --noEmit first
 
+  twitch-bot:
+    name: playgate-twitch-bot (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: playgate-twitch-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playgate-twitch-bot/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build # tsc compile check
+
   signaling:
     name: playgate-signaling (typecheck, tests, dry-run deploy)
     runs-on: ubuntu-latest
@@ -139,3 +156,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -f docker/server.Dockerfile .
       - run: docker build -f docker/host.Dockerfile .
+      - run: docker build -f docker/twitch-bot.Dockerfile .

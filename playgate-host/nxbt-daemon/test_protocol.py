@@ -269,16 +269,15 @@ class TestFillInputPacket(unittest.TestCase):
         self.assertFalse(pkt["DPAD_DOWN"])
         self.assertFalse(pkt["DPAD_LEFT"])
 
-    def test_plus_minus_compensate_nuxbt_swap(self):
-        # nuxbt v3.3.6's set_controller_input() packs PLUS/MINUS swapped in
-        # the shared HID byte (its macro path is correct), so the wire bits
-        # must land on the OPPOSITE packet keys. See fill_input_packet.
+    def test_plus_minus_map_directly(self):
+        # The fork fixes nuxbt's direct-input PLUS/MINUS swap, so the daemon no
+        # longer compensates: wire bits map straight through to matching keys.
         pkt = nxbtd.fill_input_packet(_make_packet(), 0x000100, 0, 0, 0, 0)  # ButtonPlus
-        self.assertTrue(pkt["MINUS"])
-        self.assertFalse(pkt["PLUS"])
-        pkt = nxbtd.fill_input_packet(_make_packet(), 0x000200, 0, 0, 0, 0)  # ButtonMinus
         self.assertTrue(pkt["PLUS"])
         self.assertFalse(pkt["MINUS"])
+        pkt = nxbtd.fill_input_packet(_make_packet(), 0x000200, 0, 0, 0, 0)  # ButtonMinus
+        self.assertTrue(pkt["MINUS"])
+        self.assertFalse(pkt["PLUS"])
 
     def test_axes_scaled_to_nuxbt_range(self):
         pkt = nxbtd.fill_input_packet(_make_packet(), 0, 0.5, -1.0, 0.25, 2.0)
