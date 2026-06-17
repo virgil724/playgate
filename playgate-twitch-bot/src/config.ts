@@ -78,7 +78,7 @@ const configFileSchema = z.object({
   }),
   delivery: z.object({
     mode: z.enum(["whisper", "chat", "dual"]),
-  }),
+  }).optional().default({ mode: "dual" }),
   admin: z.object({ port: z.number().int().positive() }),
   policy: policySchema,
 });
