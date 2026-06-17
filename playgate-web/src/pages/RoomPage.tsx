@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { ApiClient, API_BASE_URL, SIGNALING_BASE_URL, ApiError } from "../lib/api";
 import { SignalingClient } from "../lib/signaling";
 import { ViewerConnection, type ConnectionState } from "../lib/webrtc";
@@ -31,6 +31,7 @@ const NEUTRAL_RESEND_COUNT = 4;
 
 export function RoomPage() {
   const { roomId = "" } = useParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
   const connRef = useRef<ViewerConnection | null>(null);
   const gamepadRef = useRef(new GamepadState());
@@ -54,6 +55,16 @@ export function RoomPage() {
   // host, which is still serving the connection we'd be tearing down).
   const sessionRef = useRef(session);
   sessionRef.current = session;
+
+  useEffect(() => {
+    const codeFromUrl = searchParams.get("code");
+    if (codeFromUrl) {
+      setSearchParams({}, { replace: true });
+      void redeem(codeFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [logs, setLogs] = useState<LogEntry[]>(() => logHistory());
   const [rtt, setRtt] = useState<string>("-");
   const [videoStats, setVideoStats] = useState<string>("-");
@@ -392,13 +403,15 @@ export function RoomPage() {
     };
   }, [onChange]);
 
-  const redeem = async () => {
-    if (!code.trim()) return;
+  const redeem = async (codeOverride?: string) => {
+    const codeToUse = (codeOverride ?? code).trim();
+    if (!codeToUse) return;
+    if (codeOverride) setCode(codeOverride);
     setRedeeming(true);
     setRedeemError("");
     try {
       const api = new ApiClient(API_BASE_URL);
-      const res = await api.redeem(code.trim());
+      const res = await api.redeem(codeToUse);
       setSession({ token: res.session_token, viewerId: res.viewer_id });
       setQueuePos(res.queue_position);
       setStatusMsg(`Redeemed — queue position ${res.queue_position}`);

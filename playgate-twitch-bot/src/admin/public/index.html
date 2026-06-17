@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PlayGate Twitch Bot</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>PlayGate Twitch Bot</h1>
+      <div id="conn" class="conn"></div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Status</h2>
+        <div class="stats" id="stats"></div>
+        <button id="resetStream" class="ghost">Start new stream session</button>
+        <h3>Recent grants</h3>
+        <table id="recent">
+          <thead>
+            <tr><th>When</th><th>User</th><th>Source</th><th>Delivery</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Policy</h2>
+        <p class="muted">Changes apply immediately — no restart. Saved to config.yaml.</p>
+
+        <fieldset>
+          <legend>Global</legend>
+          <label>Per-user cooldown (s)<input id="g_cooldown" type="number" min="0" /></label>
+          <label>Max per stream<input id="g_maxStream" type="number" min="1" /></label>
+          <label>Max per minute<input id="g_maxMinute" type="number" min="1" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><label class="inline"><input id="command_enabled" type="checkbox" /> Chat command</label></legend>
+          <label>Trigger<input id="command_trigger" type="text" placeholder="!play" /></label>
+          <label>Eligibility<select id="command_eligibility"></select></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><label class="inline"><input id="cp_enabled" type="checkbox" /> Channel Points</label></legend>
+          <label>Reward ID<input id="cp_rewardId" type="text" placeholder="reward UUID" /></label>
+          <label>Eligibility<select id="cp_eligibility"></select></label>
+          <label>Cooldown override (s, blank = global)<input id="cp_cooldown" type="number" min="0" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><label class="inline"><input id="sub_enabled" type="checkbox" /> Subscription</label></legend>
+          <label>Eligibility<select id="sub_eligibility"></select></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><label class="inline"><input id="cheer_enabled" type="checkbox" /> Cheer (Bits)</label></legend>
+          <label>Min bits<input id="cheer_minBits" type="number" min="0" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend><label class="inline"><input id="raid_enabled" type="checkbox" /> Raid</label></legend>
+          <label>Min viewers<input id="raid_minViewers" type="number" min="0" /></label>
+        </fieldset>
+
+        <button id="savePolicy">Save policy</button>
+        <span id="saveMsg" class="muted"></span>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

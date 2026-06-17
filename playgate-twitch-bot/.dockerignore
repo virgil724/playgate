@@ -1,0 +1,9 @@
+node_modules
+dist
+# Local runtime state + secrets — never bake into an image.
+config.yaml
+.env
+*.state.json
+twitch.tokens.json
+# Tests aren't needed in the image.
+**/*.test.ts
