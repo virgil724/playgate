@@ -78,13 +78,15 @@ export class WhisperDelivery implements Delivery {
       }
     }
 
-    // Dual mode: fire whisper + chat simultaneously; chat guarantees delivery.
+    // Dual mode: whisper first, then delayed chat backup so the whisper has
+    // time to arrive first (viewer sees code privately before chat backup).
     if (this.mode === "dual") {
       if (req.twitchUserId !== this.whisper.fromUserId) {
         this.whisper
           .send(req.twitchUserId, buildWhisper(redeemUrl, code))
           .catch((e) => this.log.warn(`whisper to ${req.twitchUsername} failed`, e));
       }
+      await sleep(2500);
       try {
         await this.chatSay(buildPublicFallback(req.twitchUsername, redeemUrl));
         return "whisper";
