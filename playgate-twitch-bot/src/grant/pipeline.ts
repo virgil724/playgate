@@ -15,7 +15,7 @@ import type { Logger } from "../util.js";
 import { buildRedeemUrl } from "./message.js";
 
 /** Outcome of trying to hand a code to a viewer. */
-export type DeliveryResult = "whisper" | "fallback" | "failed";
+export type DeliveryResult = "whisper" | "fallback" | "chat" | "failed";
 
 /** Delivers a code to a viewer (whisper, with public chat fallback). */
 export interface Delivery {

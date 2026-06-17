@@ -87,7 +87,7 @@ async function main(): Promise<void> {
       logger("chat"),
     );
     const whisper = new WhisperSender(auth, bot.id, logger("whisper"));
-    const delivery = new WhisperDelivery(whisper, (m) => chat.say(m), logger("whisper"));
+    const delivery = new WhisperDelivery(whisper, (m) => chat.say(m), file.delivery.mode, logger("whisper"));
     pipeline = makePipeline({
       policy,
       pool,

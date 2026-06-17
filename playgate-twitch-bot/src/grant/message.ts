@@ -19,5 +19,5 @@ export function buildWhisper(redeemUrl: string, code: string): string {
  * so anyone in chat could redeem it first — pair with a per-user cooldown.
  */
 export function buildPublicFallback(username: string, redeemUrl: string): string {
-  return `@${username} couldn't whisper you — redeem your PlayGate code here: ${redeemUrl}`;
+  return `@${username} redeem your code: ${redeemUrl}`;
 }

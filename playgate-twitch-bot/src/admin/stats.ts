@@ -7,6 +7,7 @@
 export interface StatsSnapshot {
   whispered: number;
   fallback: number;
+  chat: number;
   failed: number;
   denied: number;
   errors: number;
@@ -17,15 +18,17 @@ export class Stats {
   private s: StatsSnapshot = {
     whispered: 0,
     fallback: 0,
+    chat: 0,
     failed: 0,
     denied: 0,
     errors: 0,
     lastError: null,
   };
 
-  delivered(via: "whisper" | "fallback"): void {
+  delivered(via: "whisper" | "fallback" | "chat"): void {
     if (via === "whisper") this.s.whispered++;
-    else this.s.fallback++;
+    else if (via === "fallback") this.s.fallback++;
+    else this.s.chat++;
   }
 
   deliveryFailed(): void {

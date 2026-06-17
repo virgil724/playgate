@@ -19,6 +19,13 @@ playgate:
 #     botLogin: mybot
 twitch: {}
 
+# Delivery controls how codes reach viewers.
+#   whisper — whisper-first with chat fallback on failure
+#   chat    — public chat only, no whisper
+#   dual    — whisper first, delayed chat backup (whisper gets priority, chat guarantees delivery)
+delivery:
+  mode: dual
+
 admin:
   port: 8090 # local-only admin page; bound to 127.0.0.1
 

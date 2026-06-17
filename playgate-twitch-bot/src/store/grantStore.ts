@@ -25,7 +25,7 @@ export interface GrantEvent {
   username: string;
   source: GrantSource;
   code: string;
-  delivery: "whisper" | "fallback";
+  delivery: "whisper" | "fallback" | "chat";
   at: number;
 }
 
@@ -82,7 +82,7 @@ export class GrantStore {
   }
 
   /** Record a successful (delivered) grant. */
-  record(req: GrantRequest, code: string, delivery: "whisper" | "fallback"): void {
+  record(req: GrantRequest, code: string, delivery: "whisper" | "fallback" | "chat"): void {
     const now = Date.now();
     const prev = this.data.users[req.twitchUserId];
     this.data.users[req.twitchUserId] = {

@@ -76,6 +76,9 @@ const configFileSchema = z.object({
     channelLogin: z.string().optional(),
     botLogin: z.string().optional(),
   }),
+  delivery: z.object({
+    mode: z.enum(["whisper", "chat", "dual"]),
+  }),
   admin: z.object({ port: z.number().int().positive() }),
   policy: policySchema,
 });

@@ -139,6 +139,7 @@ async function refreshStatus() {
     ["Granted this stream", st.streamGrants],
     ["Whispered", s.whispered],
     ["Public fallback", s.fallback],
+    ["Chat", s.chat],
     ["Failed", s.failed],
     ["Denied (policy)", s.denied],
     ["Known users", st.totalUsers],

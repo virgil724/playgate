@@ -16,7 +16,7 @@ Protocol (Go ↔ daemon):
     {"type":"pong"}
 
 Run:
-  python3 nxbtd.py [--socket /run/nxbt/nxbt.sock]
+  python3 nxbtd.py [--socket /run/nxbt/nxbt.sock] [--tcp-bind 0.0.0.0:12345]
 
 In mock mode (nuxbt unavailable):
   python3 nxbtd.py --mock
@@ -253,6 +253,17 @@ class NxbtController:
     """Wraps the real nuxbt library."""
 
     def __init__(self) -> None:
+        # nuxbt.create_logger() unconditionally addHandler()s onto the shared
+        # logging.getLogger('nuxbt') singleton every time Nuxbt() is built.
+        # That is fine for nuxbt's intended one-construction-per-process
+        # lifecycle, but this daemon rebuilds the controller on every retry
+        # inside one long-lived process, so the handlers stack and each
+        # "Initializing Nuxbt..." line gets re-emitted once per accumulated
+        # handler (1, 2, 3...). Reset to a clean slate before constructing.
+        nuxbt_logger = logging.getLogger("nuxbt")
+        for handler in list(nuxbt_logger.handlers):
+            nuxbt_logger.removeHandler(handler)
+            handler.close()
         self._nx = nuxbt.Nuxbt()
         self._index: Optional[int] = None
 
@@ -509,12 +520,14 @@ class Daemon:
         skip_bluez_check: bool = False,
         socket_group: Optional[str] = None,
         socket_mode: int = 0o660,
+        tcp_bind: Optional[str] = None,
     ) -> None:
         self._socket_path = socket_path
         self._mock = mock or MOCK_MODE
         self._skip_bluez_check = skip_bluez_check
         self._socket_group = socket_group
         self._socket_mode = socket_mode
+        self._tcp_bind = tcp_bind
         self._shutdown = threading.Event()
         self._current_session: Optional[ClientSession] = None
         self._session_lock = threading.Lock()
@@ -596,9 +609,28 @@ class Daemon:
                     self._controller = ctrl
                 self._broadcast_status("connected", "Switch paired" if not self._mock else "mock mode")
                 backoff = RETRY_BACKOFF_INITIAL  # reset on success
-                # Keep the controller alive until shutdown or error.
+                # Keep the controller alive until shutdown or error. Monitor
+                # the nuxbt state so disconnects trigger an automatic retry
+                # (reconnect + exponential backoff) without user intervention.
+                not_connected_sec = 0
                 while not self._shutdown.is_set():
                     time.sleep(1)
+                    if not self._mock and ctrl is not None and ctrl._index is not None:
+                        try:
+                            state = ctrl._nx.state[ctrl._index]["state"]
+                        except Exception:
+                            state = "unknown"
+                        if state == "crashed":
+                            log.warning("controller crashed — triggering reconnect")
+                            raise OSError("controller crashed")
+                        if state != "connected":
+                            not_connected_sec += 1
+                            if not_connected_sec >= 30:
+                                log.warning("controller not connected for %ds (state=%s) — triggering reconnect",
+                                            not_connected_sec, state)
+                                raise OSError("controller reconnect timeout")
+                        else:
+                            not_connected_sec = 0
                 break
             except Exception as exc:
                 log.error("controller error: %s — retrying in %.0fs", exc, backoff)
@@ -646,21 +678,31 @@ class Daemon:
         os.chmod(self._socket_path, self._socket_mode)
 
     def run(self) -> None:
-        # Remove stale socket file.
-        try:
-            os.unlink(self._socket_path)
-        except FileNotFoundError:
-            pass
+        if self._tcp_bind:
+            host, port = self._tcp_bind.rsplit(":", 1)
+            addr = (host, int(port))
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(addr)
+            server.listen(1)
+            server.settimeout(1.0)
+            log.info("listening on tcp %s:%s (mock=%s)", host, port, self._mock)
+        else:
+            # Remove stale socket file.
+            try:
+                os.unlink(self._socket_path)
+            except FileNotFoundError:
+                pass
 
-        # Ensure parent directory exists.
-        os.makedirs(os.path.dirname(os.path.abspath(self._socket_path)), exist_ok=True)
+            # Ensure parent directory exists.
+            os.makedirs(os.path.dirname(os.path.abspath(self._socket_path)), exist_ok=True)
 
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(self._socket_path)
-        self._apply_socket_permissions()
-        server.listen(1)
-        server.settimeout(1.0)  # allow periodic shutdown checks
-        log.info("listening on %s (mock=%s)", self._socket_path, self._mock)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(self._socket_path)
+            self._apply_socket_permissions()
+            server.listen(1)
+            server.settimeout(1.0)  # allow periodic shutdown checks
+            log.info("listening on %s (mock=%s)", self._socket_path, self._mock)
 
         ctrl_thread = threading.Thread(target=self._run_controller, daemon=True, name="controller")
         ctrl_thread.start()
@@ -699,10 +741,11 @@ class Daemon:
                 t.start()
         finally:
             server.close()
-            try:
-                os.unlink(self._socket_path)
-            except FileNotFoundError:
-                pass
+            if not self._tcp_bind:
+                try:
+                    os.unlink(self._socket_path)
+                except FileNotFoundError:
+                    pass
             self._shutdown.set()
             ctrl_thread.join(timeout=5)
             # Mop up any multiprocessing children the controller thread's
@@ -819,6 +862,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--tcp-bind",
+        metavar="ADDR:PORT",
+        default=None,
+        help="TCP address to listen on instead of Unix socket (e.g., 0.0.0.0:12345)",
+    )
     return parser
 
 
@@ -834,6 +883,7 @@ def main() -> None:
         skip_bluez_check=args.skip_bluez_check,
         socket_group=args.socket_group,
         socket_mode=args.socket_mode,
+        tcp_bind=args.tcp_bind,
     )
 
     watchdog_armed = threading.Event()

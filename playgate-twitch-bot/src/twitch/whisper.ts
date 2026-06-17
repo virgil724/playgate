@@ -55,18 +55,48 @@ export class WhisperSender {
 
 export type ChatSay = (message: string) => Promise<void>;
 
+export type DeliveryMode = "whisper" | "chat" | "dual";
+
 /** Delivery strategy: try a whisper, fall back to public chat. */
 export class WhisperDelivery implements Delivery {
   constructor(
     private whisper: WhisperSender,
     private chatSay: ChatSay,
+    private mode: DeliveryMode,
     private log: Logger,
   ) {}
 
   async deliver(req: GrantRequest, code: string, redeemUrl: string): Promise<DeliveryResult> {
-    // Twitch rejects whispering yourself — happens when the broadcaster and bot
-    // are the same account and that account triggers a grant. Skip straight to
-    // chat rather than burning an API call on a guaranteed 400.
+    // Chat-only mode: skip whisper entirely.
+    if (this.mode === "chat") {
+      try {
+        await this.chatSay(buildPublicFallback(req.twitchUsername, redeemUrl));
+        return "chat";
+      } catch (e) {
+        this.log.error(`chat delivery failed for ${req.twitchUsername}`, e);
+        return "failed";
+      }
+    }
+
+    // Dual mode: whisper first, then delayed chat backup so the whisper has
+    // time to arrive first (viewer sees code privately before chat backup).
+    if (this.mode === "dual") {
+      if (req.twitchUserId !== this.whisper.fromUserId) {
+        this.whisper
+          .send(req.twitchUserId, buildWhisper(redeemUrl, code))
+          .catch((e) => this.log.warn(`whisper to ${req.twitchUsername} failed`, e));
+      }
+      await sleep(2500);
+      try {
+        await this.chatSay(buildPublicFallback(req.twitchUsername, redeemUrl));
+        return "whisper";
+      } catch (e) {
+        this.log.error(`chat delivery failed for ${req.twitchUsername}`, e);
+        return "failed";
+      }
+    }
+
+    // Whisper-first mode: try whisper, fall back to public chat.
     if (req.twitchUserId !== this.whisper.fromUserId) {
       try {
         await this.whisper.send(req.twitchUserId, buildWhisper(redeemUrl, code));

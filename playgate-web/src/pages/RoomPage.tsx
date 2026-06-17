@@ -26,13 +26,12 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 };
 
 const INPUT_BACKPRESSURE_BYTES = 2048;
-const ACTIVE_INPUT_REFRESH_MS = 1000 / 60;
+const ACTIVE_INPUT_REFRESH_MS = 1000 / 30;
 const NEUTRAL_RESEND_COUNT = 4;
 
 export function RoomPage() {
   const { roomId = "" } = useParams();
-  // Pre-fill the code from ?code= so whisper/redeem links are one-click.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
   const connRef = useRef<ViewerConnection | null>(null);
   const gamepadRef = useRef(new GamepadState());
@@ -47,7 +46,7 @@ export function RoomPage() {
   // The <video> starts muted so the browser allows autoplay; the host now sends
   // an Opus audio track, so expose a toggle to unmute after a user gesture.
   const [audioMuted, setAudioMuted] = useState(true);
-  const [code, setCode] = useState(() => searchParams.get("code") ?? "");
+  const [code, setCode] = useState("");
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
   const [session, setSession] = useState<{ token: string; viewerId: string } | null>(null);
@@ -56,6 +55,16 @@ export function RoomPage() {
   // host, which is still serving the connection we'd be tearing down).
   const sessionRef = useRef(session);
   sessionRef.current = session;
+
+  useEffect(() => {
+    const codeFromUrl = searchParams.get("code");
+    if (codeFromUrl) {
+      setSearchParams({}, { replace: true });
+      void redeem(codeFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [logs, setLogs] = useState<LogEntry[]>(() => logHistory());
   const [rtt, setRtt] = useState<string>("-");
   const [videoStats, setVideoStats] = useState<string>("-");
@@ -394,13 +403,15 @@ export function RoomPage() {
     };
   }, [onChange]);
 
-  const redeem = async () => {
-    if (!code.trim()) return;
+  const redeem = async (codeOverride?: string) => {
+    const codeToUse = (codeOverride ?? code).trim();
+    if (!codeToUse) return;
+    if (codeOverride) setCode(codeOverride);
     setRedeeming(true);
     setRedeemError("");
     try {
       const api = new ApiClient(API_BASE_URL);
-      const res = await api.redeem(code.trim());
+      const res = await api.redeem(codeToUse);
       setSession({ token: res.session_token, viewerId: res.viewer_id });
       setQueuePos(res.queue_position);
       setStatusMsg(`Redeemed — queue position ${res.queue_position}`);
