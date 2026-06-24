@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en" data-resolution="landscape">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1280, height=720" />
+    <title>PlayGate — Your chat doesn't just watch anymore.</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      /* Font stack: Inter and JetBrains Mono with system fallbacks */
+      @font-face {
+        font-family: 'Inter';
+        font-style: normal;
+        font-weight: 400 800;
+        font-display: swap;
+        src: local('Inter'), local('Inter-Regular');
+      }
+      @font-face {
+        font-family: 'JetBrains Mono';
+        font-style: normal;
+        font-weight: 400 700;
+        font-display: swap;
+        src: local('JetBrains Mono'), local('JetBrainsMono-Regular');
+      }
+      :root {
+        --bg: #0d0f14;
+        --panel: #161a23;
+        --panel-2: #1f2530;
+        --border: #2a3140;
+        --text: #e6e9ef;
+        --muted: #8b93a3;
+        --accent: #4f8cff;
+        --accent-2: #2dd4bf;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --danger: #ef4444;
+        --twitch: #9147ff;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1280px;
+        height: 720px;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Inter", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .mono { font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums; }
+      #root {
+        position: relative;
+        width: 1280px;
+        height: 720px;
+        background: var(--bg);
+        overflow: hidden;
+      }
+
+      /* ---------- Decorative grid (persistent) ---------- */
+      .grid-overlay {
+        position: absolute; inset: 0;
+        background-image:
+          linear-gradient(rgba(79,140,255,0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(79,140,255,0.03) 1px, transparent 1px);
+        background-size: 40px 40px;
+        pointer-events: none;
+        opacity: 0.6;
+      }
+
+      /* ---------- Panel base ---------- */
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 22px 26px;
+        box-shadow: 0 24px 60px -28px rgba(0,0,0,0.7);
+      }
+
+      /* ============================================================
+         SCENE 1 — Hook (0-3s)
+         ============================================================ */
+      .scene-hook {
+        width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .hook-inner { text-align: center; max-width: 1080px; }
+      .hook-line {
+        font-weight: 800;
+        font-size: 68px;
+        line-height: 1.12;
+        letter-spacing: -0.03em;
+        color: var(--text);
+      }
+      .hook-line .accent { color: var(--accent); }
+      .hook-glow {
+        position: absolute;
+        width: 500px; height: 500px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(79,140,255,0.12) 0%, transparent 70%);
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
+      .hook-caret {
+        display: inline-block;
+        width: 3px; height: 56px;
+        background: var(--accent);
+        vertical-align: middle;
+        margin-left: 4px;
+        animation: blink 0.7s steps(2,start) infinite;
+      }
+      @keyframes blink { to { visibility: hidden; } }
+
+      /* ============================================================
+         SCENE 2 — Twitch chat + whisper (3-7s)
+         ============================================================ */
+      .scene-twitch {
+        width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .twitch-wrap {
+        width: 560px;
+        background: #0e0e10;
+        border: 1px solid #2a2a2e;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .twitch-header {
+        display: flex; align-items: center; gap: 10px;
+        padding: 12px 16px;
+        border-bottom: 1px solid #2a2a2e;
+        font-size: 13px; color: #adadb8;
+      }
+      .twitch-header .tw-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #ef4444;
+        box-shadow: 0 0 8px rgba(239,68,68,0.5);
+      }
+      .twitch-body {
+        padding: 14px 16px;
+        min-height: 280px;
+        display: flex; flex-direction: column; gap: 10px;
+      }
+      .chat-msg {
+        font-size: 14px; line-height: 1.5;
+        color: #efeff1;
+      }
+      .chat-msg .user { font-weight: 700; }
+      .chat-msg .user.mod { color: #00b86b; }
+      .chat-msg .user.vip { color: #e0a82e; }
+      .chat-msg .user.regular { color: #9147ff; }
+      .chat-cmd { color: var(--accent); font-weight: 700; }
+      .whisper-card {
+        margin-top: 6px;
+        background: rgba(145,71,255,0.08);
+        border: 1px solid rgba(145,71,255,0.25);
+        border-radius: 10px;
+        padding: 14px 16px;
+        display: flex; flex-direction: column; gap: 8px;
+      }
+      .whisper-label {
+        font-size: 11px;
+        color: #9147ff;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        display: flex; align-items: center; gap: 6px;
+      }
+      .whisper-label .wh-icon {
+        width: 14px; height: 14px;
+        border-radius: 50%;
+        background: #9147ff;
+      }
+      .whisper-body {
+        font-size: 14px;
+        color: #efeff1;
+      }
+      .whisper-code {
+        display: inline-block;
+        background: rgba(45,212,191,0.12);
+        border: 1px solid rgba(45,212,191,0.35);
+        border-radius: 6px;
+        padding: 2px 10px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--accent-2);
+        letter-spacing: 0.08em;
+      }
+
+      /* ============================================================
+         SCENE 3 — Redeem + Connect (7-11s)
+         ============================================================ */
+      .scene-redeem {
+        width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .redeem-card {
+        width: 720px; max-width: 86%;
+        display: flex; flex-direction: column; gap: 22px;
+      }
+      .redeem-title {
+        font-size: 22px; font-weight: 700; color: var(--text);
+        letter-spacing: -0.01em;
+      }
+      .redeem-sub { color: var(--muted); font-size: 14px; }
+      .code-field {
+        display: flex; align-items: center; gap: 4px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 40px;
+        color: var(--text);
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 20px 24px;
+        letter-spacing: 0.16em;
+        min-height: 88px;
+      }
+      .code-char {
+        display: inline-block; width: 0.7em; text-align: center;
+      }
+      .code-caret {
+        display: inline-block;
+        width: 2px; height: 36px; background: var(--accent);
+        margin-left: 2px; vertical-align: middle;
+        animation: blink 0.8s steps(2,start) infinite;
+      }
+      .redeem-row {
+        display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      }
+      .redeem-status {
+        display: inline-flex; align-items: center; gap: 10px;
+        font-family: "JetBrains Mono", monospace; font-size: 14px;
+        color: var(--muted);
+      }
+      .redeem-status .label { color: var(--text); }
+      .dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: var(--muted);
+      }
+      .dot.connecting { background: var(--warn); box-shadow: 0 0 12px rgba(245,158,11,0.6); }
+      .dot.connected { background: var(--ok); box-shadow: 0 0 14px rgba(34,197,94,0.65); }
+      .btn {
+        display: inline-flex; align-items: center; gap: 8px;
+        padding: 10px 18px;
+        background: var(--accent);
+        color: #0b1020;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        font-weight: 700;
+        font-size: 14px;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+      }
+      .queue-pill {
+        display: inline-flex; align-items: center; gap: 8px;
+        padding: 6px 14px;
+        border: 1px solid rgba(245,158,11,0.4);
+        border-radius: 999px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 14px;
+        color: var(--warn);
+        background: rgba(245,158,11,0.06);
+      }
+
+      /* ============================================================
+         SCENE 4 — Gamepad + countdown (11-16s)
+         ============================================================ */
+      .scene-game {
+        width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .game-stage {
+        width: 1100px; max-width: 92%;
+        display: grid;
+        grid-template-columns: 1.25fr 1fr;
+        gap: 24px;
+        align-items: stretch;
+      }
+      .game-screen {
+        position: relative;
+        background: #05080d;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        min-height: 380px;
+        overflow: hidden;
+        display: flex; flex-direction: column;
+        justify-content: space-between;
+        padding: 22px;
+      }
+      .screen-skyline {
+        position: absolute; inset: 0;
+        background:
+          radial-gradient(ellipse 70% 60% at 30% 70%, rgba(79,140,255,0.18), transparent 60%),
+          linear-gradient(180deg, #0c1322 0%, #060911 100%);
+      }
+      .screen-grid {
+        position: absolute; inset: 0;
+        background-image:
+          linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+        background-size: 28px 28px;
+        transform: perspective(420px) rotateX(58deg) translateY(20%) scale(1.4);
+        transform-origin: bottom center;
+        opacity: 0.6;
+      }
+      .screen-character {
+        position: absolute;
+        bottom: 60px; left: 50%;
+        transform: translateX(-50%);
+        width: 56px; height: 88px;
+        background: linear-gradient(180deg, var(--accent) 0%, #2657c2 100%);
+        border-radius: 18px 18px 6px 6px;
+        box-shadow: 0 12px 30px rgba(79,140,255,0.35);
+      }
+      .screen-character::before {
+        content: ""; position: absolute;
+        top: 10px; left: 50%; transform: translateX(-50%);
+        width: 26px; height: 26px; border-radius: 50%;
+        background: #0d0f14;
+        border: 3px solid #fff;
+      }
+      .screen-overlay {
+        position: relative; z-index: 2;
+        display: flex; justify-content: space-between; align-items: flex-start;
+        font-family: "JetBrains Mono", monospace; font-size: 11px;
+        color: rgba(230,233,239,0.7);
+        letter-spacing: 0.1em;
+      }
+      .screen-overlay .live-pill {
+        color: var(--accent-2);
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .screen-overlay .live-pill::before {
+        content: ""; width: 7px; height: 7px; border-radius: 50%;
+        background: var(--accent-2);
+        box-shadow: 0 0 10px rgba(45,212,191,0.6);
+      }
+      .screen-footer {
+        position: relative; z-index: 2;
+        display: flex; justify-content: space-between; align-items: flex-end;
+        color: rgba(230,233,239,0.55);
+        font-family: "JetBrains Mono", monospace; font-size: 11px;
+        letter-spacing: 0.1em;
+      }
+      .game-topbar {
+        display: flex; align-items: center; gap: 12px;
+        padding: 10px 16px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        margin-bottom: 14px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 13px;
+      }
+      .game-topbar .tb-dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 12px rgba(34,197,94,0.6);
+      }
+      .game-topbar .tb-countdown {
+        margin-left: auto;
+        font-weight: 700;
+        font-size: 18px;
+        color: var(--ok);
+      }
+      .game-pad {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 22px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      .pad-col { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+      .stick {
+        position: relative; width: 100px; height: 100px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 50%;
+      }
+      .stick .nub {
+        position: absolute; top: 50%; left: 50%;
+        width: 40px; height: 40px; border-radius: 50%;
+        background: var(--accent);
+        transform: translate(-50%,-50%);
+        box-shadow: 0 6px 16px rgba(79,140,255,0.4);
+      }
+      .dpad {
+        display: grid;
+        grid-template-columns: repeat(3, 36px);
+        grid-template-rows: repeat(3, 36px);
+        gap: 3px;
+      }
+      .dpad .cell {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        display: flex; align-items: center; justify-content: center;
+        color: var(--muted); font-size: 14px;
+      }
+      .dpad .cell.on {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #0b1020;
+        box-shadow: 0 0 18px rgba(79,140,255,0.6);
+      }
+      .dpad .up    { grid-column: 2; grid-row: 1; }
+      .dpad .left  { grid-column: 1; grid-row: 2; }
+      .dpad .right { grid-column: 3; grid-row: 2; }
+      .dpad .down  { grid-column: 2; grid-row: 3; }
+      .face {
+        display: grid;
+        grid-template-columns: repeat(3, 36px);
+        grid-template-rows: repeat(3, 36px);
+        gap: 3px;
+      }
+      .face .cell {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        color: var(--muted); font-size: 13px; font-weight: 700;
+        font-family: "Inter", sans-serif;
+      }
+      .face .cell.on {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #0b1020;
+        box-shadow: 0 0 18px rgba(79,140,255,0.6);
+      }
+      .face .y { grid-column: 2; grid-row: 1; }
+      .face .x { grid-column: 1; grid-row: 2; }
+      .face .a { grid-column: 3; grid-row: 2; }
+      .face .b { grid-column: 2; grid-row: 3; }
+      .shoulders { display: flex; gap: 5px; }
+      .shoulder {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 3px 9px;
+        font-size: 10px;
+        color: var(--muted);
+        font-family: "JetBrains Mono", monospace;
+        letter-spacing: 0.1em;
+      }
+
+      /* ============================================================
+         SCENE 5 — Logo + tagline (16-20s)
+         ============================================================ */
+      .scene-logo {
+        width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 24px;
+      }
+      .logo-mark {
+        display: flex; align-items: center; gap: 18px;
+      }
+      .logo-dot {
+        width: 18px; height: 18px; border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 32px rgba(79,140,255,0.7);
+      }
+      .logo-word {
+        font-size: 76px; font-weight: 800;
+        letter-spacing: -0.04em;
+        color: var(--text);
+      }
+      .tagline {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 18px;
+        color: var(--muted);
+        letter-spacing: 0.12em;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="playgate-brag" data-start="0" data-duration="20" data-width="1280" data-height="720">
+
+      <div class="grid-overlay"></div>
+
+      <!-- SCENE 1: Hook (0 - 3s) — "What if your Twitch chat could play your game?" -->
+      <div id="scene-hook" class="clip scene-hook" data-start="0" data-duration="3" data-track-index="1">
+        <div class="hook-glow" id="hook-glow"></div>
+        <div class="hook-inner">
+          <div class="hook-line" id="hook-text"></div>
+          <span class="hook-caret" id="hook-caret"></span>
+        </div>
+      </div>
+
+      <!-- SCENE 2: Twitch chat + whisper (3 - 7s) -->
+      <div id="scene-twitch" class="clip scene-twitch" data-start="3" data-duration="4" data-track-index="1" style="display:none;">
+        <div class="twitch-wrap">
+          <div class="twitch-header">
+            <span class="tw-dot"></span>
+            <span>STREAM CHAT</span>
+            <span style="margin-left:auto; color:#636369;">1,247 viewers</span>
+          </div>
+          <div class="twitch-body" id="chat-body">
+            <div class="chat-msg" data-chat="0"><span class="user vip">speedfan99:</span> lets gooo</div>
+            <div class="chat-msg" data-chat="1"><span class="user regular">pixel_nerd:</span> gg that was clean</div>
+            <div class="chat-msg" data-chat="2" id="chat-cmd"><span class="user mod">vince_77:</span> <span class="chat-cmd" id="chat-cmd-text"></span></div>
+            <div id="whisper-card" class="whisper-card" style="display:none;">
+              <div class="whisper-label"><span class="wh-icon"></span> Whisper from PlayGateBot</div>
+              <div class="whisper-body">
+                Your code is <span class="whisper-code" id="whisper-code">5b5f6121</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCENE 3: Redeem + Connect (7 - 11s) -->
+      <div id="scene-redeem" class="clip scene-redeem" data-start="7" data-duration="4" data-track-index="1" style="display:none;">
+        <div class="redeem-card panel">
+          <div>
+            <div class="redeem-title">Have a token code?</div>
+            <div class="redeem-sub">Tokens are given out by the streamer. Watch above without a code.</div>
+          </div>
+          <div id="code-field" class="code-field">
+            <span id="code-content"></span><span class="code-caret" id="code-caret"></span>
+          </div>
+          <div class="redeem-row">
+            <div id="status-pill" class="redeem-status">
+              <span class="dot" id="status-dot"></span>
+              <span class="label" id="status-label">Enter a code</span>
+            </div>
+            <span class="btn" id="redeem-btn">Redeem</span>
+          </div>
+          <div id="queue-area" style="display:none;">
+            <span class="queue-pill" id="queue-pill">Queue #2</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCENE 4: Gamepad + countdown (11 - 16s) -->
+      <div id="scene-game" class="clip scene-game" data-start="11" data-duration="5" data-track-index="1" style="display:none;">
+        <div class="game-stage">
+          <div>
+            <div class="game-topbar" id="game-topbar">
+              <span class="tb-dot"></span>
+              <span class="mono" style="color:var(--muted);">Connected</span>
+              <span class="mono" style="color:var(--muted); margin-left:8px;">room 790a</span>
+              <span class="tb-countdown" id="countdown">⏱ 90s</span>
+            </div>
+            <div class="game-screen">
+              <div class="screen-skyline"></div>
+              <div class="screen-grid" data-layout-allow-overflow="true"></div>
+              <div class="screen-character" id="char-sprite"></div>
+              <div class="screen-overlay">
+                <span>SPEEDRUN 100% · ROOM-04</span>
+                <span class="live-pill">LIVE</span>
+              </div>
+              <div class="screen-footer">
+                <span>viewer · vince_77</span>
+                <span>30 fps · 78 ms rtt</span>
+              </div>
+            </div>
+          </div>
+          <div class="game-pad">
+            <div class="pad-col">
+              <div class="stick" id="stick">
+                <div class="nub" id="stick-nub"></div>
+              </div>
+              <div class="dpad">
+                <div class="cell up" id="dpad-up">▲</div>
+                <div class="cell left" id="dpad-left">◀</div>
+                <div class="cell right" id="dpad-right">▶</div>
+                <div class="cell down" id="dpad-down">▼</div>
+              </div>
+              <div class="shoulders">
+                <div class="shoulder">L</div>
+                <div class="shoulder">ZL</div>
+              </div>
+            </div>
+            <div class="pad-col">
+              <div style="height:100px;"></div>
+              <div class="face">
+                <div class="cell y">Y</div>
+                <div class="cell x" id="btn-x">X</div>
+                <div class="cell a" id="btn-a">A</div>
+                <div class="cell b" id="btn-b">B</div>
+              </div>
+              <div class="shoulders">
+                <div class="shoulder">ZR</div>
+                <div class="shoulder">R</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCENE 5: Logo + tagline (16 - 20s) -->
+      <div id="scene-logo" class="clip scene-logo" data-start="16" data-duration="4" data-track-index="1" style="display:none;">
+        <div class="logo-mark">
+          <span class="logo-dot" id="logo-dot"></span>
+          <span class="logo-word">PlayGate</span>
+        </div>
+        <div class="tagline" id="tagline">Your chat doesn't just watch anymore.</div>
+      </div>
+
+      <!-- Audio: music bed -->
+      <audio id="bg-music" data-start="0" data-duration="20" data-track-index="10" data-volume="0.35" src="assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3"></audio>
+
+      <!-- Audio: SFX — keyboard typing for hook -->
+      <audio id="sfx-key1" data-start="0.35" data-duration="0.2" data-track-index="11" data-volume="0.55" src="assets/sfx/keyboard/keypress-001.wav"></audio>
+      <audio id="sfx-key2" data-start="0.55" data-duration="0.2" data-track-index="11" data-volume="0.55" src="assets/sfx/keyboard/keypress-003.wav"></audio>
+      <audio id="sfx-key3" data-start="0.80" data-duration="0.2" data-track-index="11" data-volume="0.55" src="assets/sfx/keyboard/keypress-005.wav"></audio>
+      <audio id="sfx-key4" data-start="1.05" data-duration="0.2" data-track-index="11" data-volume="0.55" src="assets/sfx/keyboard/keypress-002.wav"></audio>
+      <audio id="sfx-key5" data-start="1.35" data-duration="0.2" data-track-index="11" data-volume="0.55" src="assets/sfx/keyboard/keypress-007.wav"></audio>
+
+      <!-- Audio: SFX — chat message + whisper -->
+      <audio id="sfx-chat-type" data-start="4.2" data-duration="0.8" data-track-index="11" data-volume="0.50" src="assets/sfx/keyboard/keypress-004.wav"></audio>
+      <audio id="sfx-whisper" data-start="5.2" data-duration="1" data-track-index="12" data-volume="0.70" src="assets/sfx/casino/card-slide-1.ogg"></audio>
+
+      <!-- Audio: SFX — redeem click -->
+      <audio id="sfx-click" data-start="8.8" data-duration="0.5" data-track-index="11" data-volume="0.65" src="assets/sfx/interface/click_001.ogg"></audio>
+
+      <!-- Audio: SFX — connected bell — beat-locked: 9.29s -->
+      <audio id="sfx-bell" data-start="9.29" data-duration="1.5" data-track-index="12" data-volume="0.70" src="assets/sfx/impact/impactBell_heavy_000.ogg"></audio>
+
+      <!-- Audio: SFX — gamepad assembly — beat-locked: 10.93s (adjusted to scene start ~11s) -->
+      <audio id="sfx-pad" data-start="11.0" data-duration="1" data-track-index="11" data-volume="0.60" src="assets/sfx/casino/card-fan-1.ogg"></audio>
+
+      <!-- Audio: SFX — button A press -->
+      <audio id="sfx-btn-a" data-start="12.5" data-duration="0.5" data-track-index="12" data-volume="0.65" src="assets/sfx/interface/click_002.ogg"></audio>
+
+      <!-- Audio: SFX — outro logo slam — beat-locked: 17.47s -->
+      <audio id="sfx-outro" data-start="17.47" data-duration="2" data-track-index="12" data-volume="0.75" src="assets/sfx/impact/impactSoft_medium_000.ogg"></audio>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      window.__timelines["playgate-brag"] = tl;
+
+      // Visibility helpers
+      function setVisible(id, vis) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = vis ? "flex" : "none";
+      }
+
+      // ========== SCENE 1: Hook (0 - 3s) ==========
+      const hookText = document.getElementById("hook-text");
+      const hookCaret = document.getElementById("hook-caret");
+      const hookGlow = document.getElementById("hook-glow");
+      const fullHook = "What if your Twitch chat could play your game?";
+      let hookTyped = 0;
+
+      // Type the hook character by character (0.0 - 1.6s)
+      for (let i = 0; i < fullHook.length; i++) {
+        tl.call(() => {
+          hookTyped = i + 1;
+          const partial = fullHook.slice(0, hookTyped);
+          // Highlight "play" in accent
+          hookText.innerHTML = partial.replace(/play/i, '<span class="accent">play</span>');
+        }, [], 0.15 + i * 0.035);
+      }
+
+      // Caret blinks throughout, then hides at 2.2s
+      tl.to(hookCaret, { opacity: 0, duration: 0.3 }, 2.2);
+
+      // Glow pulses gently
+      tl.fromTo(hookGlow, { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 1.2, ease: "sine.inOut" }, 0.3);
+      tl.to(hookGlow, { scale: 1.1, duration: 1.5, ease: "sine.inOut", yoyo: true, repeat: 1 }, 1.5);
+
+      // Scene transition
+      tl.call(() => { setVisible("scene-hook", false); setVisible("scene-twitch", true); }, [], 3.0);
+
+      // ========== SCENE 2: Twitch Chat + Whisper (3 - 7s) ==========
+      const chatCmdText = document.getElementById("chat-cmd-text");
+      const whisperCard = document.getElementById("whisper-card");
+
+      // Chat messages animate in
+      tl.from("[data-chat='0']", { opacity: 0, x: -10, duration: 0.3, ease: "power2.out" }, 3.0);
+      tl.from("[data-chat='1']", { opacity: 0, x: -10, duration: 0.3, ease: "power2.out" }, 3.2);
+      tl.from("#chat-cmd", { opacity: 0, x: -10, duration: 0.3, ease: "power2.out" }, 3.5);
+
+      // Type "!play" command
+      const cmdText = "!play";
+      for (let i = 0; i < cmdText.length; i++) {
+        tl.call(() => {
+          chatCmdText.textContent = cmdText.slice(0, i + 1);
+        }, [], 3.6 + i * 0.12);
+      }
+
+      // Whisper card slides in from right — beat-grid: ~5.34s
+      tl.call(() => { whisperCard.style.display = "flex"; }, [], 5.1);
+      tl.from(whisperCard, { opacity: 0, x: 30, duration: 0.45, ease: "power2.out" }, 5.1);
+      tl.from("#whisper-code", { opacity: 0, scale: 0.9, duration: 0.35, ease: "back.out(1.6)" }, 5.4);
+
+      // Scene transition
+      tl.call(() => { setVisible("scene-twitch", false); setVisible("scene-redeem", true); }, [], 7.0);
+
+      // ========== SCENE 3: Redeem + Connect (7 - 11s) ==========
+      const codeContent = document.getElementById("code-content");
+      const codeCaret = document.getElementById("code-caret");
+      const statusDot = document.getElementById("status-dot");
+      const statusLabel = document.getElementById("status-label");
+      const redeemBtn = document.getElementById("redeem-btn");
+      const queueArea = document.getElementById("queue-area");
+      const queuePill = document.getElementById("queue-pill");
+      const targetCode = "5b5f6121";
+      let redeemTyped = 0;
+
+      tl.from(".redeem-title", { opacity: 0, y: 10, duration: 0.4, ease: "power2.out" }, 7.0);
+      tl.from(".redeem-sub", { opacity: 0, duration: 0.35, ease: "power2.out" }, 7.15);
+      tl.from("#code-field", { opacity: 0, y: 8, duration: 0.4, ease: "power2.out" }, 7.3);
+      tl.from("#status-pill", { opacity: 0, duration: 0.3, ease: "power2.out" }, 7.5);
+      tl.from("#redeem-btn", { opacity: 0, scale: 0.9, duration: 0.4, ease: "back.out(1.6)" }, 7.55);
+
+      // Type the code
+      for (let i = 0; i < targetCode.length; i++) {
+        tl.call(() => {
+          redeemTyped = i + 1;
+          codeContent.innerHTML = targetCode.slice(0, redeemTyped)
+            .split("").map(c => `<span class="code-char">${c}</span>`).join("");
+        }, [], 7.7 + i * 0.12);
+      }
+
+      // Caret blink
+      tl.set(codeCaret, { opacity: 1 }, 7.7);
+      tl.to(codeCaret, { opacity: 0, duration: 0.4, repeat: 8, yoyo: true, ease: "none" }, 7.7);
+
+      // Click Redeem at 8.8s
+      tl.call(() => { redeemBtn.style.transform = "scale(0.95)"; }, [], 8.8);
+      tl.to(redeemBtn, { scale: 1, duration: 0.18, ease: "power2.out" }, 8.88);
+
+      // Queue position appears
+      tl.call(() => {
+        queueArea.style.display = "block";
+        statusDot.className = "dot connecting";
+        statusLabel.textContent = "Connecting…";
+      }, [], 9.0);
+      tl.from(queuePill, { opacity: 0, scale: 0.9, duration: 0.3, ease: "back.out(1.4)" }, 9.0);
+
+      // Connected — beat-locked: ~9.29s (strong cue)
+      tl.call(() => {
+        statusDot.className = "dot connected";
+        statusLabel.textContent = "Connected";
+        queueArea.style.display = "none";
+      }, [], 9.29);
+
+      // Scene transition
+      tl.call(() => { setVisible("scene-redeem", false); setVisible("scene-game", true); }, [], 11.0);
+
+      // ========== SCENE 4: Gamepad + Countdown (11 - 16s) ==========
+      const stickNub = document.getElementById("stick-nub");
+      const countdownEl = document.getElementById("countdown");
+
+      // Topbar fades in
+      tl.from("#game-topbar", { opacity: 0, y: -8, duration: 0.35, ease: "power2.out" }, 11.0);
+
+      // Game screen + pad
+      tl.from(".game-screen", { opacity: 0, y: 12, duration: 0.4, ease: "power2.out" }, 11.15);
+      tl.from(".game-pad", { opacity: 0, y: 12, duration: 0.4, ease: "power2.out" }, 11.25);
+
+      // Button press sequence — beat-grid aligned
+      // D-pad up
+      tl.call(() => { document.getElementById("dpad-up").classList.add("on"); }, [], 11.8);
+      tl.call(() => { document.getElementById("dpad-up").classList.remove("on"); }, [], 12.1);
+
+      // Stick nudge
+      tl.to(stickNub, { x: -8, y: -14, duration: 0.3, ease: "power2.out" }, 12.0);
+      tl.to(stickNub, { x: 0, y: 0, duration: 0.25, ease: "power2.inOut" }, 12.35);
+
+      // A button press — 12.5s
+      tl.call(() => { document.getElementById("btn-a").classList.add("on"); }, [], 12.5);
+      tl.call(() => { document.getElementById("btn-a").classList.remove("on"); }, [], 12.85);
+      tl.to("#char-sprite", { x: -10, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1 }, 12.5);
+
+      // B button
+      tl.call(() => { document.getElementById("btn-b").classList.add("on"); }, [], 13.0);
+      tl.call(() => { document.getElementById("btn-b").classList.remove("on"); }, [], 13.3);
+
+      // D-pad right
+      tl.call(() => { document.getElementById("dpad-right").classList.add("on"); }, [], 13.5);
+      tl.call(() => { document.getElementById("dpad-right").classList.remove("on"); }, [], 13.8);
+
+      // X button
+      tl.call(() => { document.getElementById("btn-x").classList.add("on"); }, [], 14.0);
+      tl.call(() => { document.getElementById("btn-x").classList.remove("on"); }, [], 14.3);
+
+      // Countdown ticks
+      const countSeq = ["⏱ 90s","⏱ 89s","⏱ 88s","⏱ 87s","⏱ 86s"];
+      tl.set(countdownEl, { textContent: "⏱ 90s" }, 11.0);
+      for (let i = 1; i < countSeq.length; i++) {
+        tl.call(() => { countdownEl.textContent = countSeq[i]; }, [], 11.0 + i * 1.0);
+        tl.fromTo(countdownEl, { scale: 1.06 }, { scale: 1, duration: 0.2, ease: "power2.out" }, 11.0 + i * 1.0);
+      }
+
+      // Scene transition
+      tl.call(() => { setVisible("scene-game", false); setVisible("scene-logo", true); }, [], 16.0);
+
+      // ========== SCENE 5: Logo (16 - 20s) ==========
+      // Logo dot — beat-locked: ~17.47s
+      tl.from(".logo-dot", { opacity: 0, scale: 0.3, duration: 0.5, ease: "back.out(2)" }, 16.0);
+      tl.from(".logo-word", { opacity: 0, y: 16, duration: 0.5, ease: "power2.out" }, 16.15);
+      tl.from("#tagline", { opacity: 0, y: 8, duration: 0.4, ease: "power2.out" }, 16.7);
+
+      // Ambient glow on the dot
+      tl.to(".logo-dot", { boxShadow: "0 0 52px rgba(79,140,255,0.9)", duration: 1.2, ease: "sine.inOut", yoyo: true, repeat: 1 }, 16.8);
+
+      // Fade music out in last 2s
+      tl.to("#bg-music", { volume: 0, duration: 2, ease: "power1.inOut" }, 18.0);
+    </script>
+  </body>
+</html>

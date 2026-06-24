@@ -4,6 +4,14 @@
 
 PlayGate is an **interactive streaming tool** that lets live-stream viewers take timed, token-gated control of a streamer's game console (Nintendo Switch; PC support planned). It is infrastructure for streamers — analogous to OBS or Parsec — not a game operator or game publisher.
 
+<p align="center">
+  <a href="brag-output-2026-06-24-180000/brag.mp4">
+    <img src="https://img.shields.io/badge/▶_Watch_the_launch_video-4f8cff?style=for-the-badge&logo=play&logoColor=white" alt="Watch the launch video" />
+  </a>
+</p>
+
+> 🎬 **[Watch the launch video](brag-output-2026-06-24-180000/brag.mp4)** — 20s overview of the full viewer flow: Twitch chat → token whisper → redeem → gamepad control → live Switch gameplay.
+
 ---
 
 ## What PlayGate Is (and Is Not)
@@ -65,6 +73,7 @@ Token flow: streamer issues tokens → distributes to viewers (e.g. via chat)
 | [`playgate-server/`](./playgate-server/README.md) | Go | SaaS backend REST API: host registration, room management, token issuance, JWT signing, session queue |
 | [`playgate-web/`](./playgate-web/) | TypeScript / Vite | Browser client for viewers (token redemption, queue, WebRTC control) and streamer dashboard |
 | [`playgate-signaling/`](./playgate-signaling/README.md) | TypeScript / Cloudflare Workers | WebRTC signaling server (SDP/ICE exchange); TURN credentials via Cloudflare Realtime |
+| [`playgate-twitch-bot/`](./playgate-twitch-bot/README.md) | TypeScript / Node | Twitch integration — watches chat commands, Channel Points, and events; distributes token codes via whisper with chat fallback |
 
 ---
 

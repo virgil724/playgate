@@ -1,0 +1,2 @@
+Your Twitch chat doesn't just watch your game anymore. They play it.
+PlayGate — token-gated, timed WebRTC control of a real Nintendo Switch.
