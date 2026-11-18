@@ -13,6 +13,7 @@ const (
 	FBKeyframeRequest = 0x01
 	FBFrameReport     = 0x02
 	FBHello           = 0x03
+	FBFragNack        = 0x06
 )
 
 // Feedback message sizes. Messages are fixed-size per type; longer ones are
@@ -22,6 +23,9 @@ const (
 	KeyframeRequestSize = 16
 	FrameReportSize     = 24
 	HelloSize           = 12
+	FragNackMinSize     = 12
+	// FragNackMaxIndices bounds the index list of one FRAG_NACK.
+	FragNackMaxIndices = 255
 )
 
 // HELLO capability bits.
@@ -31,6 +35,7 @@ const (
 	CapAnnexB        = 1 << 2
 	CapFECXOR        = 1 << 3
 	CapFECRS         = 1 << 4
+	CapFragNack      = 1 << 5
 )
 
 // KeyframeRequest reasons.
@@ -71,10 +76,19 @@ type Hello struct {
 	ReportMS uint16
 }
 
+// FragNack is the decoded FRAG_NACK message: the viewer asks for fragments of
+// one frame again. An empty Indices list means "every fragment of the frame"
+// (none of it arrived, so the viewer does not know its fragment count).
+type FragNack struct {
+	Epoch   uint16
+	FrameID uint32
+	Indices []uint16
+}
+
 // ParseFeedback decodes one videofb message. It returns (nil, nil) for an
 // unknown version or type (the receiver must ignore it and never close the
 // channel), and an error for a known type with a truncated body. The returned
-// value is a KeyframeRequest, FrameReport or Hello.
+// value is a KeyframeRequest, FrameReport, Hello or FragNack.
 func ParseFeedback(b []byte) (any, error) {
 	if len(b) < 4 || b[0] != fbVersion {
 		return nil, nil
@@ -110,6 +124,19 @@ func ParseFeedback(b []byte) (any, error) {
 			return nil, fmt.Errorf("rtc: HELLO too short (%d)", len(b))
 		}
 		return Hello{Caps: b[4], MaxFEC: b[5], ReportMS: binary.BigEndian.Uint16(b[6:])}, nil
+	case FBFragNack:
+		if len(b) < FragNackMinSize {
+			return nil, fmt.Errorf("rtc: FRAG_NACK too short (%d)", len(b))
+		}
+		count := int(binary.BigEndian.Uint16(b[6:]))
+		if count > FragNackMaxIndices || len(b) < FragNackMinSize+2*count {
+			return nil, fmt.Errorf("rtc: FRAG_NACK bad count %d for %d bytes", count, len(b))
+		}
+		n := FragNack{Epoch: binary.BigEndian.Uint16(b[4:]), FrameID: binary.BigEndian.Uint32(b[8:])}
+		for i := 0; i < count; i++ {
+			n.Indices = append(n.Indices, binary.BigEndian.Uint16(b[FragNackMinSize+2*i:]))
+		}
+		return n, nil
 	}
 	return nil, nil
 }

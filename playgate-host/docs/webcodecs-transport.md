@@ -221,7 +221,7 @@ required for correctness; a host may ignore it.
 
 | Off | Size | Field        | Notes |
 |-----|------|--------------|-------|
-| 4   | 1    | `caps`       | bit0 WebCodecs H.264 supported (`VideoDecoder.isConfigSupported` true); bit1 hardware accelerated config accepted; bit2 Annex-B without `description` accepted; bit3 can do XOR FEC; bit4 can do RS FEC. |
+| 4   | 1    | `caps`       | bit0 WebCodecs H.264 supported (`VideoDecoder.isConfigSupported` true); bit1 hardware accelerated config accepted; bit2 Annex-B without `description` accepted; bit3 can do XOR FEC; bit4 can do RS FEC; bit5 sends FRAG_NACK (4.5). |
 | 5   | 1    | `max_fec`    | Max `parity_count` viewer will process. The host never sends more parity fragments than this; `0` therefore means "no parity" even if a cap bit is set. Viewers that support FEC send `255`. |
 | 6   | 2    | `report_ms`  | Requested report interval. 0 = default. |
 | 8   | 4    | reserved     | 0 |
@@ -238,6 +238,33 @@ Host replies by sending a keyframe (reason "initial join"); it must not send vid
   FEC parameters are in each fragment header (`parity_count`, `fec_scheme`), and the scheme is
   negotiated by the HELLO cap bits alone, so no out-of-band message is needed for correctness.
 - Unknown `type` or `version`: receiver ignores the message. Never close the channel.
+
+### 4.5 `type = 0x06` FRAG_NACK (viewer to host), 12 + 2·count bytes
+
+Asks the host to send fragments of one frame again. Added after field tests on 4G with 3%
+injected loss: with FEC alone most frames had k=2, m=1, so two lost fragments in one frame
+(about 3% of frames) meant a full KEYFRAME_REQUEST round; WebCodecs froze 14.7 s per minute
+against 1.0 s for RTP with NACK. With FRAG_NACK: 0.66 s.
+
+| Off | Size | Field      | Notes |
+|-----|------|------------|-------|
+| 4   | 2    | `epoch`    | Epoch of the frame. |
+| 6   | 2    | `count`    | Number of indices that follow, 0..255. `0` = every fragment of the frame (none of it arrived, so the viewer does not know `k`). |
+| 8   | 4    | `frame_id` | The frame. |
+| 12  | 2·count | `frag_idx[]` | Data fragment indices to resend. |
+
+Viewer: after `nack_delay` (2 x arrival jitter, 8..30 ms) from a frame's first fragment, if the
+received data plus parity fragments cannot yet rebuild it, request the missing data indices.
+A frame with no fragment at all, between the last delivered frame and a newer arrival, is
+requested with `count = 0` after the same delay. Repeat once after about one RTT. With
+FRAG_NACK the delta frame timeout becomes `max(2 frame intervals, nack_delay + 1.5 RTT + 15 ms)`,
+and a frame missing entirely is declared lost after that timeout instead of the reorder window.
+Count each fragment index once per frame in FRAME_REPORT, so retransmissions do not hide loss.
+
+Host: keeps the wire messages of frames sent in the last 500 ms (at most 128 frames) and
+resends the requested ones on `video`, each at most twice, unless `BufferedAmount` exceeds the
+drop threshold. Unknown frames or epochs are ignored. A host without FRAG_NACK ignores the
+message (unknown type); the viewer then just waits for its longer timeout.
 
 ## 5. Browser pipeline (T12)
 

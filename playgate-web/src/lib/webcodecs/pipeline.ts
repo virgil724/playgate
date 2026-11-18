@@ -18,6 +18,8 @@ import {
   encodeFrameReport,
   encodeHello,
   CAP_FEC_RS,
+  CAP_FRAG_NACK,
+  encodeFragNack,
   CAP_FEC_XOR,
   MAX_FEC_ADVERTISED,
   encodeKeyframeRequest,
@@ -38,6 +40,16 @@ export function keyFrameTimeoutMs(rttMs: number): number {
 
 /** In-flight frame window: enough slots for every frame that arrives while a
  * KEY is still completing, plus slack; never below the old fixed 8. */
+/** Wait before a FRAG_NACK: about two arrival-jitters, 8..30 ms. */
+export function nackDelayMs(jitterMs: number): number {
+  return Math.max(8, Math.min(30, 2 * jitterMs));
+}
+
+/** Delta frame timeout with retransmission: one NACK round trip plus slack. */
+export function deltaTimeoutMs(frameIntervalMs: number, nackDelay: number, rttMs: number): number {
+  return Math.max(2 * frameIntervalMs, nackDelay + 1.5 * rttMs + 15);
+}
+
 export function maxInflightFor(keyTimeoutMs: number, frameIntervalMs: number): number {
   return Math.max(8, Math.ceil(keyTimeoutMs / frameIntervalMs) + 4);
 }
@@ -145,6 +157,7 @@ export class WebCodecsPipeline {
   private gotKey = false;
   private totalComplete = 0;
   private totalLost = 0;
+  private nacksSent = 0;
   private jitterMs = 0;
   private lastSendMs: number | null = null;
   private lastRecvMs = 0;
@@ -168,11 +181,20 @@ export class WebCodecsPipeline {
       KEYFRAME_MIN_INTERVAL_MS,
       keyTimeout,
     );
+    // FRAG_NACK: ask again for fragments that have not arrived after a short
+    // wait, and give a delta frame long enough for one round of that.
+    const nackDelay = () => nackDelayMs(this.jitterMs);
     this.reassembler = new Reassembler({
       maxInflight: () => maxInflightFor(keyTimeout(), this.frameIntervalMs()),
       reorderWaitMs: () => Math.min(5, this.frameIntervalMs()),
-      frameTimeoutMs: () => Math.max(20, 2 * this.frameIntervalMs()),
+      frameTimeoutMs: () => deltaTimeoutMs(this.frameIntervalMs(), nackDelay(), rtt()),
       keyFrameTimeoutMs: keyTimeout,
+      nackDelayMs: nackDelay,
+      nackRetryMs: () => rtt() + 10,
+      onNack: (epoch, frameId, indices) => {
+        this.nacksSent++;
+        this.o.sendFeedback(encodeFragNack(epoch, frameId, indices));
+      },
       onFrame: (f) => this.handleFrame(f),
       onLoss: (l) => {
         dlog("webcodecs", `frame ${l.lostId} lost (epoch ${l.epoch}); requesting keyframe`);
@@ -217,7 +239,7 @@ export class WebCodecsPipeline {
 
     const reportMs = this.o.reportMs ?? DEFAULT_REPORT_MS;
     const caps =
-      CAP_WEBCODECS_H264 | CAP_ANNEXB_NO_DESC | CAP_FEC_XOR | CAP_FEC_RS | (probe.hardware ? CAP_HARDWARE : 0);
+      CAP_WEBCODECS_H264 | CAP_ANNEXB_NO_DESC | CAP_FEC_XOR | CAP_FEC_RS | CAP_FRAG_NACK | (probe.hardware ? CAP_HARDWARE : 0);
     this.o.sendFeedback(encodeHello(caps, MAX_FEC_ADVERTISED, reportMs === DEFAULT_REPORT_MS ? 0 : reportMs));
     this.requester.expectKey(this.now());
     this.keyTimer = setTimeout(() => {
@@ -330,7 +352,26 @@ export class WebCodecsPipeline {
     this.o.sendFeedback(encodeKeyframeRequest(this.reassembler.currentEpoch ?? 0, reason, last, lostId));
   }
 
+  private lastDiagMs = 0;
+
+  /** Debug log of cumulative loss diagnostics, at most every 5 s. */
+  private logDiag(): void {
+    const now = this.now();
+    if (now - this.lastDiagMs < 5000) return;
+    this.lastDiagMs = now;
+    const d = this.reassembler.diag;
+    const fragLoss = d.fragsExpected ? (1 - d.fragsRecv / d.fragsExpected) * 100 : 0;
+    dlog(
+      "webcodecs",
+      `diag frags ${d.fragsRecv}/${d.fragsExpected} (loss ${fragLoss.toFixed(1)}%) recovered ${d.recovered} ` +
+        `lost missing=${d.lostMissing} partial=${d.lostPartial} evicted=${d.lostEvicted} ` +
+        `partial: missingData=${d.partialMissingData} parity ${d.partialParityHave}/${d.partialParityTotal} ` +
+        `nacks ${this.nacksSent}`,
+    );
+  }
+
   private sendReport(): void {
+    this.logDiag();
     const c = this.reassembler.takeCounters();
     this.totalLost += c.framesLost;
     const d = this.decoder?.getStats();

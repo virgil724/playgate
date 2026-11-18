@@ -94,6 +94,7 @@ export function serialDiff16(a: number, b: number): number {
 export const FB_KEYFRAME_REQUEST = 0x01;
 export const FB_FRAME_REPORT = 0x02;
 export const FB_HELLO = 0x03;
+export const FB_FRAG_NACK = 0x06;
 
 export const KEYREASON = {
   unknown: 0,
@@ -109,6 +110,7 @@ export const CAP_HARDWARE = 0x02;
 export const CAP_ANNEXB_NO_DESC = 0x04;
 export const CAP_FEC_XOR = 0x08;
 export const CAP_FEC_RS = 0x10;
+export const CAP_FRAG_NACK = 0x20;
 /** Max parity_count this viewer will process (HELLO max_fec). */
 export const MAX_FEC_ADVERTISED = 255;
 
@@ -144,6 +146,23 @@ export function encodeKeyframeRequest(
   v.setUint8(6, reason);
   v.setUint32(8, lastGoodId >>> 0);
   v.setUint32(12, lostId >>> 0);
+  return out;
+}
+
+/** Max fragment indices in one FRAG_NACK. */
+export const FRAG_NACK_MAX_INDICES = 255;
+
+/**
+ * FRAG_NACK: ask the host to resend fragments of one frame. An empty `indices`
+ * list asks for the whole frame (none of it arrived).
+ */
+export function encodeFragNack(epoch: number, frameId: number, indices: number[]): Uint8Array {
+  const list = indices.slice(0, FRAG_NACK_MAX_INDICES);
+  const { out, v } = prefix(12 + 2 * list.length, FB_FRAG_NACK);
+  v.setUint16(4, epoch & 0xffff);
+  v.setUint16(6, list.length);
+  v.setUint32(8, frameId >>> 0);
+  list.forEach((idx, i) => v.setUint16(12 + 2 * i, idx));
   return out;
 }
 

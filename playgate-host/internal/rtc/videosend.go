@@ -96,10 +96,35 @@ type videoSender struct {
 	// sample, so no report is lost between ABR samples.
 	link        videoLinkSample
 	dropsAtTake uint64
+	// sent keeps the fragments of recently sent frames for FRAG_NACK
+	// retransmission, oldest first.
+	sent []sentFrame
+	// retransmits counts fragments resent on FRAG_NACK (diagnostics).
+	retransmits uint64
+
 	// rttWin holds recent SCTP SRTT samples; its minimum is the uncongested
 	// RTT baseline for queueing-delay detection (see linkStats).
 	rttWin []time.Duration
 }
+
+// sentFrame is one frame's wire messages kept for retransmission.
+type sentFrame struct {
+	epoch   uint16
+	frameID uint32
+	at      time.Time
+	msgs    [][]byte
+	resent  []uint8 // per message: times resent
+}
+
+const (
+	// retransmitKeep bounds how long and how many frames are kept for
+	// FRAG_NACK. A retransmission older than this would arrive after the viewer
+	// gave up on the frame anyway.
+	retransmitKeep      = 500 * time.Millisecond
+	retransmitMaxFrames = 128
+	// retransmitMaxTimes caps resends of one fragment.
+	retransmitMaxTimes = 2
+)
 
 // videoLinkSample is what the viewer reported about the WebCodecs path since
 // the previous takeLinkSample, plus the host's own view of its send queue.
@@ -129,6 +154,10 @@ func (s *videoSender) takeLinkSample() videoLinkSample {
 	s.dropsAtTake = s.framesDropped
 	if s.dc != nil {
 		out.Buffered = s.dc.BufferedAmount()
+	}
+	if out.SenderDropped > 0 {
+		s.log.Info("video sender dropped frames (channel backlog)",
+			"frames", out.SenderDropped, "buffered", out.Buffered)
 	}
 	return out
 }
@@ -252,6 +281,8 @@ func (s *videoSender) handleFeedback(b []byte) {
 		s.link.Jitter = time.Duration(m.JitterMSx10) * time.Millisecond / 10
 		s.link.Reports++
 		s.mu.Unlock()
+	case FragNack:
+		s.retransmit(m)
 	case Hello:
 		s.mu.Lock()
 		s.hello = true
@@ -423,6 +454,62 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 
 	s.mu.Lock()
 	s.framesSent++
+	s.rememberLocked(sentFrame{epoch: meta.Epoch, frameID: meta.FrameID, at: time.Now(), msgs: msgs, resent: make([]uint8, len(msgs))})
 	s.mu.Unlock()
 	return nil
+}
+
+// rememberLocked stores f for retransmission and trims old frames. Caller
+// holds s.mu.
+func (s *videoSender) rememberLocked(f sentFrame) {
+	s.sent = append(s.sent, f)
+	cut := 0
+	for cut < len(s.sent) && (len(s.sent)-cut > retransmitMaxFrames || f.at.Sub(s.sent[cut].at) > retransmitKeep) {
+		cut++
+	}
+	if cut > 0 {
+		s.sent = append(s.sent[:0], s.sent[cut:]...)
+	}
+}
+
+// retransmit resends the fragments a FRAG_NACK asks for, if the frame is
+// still kept and the channel is not backed up.
+func (s *videoSender) retransmit(n FragNack) {
+	s.mu.Lock()
+	dc := s.dc
+	if dc == nil || dc.BufferedAmount() > s.cfg.BufferMax {
+		s.mu.Unlock()
+		return
+	}
+	var out [][]byte
+	for i := range s.sent {
+		f := &s.sent[i]
+		if f.epoch != n.Epoch || f.frameID != n.FrameID {
+			continue
+		}
+		want := func(j int) {
+			if j < len(f.msgs) && f.resent[j] < retransmitMaxTimes {
+				f.resent[j]++
+				out = append(out, f.msgs[j])
+			}
+		}
+		if len(n.Indices) == 0 {
+			for j := range f.msgs {
+				want(j)
+			}
+		} else {
+			for _, j := range n.Indices {
+				want(int(j))
+			}
+		}
+		break
+	}
+	s.retransmits += uint64(len(out))
+	s.mu.Unlock()
+	for _, m := range out {
+		if err := dc.Send(m); err != nil {
+			s.log.Debug("video retransmit failed", "err", err)
+			return
+		}
+	}
 }

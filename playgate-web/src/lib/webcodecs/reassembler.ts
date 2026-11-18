@@ -44,6 +44,18 @@ export interface ReassemblerOptions {
    * timeout (2 frame intervals, 33ms at 60fps) every IDR timed out, the viewer
    * re-requested one, and the stream never recovered. */
   keyFrameTimeoutMs?: () => number;
+  /**
+   * FRAG_NACK: wait this long after a frame's first fragment (or after a
+   * later frame shows a frame is missing entirely) before asking for the
+   * missing fragments again. Undefined disables retransmission requests.
+   */
+  nackDelayMs?: () => number;
+  /** Wait before repeating an unanswered request (about one RTT). */
+  nackRetryMs?: () => number;
+  /** Max requests per frame. */
+  maxNacks?: number;
+  /** Ask for fragments again; empty `indices` = the whole frame. */
+  onNack?: (epoch: number, frameId: number, indices: number[]) => void;
   onFrame: (f: AssembledFrame) => void;
   /** A loss that requires a keyframe (a KEYFRAME_REQUEST should follow). */
   onLoss: (l: LossInfo) => void;
@@ -63,6 +75,23 @@ export interface ReassemblerCounters {
 
 /** Sanity cap so a corrupt header cannot make us allocate gigabytes. */
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+
+/** Cumulative loss diagnostics (debug log only; never reset). */
+export interface ReassemblerDiag {
+  fragsRecv: number;
+  fragsExpected: number;
+  recovered: number;
+  /** Frame lost with no fragment of it ever received. */
+  lostMissing: number;
+  /** Frame lost with some fragments received but not enough to rebuild. */
+  lostPartial: number;
+  /** Frame evicted because too many frames were in flight. */
+  lostEvicted: number;
+  /** For lostPartial: sum of missing data fragments and of parity received. */
+  partialMissingData: number;
+  partialParityHave: number;
+  partialParityTotal: number;
+}
 const SEEN_MEMORY = 64;
 
 interface Slot {
@@ -86,7 +115,20 @@ interface Slot {
   sendMs: number;
   firstMs: number;
   completeMs: number | null;
+  /** FRAG_NACK requests sent for this frame, and when the last one went. */
+  nacks: number;
+  lastNackMs: number;
 }
+
+/** A frame with no fragment received yet, detected from a later frame. */
+interface Gap {
+  noticedMs: number;
+  nacks: number;
+  lastNackMs: number;
+}
+
+/** At most this many entirely missing frames are tracked for requests. */
+const MAX_GAPS = 16;
 
 export class Reassembler {
   private slots = new Map<number, Slot>();
@@ -104,10 +146,24 @@ export class Reassembler {
     highestId: 0,
   };
   private haveHighest = false;
+  readonly diag: ReassemblerDiag = {
+    fragsRecv: 0,
+    fragsExpected: 0,
+    recovered: 0,
+    lostMissing: 0,
+    lostPartial: 0,
+    lostEvicted: 0,
+    partialMissingData: 0,
+    partialParityHave: 0,
+    partialParityTotal: 0,
+  };
   private readonly maxInflightFn: () => number;
   private readonly reorderWaitMs: () => number;
   private readonly frameTimeoutMs: () => number;
   private readonly keyFrameTimeoutMs: () => number;
+  private gaps = new Map<number, Gap>();
+  /** Fragment indices already counted, per recent frame_id (insertion order). */
+  private gotIdx = new Map<number, Set<number>>();
 
   constructor(private readonly o: ReassemblerOptions) {
     const mi = o.maxInflight ?? 8;
@@ -152,6 +208,7 @@ export class Reassembler {
 
   reset(): void {
     this.slots.clear();
+    this.gaps.clear();
     this.lastId = null;
     this.needKey = true;
   }
@@ -171,6 +228,8 @@ export class Reassembler {
       const first = this.epoch === null;
       this.epoch = h.epoch;
       this.slots.clear();
+      this.gaps.clear();
+      this.gotIdx.clear();
       this.lastId = null;
       this.needKey = true;
       this.seen = [];
@@ -180,7 +239,22 @@ export class Reassembler {
     }
 
     const n = h.dataCount + h.parityCount;
-    this.counters.fragsRecv++;
+    // Count each fragment once: a FRAG_NACK retransmission of one that did
+    // arrive is not new data and would make the reported loss rate too low
+    // (or negative). Indices are remembered per frame for the last
+    // SEEN_MEMORY frames, independent of whether the frame was delivered.
+    let got = this.gotIdx.get(h.frameId);
+    if (!got) {
+      got = new Set<number>();
+      this.gotIdx.set(h.frameId, got);
+      if (this.gotIdx.size > SEEN_MEMORY) this.gotIdx.delete(this.gotIdx.keys().next().value as number);
+    }
+    const dup = got.has(h.fragIdx);
+    got.add(h.fragIdx);
+    if (!dup) {
+      this.counters.fragsRecv++;
+      this.diag.fragsRecv++;
+    }
     if (!this.haveHighest || serialDiff32(h.frameId, this.counters.highestId) > 0) {
       this.counters.highestId = h.frameId;
       this.haveHighest = true;
@@ -189,6 +263,7 @@ export class Reassembler {
       this.seen.push(h.frameId);
       if (this.seen.length > SEEN_MEMORY) this.seen.shift();
       this.counters.fragsExpected += n;
+      this.diag.fragsExpected += n;
     }
 
     const isParity = (h.flags & FLAG_PARITY) !== 0 || h.fragIdx >= h.dataCount;
@@ -229,7 +304,10 @@ export class Reassembler {
         sendMs: h.sendMs,
         firstMs: nowMs,
         completeMs: null,
+        nacks: 0,
+        lastNackMs: 0,
       };
+      this.gaps.delete(h.frameId);
       this.slots.set(h.frameId, slot);
       this.evictIfNeeded();
       if (!this.slots.has(h.frameId)) return;
@@ -265,7 +343,78 @@ export class Reassembler {
       else t = s.completeMs + this.reorderWaitMs();
       if (best === null || t < best) best = t;
     }
+    const nd = this.nextNackDeadline();
+    if (nd !== null && (best === null || nd < best)) best = nd;
     return best;
+  }
+
+  private get nackOn(): boolean {
+    return this.o.nackDelayMs !== undefined && this.o.onNack !== undefined;
+  }
+
+  /** Earliest time a FRAG_NACK (or a gap's loss) may become due. */
+  private nextNackDeadline(): number | null {
+    if (!this.nackOn) return null;
+    const max = this.o.maxNacks ?? 2;
+    let best: number | null = null;
+    const take = (t: number) => {
+      if (best === null || t < best) best = t;
+    };
+    for (const s of this.slots.values()) {
+      if (s.completeMs !== null || s.nacks >= max) continue;
+      take(s.nacks === 0 ? s.firstMs + this.o.nackDelayMs!() : s.lastNackMs + this.retryMs());
+    }
+    for (const g of this.gaps.values()) {
+      if (g.nacks < max) take(g.nacks === 0 ? g.noticedMs + this.o.nackDelayMs!() : g.lastNackMs + this.retryMs());
+      take(g.noticedMs + this.frameTimeoutMs());
+    }
+    return best;
+  }
+
+  private retryMs(): number {
+    return this.o.nackRetryMs?.() ?? 50;
+  }
+
+  /** Sends due FRAG_NACKs: incomplete frames that parity cannot finish yet,
+   * and frames between the last delivered one and newer arrivals that have
+   * not shown up at all. */
+  private nackScan(now: number): void {
+    if (!this.nackOn || this.epoch === null) return;
+    const max = this.o.maxNacks ?? 2;
+    const delay = this.o.nackDelayMs!();
+    const retry = this.retryMs();
+    for (const s of this.slots.values()) {
+      if (s.completeMs !== null || s.nacks >= max) continue;
+      if (s.count + s.parityCount >= s.k) continue; // recovery will finish it
+      if (now - (s.nacks === 0 ? s.firstMs : s.lastNackMs) < (s.nacks === 0 ? delay : retry)) continue;
+      const missing: number[] = [];
+      for (let i = 0; i < s.k; i++) if (!s.have[i]) missing.push(i);
+      s.nacks++;
+      s.lastNackMs = now;
+      this.o.onNack!(s.epoch, s.frameId, missing);
+    }
+    // Gaps: ids after the last delivered frame with no slot, below the newest.
+    const next = this.nextId();
+    if (next !== null && !this.needKey) {
+      let newest: number | null = null;
+      for (const s of this.slots.values()) if (newest === null || serialDiff32(s.frameId, newest) > 0) newest = s.frameId;
+      if (newest !== null) {
+        for (let id = next, n = 0; serialDiff32(id, newest) < 0 && n < MAX_GAPS; id = (id + 1) >>> 0, n++) {
+          if (!this.slots.has(id) && !this.gaps.has(id)) this.gaps.set(id, { noticedMs: now, nacks: 0, lastNackMs: 0 });
+        }
+      }
+    }
+    for (const [id, g] of this.gaps) {
+      if (this.lastId !== null && serialDiff32(id, this.lastId) <= 0) {
+        this.gaps.delete(id);
+        continue;
+      }
+      if (g.nacks >= max) continue;
+      if (now - (g.nacks === 0 ? g.noticedMs : g.lastNackMs) < (g.nacks === 0 ? delay : retry)) continue;
+      g.nacks++;
+      g.lastNackMs = now;
+      this.o.onNack!(this.epoch, id, []);
+    }
   }
 
   // ---- internals ----
@@ -353,6 +502,19 @@ export class Reassembler {
       s.count++;
     }
     this.counters.recovered++;
+    this.diag.recovered++;
+  }
+
+  /** Records why a frame is being declared lost (diagnostics only). */
+  private noteLoss(s: Slot | undefined, evicted = false): void {
+    if (evicted) this.diag.lostEvicted++;
+    else if (!s) this.diag.lostMissing++;
+    else {
+      this.diag.lostPartial++;
+      this.diag.partialMissingData += s.k - s.count;
+      this.diag.partialParityHave += s.parityCount;
+      this.diag.partialParityTotal += s.m;
+    }
   }
 
   private evictIfNeeded(): void {
@@ -363,6 +525,7 @@ export class Reassembler {
       }
       if (!oldest) return;
       this.slots.delete(oldest.frameId);
+      this.noteLoss(oldest, true);
       this.lose(oldest.frameId);
     }
   }
@@ -373,6 +536,7 @@ export class Reassembler {
 
   /** Declares `id` lost: drop deltas, wait for KEY, notify. */
   private lose(id: number): void {
+    this.gaps.clear();
     this.counters.framesLost++;
     this.needKey = true;
     for (const [sid, s] of this.slots) if (!s.key) this.slots.delete(sid);
@@ -396,6 +560,7 @@ export class Reassembler {
   }
 
   private process(now: number): void {
+    this.nackScan(now);
     for (let guard = 0; guard < 1024; guard++) {
       const sorted = this.sortedSlots();
 
@@ -430,7 +595,12 @@ export class Reassembler {
       //    longer than the reorder window, or has `next` itself timed out?
       let lose = false;
       if (ns && now - ns.firstMs >= this.timeoutFor(ns)) lose = true;
-      if (!lose) {
+      if (!lose && this.nackOn) {
+        // With retransmission a missing frame gets the full frame timeout
+        // (counted from when the gap was noticed), not the reorder window.
+        const g = this.gaps.get(next);
+        if (!ns && g && now - g.noticedMs >= this.frameTimeoutMs()) lose = true;
+      } else if (!lose) {
         for (const s of sorted) {
           if (s.completeMs !== null && s.frameId !== next && now - s.completeMs >= this.reorderWaitMs()) {
             lose = true;
@@ -439,6 +609,7 @@ export class Reassembler {
         }
       }
       if (lose) {
+        this.noteLoss(ns);
         this.lose(next);
         continue;
       }
@@ -453,6 +624,7 @@ export class Reassembler {
         if (now - (s.completeMs ?? s.firstMs) >= this.keyFrameTimeoutMs()) this.slots.delete(s.frameId);
       } else if (s.completeMs === null && now - s.firstMs >= this.timeoutFor(s)) {
         this.slots.delete(s.frameId);
+        this.noteLoss(s);
         this.lose(s.frameId);
       }
     }
