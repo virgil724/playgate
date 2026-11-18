@@ -61,14 +61,17 @@ audio:
   bitrate: 128000            # Opus bitrate (bits/sec)
   # ffmpeg_path:             # optional; defaults to encoder.ffmpeg_path
 
-# Adaptive bitrate (T14). When enabled the host samples WebRTC stats (packet
-# loss, RTT) and adjusts the encoder bitrate within [min_bitrate, max_bitrate]
+# Adaptive bitrate. When enabled, one host-level loop samples WebRTC stats (loss,
+# RTT) and adjusts the shared encoder bitrate within [min_bitrate, max_bitrate]
 # using AIMD: loss above loss_threshold -> multiplicative decrease; a sustained
-# clean link -> additive increase. Changes are debounced by cooldown_seconds and
-# applied by restarting the ffmpeg subprocess (keyframe gating hides the blip).
+# clean link -> additive increase. With several viewers the one holding control
+# decides, otherwise the worst viewer; with no viewers the bitrate is held.
+# Timing depends on the encoder backend: with a live-bitrate backend
+# (encoder.backend: libav) changes apply on the next frame, so cooldown is 500ms
+# and the sample interval defaults to 500ms. With the CLI backend every change
+# restarts ffmpeg, so cooldown_seconds / sample_interval_ms apply (keyframe
+# gating hides the blip).
 # Disabled by default: the encoder runs at the fixed encoder.bitrate.
-# NOTE: not wired up at present. Viewers share one encoder, so per-viewer ABR
-# would have them fight over its bitrate; enabling this has no effect.
 abr:
   enabled: false
   min_bitrate: 1000000    # floor (bits/sec) — bad network degrades to this, never stalls

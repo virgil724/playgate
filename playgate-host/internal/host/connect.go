@@ -65,6 +65,7 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			ice:     ice,
 			poll:    poll,
 		}
+		cm.abrReg = startHostABR(ctx, log, cfg, enc, cm.sink)
 		return cm.loop(ctx)
 	}
 }
@@ -128,6 +129,8 @@ type connManager struct {
 	sink    *inputSink
 	ice     []webrtc.ICEServer
 	poll    time.Duration
+
+	abrReg *viewerStatsRegistry // host-level ABR input; nil when ABR is disabled
 
 	mu       sync.Mutex
 	sessions map[string]*viewerSession // keyed by viewerId
@@ -304,8 +307,9 @@ func (c *connManager) applyAnswer(sess *viewerSession, env viewerEnvelope) {
 // every other viewer. A late joiner instead waits for the next scheduled GOP
 // keyframe (per-peer gating in rtc.Peer.WriteSample).
 //
-// ABR is intentionally not run per viewer: it drives the single shared encoder
-// bitrate, so N viewers would fight over it. Multi-viewer runs at fixed bitrate.
+// ABR is not run per viewer (N viewers would fight over the single shared
+// encoder). One host-level loop (startHostABR) aggregates the viewers
+// registered here; see abr_multi.go.
 func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSession) {
 	log := c.log.With("viewer", id)
 	sctx, cancel := context.WithCancel(ctx)
@@ -335,6 +339,10 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 	}
 	defer peer.Close()
 	sess.setPeer(peer)
+	if c.abrReg != nil {
+		c.abrReg.Register(id, peer)
+		defer c.abrReg.Unregister(id)
+	}
 
 	c.router.AddSink(peer)
 	defer c.router.RemoveSink(peer)

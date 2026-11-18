@@ -97,11 +97,14 @@ never silently downgrades.
 fed by WebRTC stats (`PeerConnection.GetStats()` remote-inbound loss/RTT, sampled
 every `abr.sample_interval_ms`). Loss above `abr.loss_threshold` triggers a
 multiplicative decrease; a sustained clean link triggers an additive increase;
-the target is clamped to `[abr.min_bitrate, abr.max_bitrate]` and changes are
-debounced by `abr.cooldown_seconds`. Because ffmpeg cannot retune a running
-subprocess, a bitrate change restarts the encoder; the fresh IDR plus the rtc
-layer's keyframe gating hides the restart so a struggling viewer's quality drops
-instead of the stream stalling.
+the target is clamped to `[abr.min_bitrate, abr.max_bitrate]`. One host-level loop
+(not per viewer) drives the single shared encoder: if a viewer holds control its
+stats are used, otherwise the worst viewer sample; with no viewers the bitrate is
+held. Timing is backend-aware: with a live-bitrate encoder (`encoder.backend:
+libav`) a change applies on the next frame, so the cooldown is 500ms and the
+sample interval defaults to 500ms; with the CLI backend each change restarts the
+ffmpeg subprocess (keyframe gating hides the restart), so `abr.cooldown_seconds`
+(default 10s) and `abr.sample_interval_ms` (default 2s) apply.
 
 Full glass-to-glass latency must be measured on real hardware: film the Switch
 screen and the browser window side by side with a millisecond clock overlay and
