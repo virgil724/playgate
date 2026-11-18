@@ -8,9 +8,11 @@
  *  - a later complete frame waits `reorderWaitMs` for the missing one, then the
  *    missing one is declared lost; an incomplete frame is lost after `frameTimeoutMs`
  *  - after a loss every delta is dropped until a KEY frame completes
- *  - no FEC (parity fragments are counted but ignored) and no concealment
+ *  - FEC: parity fragments (XOR / RS, see fec.ts) are used to recover missing data
+ *    fragments before a frame is declared lost; no concealment
  */
 
+import { FEC_RS, FEC_XOR, fecRecover } from "./fec";
 import { FLAG_KEY, FLAG_PARITY, type Fragment, serialDiff16, serialDiff32 } from "./protocol";
 
 export interface AssembledFrame {
@@ -47,6 +49,8 @@ export interface ReassemblerCounters {
   fragsExpected: number;
   framesComplete: number;
   framesLost: number;
+  /** Frames completed thanks to parity (FRAME_REPORT `recovered`). */
+  recovered: number;
   highestId: number;
 }
 
@@ -66,6 +70,11 @@ interface Slot {
   buf: Uint8Array;
   have: Uint8Array;
   count: number;
+  /** FEC: scheme, parity shards received (index j = frag_idx - k). */
+  fecScheme: number;
+  m: number;
+  parity: (Uint8Array | null)[];
+  parityCount: number;
   ptsUs: number;
   sendMs: number;
   firstMs: number;
@@ -84,6 +93,7 @@ export class Reassembler {
     fragsExpected: 0,
     framesComplete: 0,
     framesLost: 0,
+    recovered: 0,
     highestId: 0,
   };
   private haveHighest = false;
@@ -115,6 +125,7 @@ export class Reassembler {
       fragsExpected: 0,
       framesComplete: 0,
       framesLost: 0,
+      recovered: 0,
       highestId: c.highestId,
     };
     return c;
@@ -161,8 +172,18 @@ export class Reassembler {
       this.counters.fragsExpected += n;
     }
 
-    // Parity is not implemented (no FEC): receivers treat it as absent.
-    if ((h.flags & FLAG_PARITY) !== 0 || h.fragIdx >= h.dataCount) return;
+    const isParity = (h.flags & FLAG_PARITY) !== 0 || h.fragIdx >= h.dataCount;
+    // Parity of an unknown scheme (or a malformed index) is treated as absent.
+    if (isParity) {
+      const ok =
+        (h.fecScheme === FEC_XOR || h.fecScheme === FEC_RS) &&
+        h.parityCount > 0 &&
+        h.dataCount >= 2 &&
+        n <= 255 &&
+        h.fragIdx >= h.dataCount &&
+        h.fragIdx < n;
+      if (!ok) return;
+    }
     if (this.lastId !== null && serialDiff32(h.frameId, this.lastId) <= 0) return; // late
     const key = (h.flags & FLAG_KEY) !== 0;
     if (this.needKey && !key && !this.keySlotBefore(h.frameId)) return;
@@ -181,6 +202,10 @@ export class Reassembler {
         buf: new Uint8Array(h.frameSize),
         have: new Uint8Array(h.dataCount),
         count: 0,
+        fecScheme: h.fecScheme,
+        m: h.parityCount,
+        parity: [],
+        parityCount: 0,
         ptsUs: h.ptsUs,
         sendMs: h.sendMs,
         firstMs: nowMs,
@@ -193,7 +218,11 @@ export class Reassembler {
       return;
     }
 
-    if (!this.place(slot, h.fragIdx, frag.payload)) return;
+    if (slot.k + slot.m !== n || (isParity && slot.fecScheme !== h.fecScheme)) return;
+    if (isParity) {
+      if (!this.placeParity(slot, h.fragIdx - slot.k, frag.payload)) return;
+    } else if (!this.place(slot, h.fragIdx, frag.payload)) return;
+    if (slot.completeMs === null) this.tryRecover(slot);
     if (slot.count === slot.k && slot.completeMs === null) slot.completeMs = nowMs;
     this.process(nowMs);
   }
@@ -259,6 +288,52 @@ export class Reassembler {
     s.have[idx] = 1;
     s.count++;
     return true;
+  }
+
+  /** Stores one parity shard. Its length is the stride. */
+  private placeParity(s: Slot, j: number, payload: Uint8Array): boolean {
+    if (j < 0 || j >= s.m || s.parity[j] || payload.length === 0) return false;
+    if (s.stride === 0) {
+      const stride = payload.length;
+      if ((s.k - 1) * stride >= s.frameSize || s.k * stride < s.frameSize) return false;
+      s.stride = stride;
+    } else if (payload.length !== s.stride) {
+      return false;
+    }
+    s.parity[j] = payload.slice();
+    s.parityCount++;
+    return true;
+  }
+
+  /** Recovers missing data fragments from parity once enough shards exist. */
+  private tryRecover(s: Slot): void {
+    if (s.parityCount === 0 || s.stride === 0 || s.count === s.k) return;
+    if (s.count + s.parityCount < s.k) return;
+    const stride = s.stride;
+    const shards: (Uint8Array | null)[] = new Array(s.k + s.m).fill(null);
+    for (let i = 0; i < s.k; i++) {
+      if (!s.have[i]) continue;
+      const off = i * stride;
+      const len = Math.min(stride, s.frameSize - off);
+      if (len === stride) shards[i] = s.buf.subarray(off, off + stride);
+      else {
+        const pad = new Uint8Array(stride); // zero-padded short last shard
+        pad.set(s.buf.subarray(off, off + len));
+        shards[i] = pad;
+      }
+    }
+    for (let j = 0; j < s.m; j++) shards[s.k + j] = s.parity[j] ?? null;
+    const missing: number[] = [];
+    for (let i = 0; i < s.k; i++) if (!s.have[i]) missing.push(i);
+    if (fecRecover(s.fecScheme, s.k, s.m, shards) < 0) return;
+    for (const i of missing) {
+      const off = i * stride;
+      const len = Math.min(stride, s.frameSize - off);
+      s.buf.set((shards[i] as Uint8Array).subarray(0, len), off);
+      s.have[i] = 1;
+      s.count++;
+    }
+    this.counters.recovered++;
   }
 
   private evictIfNeeded(): void {

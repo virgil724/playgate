@@ -95,6 +95,8 @@ webrtc:
   video_fragment_bytes: 1200        # DataChannel message size, 600-1400
   video_buffer_max_bytes: 262144    # drop a whole frame above this BufferedAmount
   video_idr_pace_ms: 8              # spread large IDRs over this many ms
+  video_fec: off                    # off | xor | rs (parity only to viewers that advertise it)
+  video_fec_ratio: 0.1              # parity fragments per data fragment, 0-1
   video_keyframe_min_interval_ms: 250  # coalesce viewer keyframe requests
 
 # Controller input target (T5).

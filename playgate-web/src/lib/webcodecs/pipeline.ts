@@ -17,6 +17,9 @@ import {
   NO_FRAME_ID,
   encodeFrameReport,
   encodeHello,
+  CAP_FEC_RS,
+  CAP_FEC_XOR,
+  MAX_FEC_ADVERTISED,
   encodeKeyframeRequest,
   parseFragment,
 } from "./protocol";
@@ -187,8 +190,9 @@ export class WebCodecsPipeline {
     this.renderer.start();
 
     const reportMs = this.o.reportMs ?? DEFAULT_REPORT_MS;
-    const caps = CAP_WEBCODECS_H264 | CAP_ANNEXB_NO_DESC | (probe.hardware ? CAP_HARDWARE : 0);
-    this.o.sendFeedback(encodeHello(caps, 0, reportMs === DEFAULT_REPORT_MS ? 0 : reportMs));
+    const caps =
+      CAP_WEBCODECS_H264 | CAP_ANNEXB_NO_DESC | CAP_FEC_XOR | CAP_FEC_RS | (probe.hardware ? CAP_HARDWARE : 0);
+    this.o.sendFeedback(encodeHello(caps, MAX_FEC_ADVERTISED, reportMs === DEFAULT_REPORT_MS ? 0 : reportMs));
     this.requester.expectKey(this.now());
     this.keyTimer = setTimeout(() => {
       if (!this.gotKey) this.fallback(`no complete keyframe within ${NO_KEYFRAME_TIMEOUT_MS}ms of HELLO`);
@@ -311,7 +315,7 @@ export class WebCodecsPipeline {
         framesLost: c.framesLost,
         fragsRecv: c.fragsRecv,
         fragsExpected: c.fragsExpected,
-        recovered: 0,
+        recovered: c.recovered,
         decodeQueue: d?.queue ?? 0,
         jitterMsX10: this.jitterMs * 10,
         decMsX10: (d?.decodeMsEma ?? 0) * 10,

@@ -124,6 +124,13 @@ func FragmentCount(frameSize, stride int) int {
 // (message size minus VideoHeaderSize). It returns an error for an empty frame
 // or one needing more than 65535 fragments. No FEC parity is produced (m=0).
 func FragmentFrame(meta FrameMeta, au []byte, stride int) ([][]byte, error) {
+	return FragmentFrameFEC(meta, au, stride, FECNone, 0)
+}
+
+// FragmentFrameFEC is FragmentFrame plus m parity fragments (indices k..k+m-1,
+// FlagParity, fec_scheme set, payload length stride) appended after the data
+// fragments. scheme FECNone or m == 0 produces no parity.
+func FragmentFrameFEC(meta FrameMeta, au []byte, stride, scheme, m int) ([][]byte, error) {
 	if stride <= 0 {
 		return nil, errors.New("rtc: fragment stride must be positive")
 	}
@@ -134,7 +141,13 @@ func FragmentFrame(meta FrameMeta, au []byte, stride int) ([][]byte, error) {
 	if k > 65535 {
 		return nil, fmt.Errorf("rtc: frame of %d bytes needs %d fragments", len(au), k)
 	}
-	out := make([][]byte, 0, k)
+	if scheme == FECNone || m < 0 {
+		m = 0
+	}
+	if m > 0 && (k < 2 || k+m > MaxFECShards) {
+		return nil, fmt.Errorf("rtc: fec not allowed for k=%d m=%d", k, m)
+	}
+	out := make([][]byte, 0, k+m)
 	h := VideoHeader{
 		Version:   VideoHeaderVersion,
 		Flags:     meta.Flags,
@@ -146,6 +159,11 @@ func FragmentFrame(meta FrameMeta, au []byte, stride int) ([][]byte, error) {
 		Codec:     CodecH264,
 		SendMS:    meta.SendMS,
 	}
+	if m > 0 {
+		h.ParityCount = uint16(m)
+		h.FECScheme = uint8(scheme)
+	}
+	var shards [][]byte
 	for i := 0; i < k; i++ {
 		lo := i * stride
 		hi := lo + stride
@@ -157,6 +175,25 @@ func FragmentFrame(meta FrameMeta, au []byte, stride int) ([][]byte, error) {
 		h.Encode(msg)
 		copy(msg[VideoHeaderSize:], au[lo:hi])
 		out = append(out, msg)
+		if m > 0 {
+			sh := make([]byte, stride) // zero-padded last shard
+			copy(sh, au[lo:hi])
+			shards = append(shards, sh)
+		}
+	}
+	if m > 0 {
+		par, err := fecEncode(scheme, shards, m)
+		if err != nil {
+			return nil, err
+		}
+		h.Flags = meta.Flags | FlagParity
+		for j, p := range par {
+			msg := make([]byte, VideoHeaderSize+stride)
+			h.FragIdx = uint16(k + j)
+			h.Encode(msg)
+			copy(msg[VideoHeaderSize:], p)
+			out = append(out, msg)
+		}
 	}
 	return out, nil
 }

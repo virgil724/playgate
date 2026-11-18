@@ -328,6 +328,8 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		VideoFragmentBytes:  c.cfg.WebRTC.VideoFragmentBytes,
 		VideoBufferMaxBytes: c.cfg.WebRTC.VideoBufferMaxBytes,
 		VideoIDRPaceMS:      c.cfg.WebRTC.VideoIDRPaceMS,
+		VideoFEC:            c.cfg.WebRTC.VideoFEC,
+		VideoFECRatio:       c.cfg.WebRTC.VideoFECRatio,
 	}
 	if c.kf != nil {
 		rcfg.OnVideoKeyframeRequest = c.kf.Request
