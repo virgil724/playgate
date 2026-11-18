@@ -371,8 +371,67 @@ textarea {
   font-size: 13px;
 }
 
+/* ---------- Phone layouts ----------
+ * .room is a full-height flex column and .video-wrap takes what is left. On a
+ * phone the virtual gamepad is taller than that, so the video used to collapse
+ * to zero height (and the fixed-height page could not scroll to it). */
+
+/* Narrow screens: keep the two gamepad clusters side by side, a bit smaller,
+ * and drop the keyboard legend (no keyboard on a phone). */
 @media (max-width: 600px) {
   .gamepad {
-    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 8px;
+  }
+  .gamepad .stick {
+    width: 96px;
+    height: 96px;
+  }
+  .gamepad .gp-btn:not(.gp-small) {
+    width: 48px;
+    height: 48px;
+  }
+  .gamepad .legend {
+    display: none;
+  }
+}
+
+/* Portrait phone: the video always keeps a 16:9 box; the gamepad sits below
+ * it and the page scrolls if both do not fit. */
+@media (orientation: portrait) and (max-width: 900px) {
+  .room {
+    height: auto;
+    min-height: 100%;
+  }
+  .video-wrap {
+    flex: none;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+  }
+}
+
+/* Landscape phone: the gamepad overlays the video like a mobile game, left
+ * cluster on the left edge, right cluster on the right edge. Only the
+ * clusters take touches, so the video stays visible between them. */
+@media (orientation: landscape) and (max-height: 600px) {
+  .gamepad {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    background: transparent;
+    border-top: none;
+    pointer-events: none;
+  }
+  .gamepad .pad-cluster {
+    pointer-events: auto;
+    opacity: 0.75;
+  }
+  .gamepad .legend {
+    display: none;
   }
 }
