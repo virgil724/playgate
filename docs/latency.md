@@ -60,3 +60,41 @@
 - CLI 30fps → libav 60fps：再 −38ms（129 → 91）。主要來自 60fps：擷取等待和每張畫面的間隔都減半。這一步沒有拆開 backend 和 fps 各自的貢獻。
 - 總計：p50 154 → 91（約 −41%），p90 173 → 112。
 - CLI 後端收到補關鍵影格請求時會重啟 ffmpeg，畫面會停一下（量測期間共 8 次）；試跑時，這個停頓曾讓按鍵偵測逾時。libav 不需要重啟。
+
+## 掉包與限速（2026-11-19 01:00–01:18，4G LTE，Android Chrome）
+
+### 方法
+
+- 用 [clumsy 0.3](https://github.com/jagt/clumsy)（WinDivert）在 host 電腦上動手腳，filter 是 `outbound and udp and udp.DstPort != 53`，只影響 host 送出的 UDP。
+- 觀眾頁執行凍結偵測：監看 testsrc 左上角的 `frame N` 白字，每一張新畫面都會改變它。超過 150ms 沒變就算一次凍結。每組 60 秒。
+- 一律 60fps。CLI 那兩組關閉 ABR（舊流程本來就沒有接 ABR），libav 那兩組開啟 ABR。
+
+### 3% 隨機掉包
+
+| 組合 | 傳輸 | 凍結次數 | 累計凍結 | 最長 | 畫面更新/秒 |
+|---|---|---|---|---|---|
+| A. CLI | RTP | 3 | 2.6 s | 1368 ms | 43.5 |
+| B. CLI + intra-refresh | RTP | — | 60 s（全黑或全凍） | — | 0 |
+| C. libav + PLI | RTP | 6 | 1.0 s | 183 ms | 46.0 |
+| D. libav + FEC rs 0.2 | WebCodecs | 47 | 14.7 s | 767 ms | 31.2 |
+
+- **C 最好**：RTP 的 NACK 重傳補回大部分掉包，補不回來時 PLI 會立刻補一張 IDR，最長凍結 183ms。
+- **A**：凍結次數少，但每次都要等下一個 GOP（約 1～1.4 秒）才恢復。
+- **B 不可用**：
+  - 一開始完全黑畫面。這是 bug：觀眾加入時補的 IDR 在連線完成前就送出並被丟棄，已在 commit `74876c2` 修正。
+  - 修正後能解出第一張，但只要一次掉包沒補回就永久凍結。Chrome 的 WebRTC 接收端畫面接不上時，會停下來等真正的關鍵影格，不接受 intra-refresh 的滾動恢復；CLI 後端又不回應 PLI。結論：**intra-refresh 對瀏覽器觀眾沒有用**。
+- **D 很差，待查**：3% 封包掉落時，host 收到的分片遺失率回報是 7～10%（一個 SCTP 封包可能裝多個分片），20% 的 RS 同位分片看起來沒有發揮作用。ABR 也因此降到下限 1 Mbps。WebCodecs 傳輸在有掉包的網路上目前明顯輸給 RTP。
+
+### 限速 150 KB/s（約 1.2 Mbps），libav + GCC，RTP
+
+- GCC 有反應：限速後約 14 秒，碼率從 3.0 Mbps 降到 1.2 Mbps，之後停在 1.0 Mbps。
+- 但 GCC 的估計值直接掉到下限 100 kbps（`gcc_target=100000`），明顯反應過度。編碼器卻被 `abr.min_bitrate`（1 Mbps）擋住，平滑處理也讓下降很慢。
+- 結果是碼率一直貼著上限：前 60 秒凍結 72 次、累計 36 秒；之後 30 秒仍凍結 35 次、累計 12.8 秒。
+- 待改：
+  - 查 GCC 為什麼掉到地板（可能是 clumsy 的 bandwidth 模組直接丟封包，而不是排隊）；
+  - GCC 模式下 `min_bitrate` 的預設值；
+  - 下降時不要平滑處理，要立刻降。
+
+### avcC fallback
+
+在手機頁面載入前，用 CDP 注入腳本，讓 `VideoDecoder.configure` 拒絕沒有 `description` 的設定（模擬不支援 Annex-B 的瀏覽器）。網頁記錄到 `annex-b rejected; switching to avcC mode`，改用 `mode=avcc` 後正常解碼（45 fps、lost 0）。
