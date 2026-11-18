@@ -22,9 +22,9 @@ on:
         required: true
         type: string
       ffmpeg_version:
-        description: "FFmpeg release to build (must be 6.1.x to match go-astiav)"
+        description: "FFmpeg release to build (must be 7.1.x to match go-astiav)"
         required: false
-        default: "6.1.1"
+        default: "7.1.5"
         type: string
       ref:
         description: "Git ref of playgate source to build (default: the ref this workflow runs on)"

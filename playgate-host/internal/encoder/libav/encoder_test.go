@@ -185,6 +185,47 @@ func TestSetBitrateReducesSize(t *testing.T) {
 	}
 }
 
+func TestIntraRefresh(t *testing.T) {
+	o := testOpts(1_000_000, 10) // GOP 10: periodic IDRs would show within 40 frames
+	o.IntraRefresh = true
+	h := newHarness(t, o)
+	defer h.end()
+	for i := 0; i < 40; i++ {
+		p := h.next()
+		ts := nalTypes(p.Data)
+		if i == 0 {
+			if !p.IsKeyframe || !has(ts, 5) || !has(ts, 7) || !has(ts, 8) {
+				t.Fatalf("first AU: key=%v nals=%v, want in-band SPS/PPS + IDR", p.IsKeyframe, ts)
+			}
+			continue
+		}
+		if has(ts, 5) {
+			t.Fatalf("frame %d: IDR (NAL 5) with intra refresh enabled, nals=%v", i, ts)
+		}
+	}
+
+	// A consumer that stops reading drops packets; with intra refresh no IDR will
+	// ever come, so the emitter must not wait for one and must resume on its own.
+	for i := 0; i < 30; i++ {
+		h.in <- synthFrame(h.n, h.rng)
+		h.n++
+	}
+	time.Sleep(500 * time.Millisecond) // let the encoder finish its queue
+	for drained := false; !drained; {
+		select {
+		case <-h.enc.Packets():
+		default:
+			drained = true
+		}
+	}
+	for i := 0; i < 10; i++ {
+		p := h.next()
+		if has(nalTypes(p.Data), 5) {
+			t.Fatalf("frame after drop %d: unexpected IDR", i)
+		}
+	}
+}
+
 func TestCaps(t *testing.T) {
 	enc, err := New(nil, testOpts(1_000_000, 30), make(chan core.VideoFrame))
 	if err != nil {

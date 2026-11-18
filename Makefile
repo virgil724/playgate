@@ -67,12 +67,12 @@ host-linux-amd64: $(DIST)
 # Build tag `libav` => internal/encoder/libav (go-astiav, links FFmpeg libs via
 # pkg-config). This is a NATIVE build: cgo cannot cross-compile here, so run
 # build-libav-amd64 on an amd64 Linux box and build-libav-arm64 on an arm64
-# Linux box (e.g. Raspberry Pi, ubuntu-24.04-arm runner), or use
+# Linux box (e.g. Raspberry Pi, arm64 runner), or use
 # `docker buildx build --target host-libav` which builds each platform natively
 # (QEMU for the foreign one).
 # Requires: gcc, pkg-config, libavcodec-dev libavformat-dev libavutil-dev
 #           libswscale-dev libavfilter-dev libavdevice-dev libswresample-dev
-# FFmpeg major must match go-astiav (FFmpeg 6.1 on Ubuntu 24.04; see
+# FFmpeg major must match go-astiav (FFmpeg 7.1 on Debian trixie; see
 # docker/host.Dockerfile).
 
 define BUILD_LIBAV

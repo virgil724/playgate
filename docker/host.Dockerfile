@@ -69,13 +69,12 @@ COPY playgate-host/nxbt-daemon/ /out/nxbt-daemon/
 # No --platform=$BUILDPLATFORM here: cgo links the target arch's FFmpeg libs, so
 # each platform is built natively (QEMU for the foreign arch under buildx).
 #
-# FFmpeg version pinning: base is ubuntu:24.04 (FFmpeg 6.1: libavcodec60,
-# libavformat60, libavutil58, libswscale7, libswresample4, libavfilter9,
-# libavdevice60) so this image matches the CI libav jobs, which run on
-# ubuntu-24.04 / ubuntu-24.04-arm. go-astiav must be the release built for
-# FFmpeg 6.1. For comparison: Debian bookworm ships FFmpeg 5.1 and trixie
-# ships 7.1 -- either would mismatch CI, so neither is used for libav.
-FROM ubuntu:24.04 AS builder-libav
+# FFmpeg version pinning: base is debian:trixie (FFmpeg 7.1: libavcodec61,
+# libavformat61, libavutil59, libswscale8, libswresample5, libavfilter10,
+# libavdevice61) so this image matches the CI libav jobs, which run in a
+# debian:trixie container. go-astiav must be a release for FFmpeg 7.x (see
+# go.mod). Debian bookworm ships FFmpeg 5.1 and is not used for libav.
+FROM debian:trixie AS builder-libav
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -100,7 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Go toolchain from the official image (multi-arch; resolves to the native arch)
-COPY --from=golang:1.25-bookworm /usr/local/go /usr/local/go
+COPY --from=golang:1.25-trixie /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
 WORKDIR /src
@@ -124,22 +123,22 @@ COPY playgate-host/nxbt-daemon/ /out/nxbt-daemon/
 # ── Stage 1c: host-libav runtime (target: host-libav) ────────────────────────
 # Build: docker buildx build --platform linux/amd64,linux/arm64 \
 #          --target host-libav -f docker/host.Dockerfile -t ...:libav --push .
-# Same contents as `runtime` plus the FFmpeg 6.1 shared libs the libav binary
+# Same contents as `runtime` plus the FFmpeg 7.1 shared libs the libav binary
 # links against (the ffmpeg CLI is kept for encoder.backend: cli).
-FROM ubuntu:24.04 AS host-libav
+FROM debian:trixie AS host-libav
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       ffmpeg \
-      libavcodec60 \
-      libavformat60 \
-      libavutil58 \
-      libswscale7 \
-      libavfilter9 \
-      libavdevice60 \
-      libswresample4 \
+      libavcodec61 \
+      libavformat61 \
+      libavutil59 \
+      libswscale8 \
+      libavfilter10 \
+      libavdevice61 \
+      libswresample5 \
       bluez \
       bluetooth \
       git \

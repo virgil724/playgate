@@ -165,6 +165,9 @@ func (e *Encoder) open(srcFmt astiav.PixelFormat) error {
 	cc.SetFramerate(astiav.NewRational(o.FPS, 1))
 	cc.SetGopSize(o.GOPSize)
 	cc.SetBitRate(int64(o.Bitrate))
+	cc.SetRateControlMaxRate(int64(o.Bitrate))
+	cc.SetRateControlBufferSize(ffmpeg.VBVBufsize(o.Bitrate, o.FPS))
+	cc.SetMaxBFrames(0)
 	// Low delay, and NO global header: SPS/PPS must be in-band in front of every
 	// IDR so a viewer that joins or recovers mid-stream can decode.
 	cc.SetFlags(astiav.NewCodecContextFlags(astiav.CodecContextFlagLowDelay))
@@ -179,11 +182,9 @@ func (e *Encoder) open(srcFmt astiav.PixelFormat) error {
 	}
 	g := strconv.Itoa(o.GOPSize)
 	opts := [][2]string{
-		// AVCodecContext options (parsed from the dictionary by avcodec_open2).
-		{"maxrate", strconv.Itoa(o.Bitrate)},
-		{"bufsize", strconv.Itoa(ffmpeg.VBVBufsize(o.Bitrate, o.FPS))},
+		// AVCodecContext options (parsed from the dictionary by avcodec_open2);
+		// bit rate, max rate, VBV buffer and B-frames use typed setters above.
 		{"keyint_min", g},
-		{"bf", "0"},
 		{"profile", "baseline"},
 	}
 	switch e.codecName {
@@ -221,24 +222,21 @@ func (e *Encoder) open(srcFmt astiav.PixelFormat) error {
 	if err := cc.Open(codec, d); err != nil {
 		return fmt.Errorf("libav: open %s: %w", e.codecName, err)
 	}
-	if err := checkCtx(cc); err != nil {
-		return err
-	}
 
 	// Source frame in the capture format, destination frame in the encoder's.
 	e.srcFrame = astiav.AllocFrame()
 	e.srcFrame.SetWidth(o.Width)
 	e.srcFrame.SetHeight(o.Height)
 	e.srcFrame.SetPixelFormat(srcFmt)
-	if err := allocFrameBuffer(e.srcFrame); err != nil {
-		return err
+	if err := e.srcFrame.AllocBuffer(0); err != nil {
+		return fmt.Errorf("libav: allocate source frame buffer: %w", err)
 	}
 	e.dstFrame = astiav.AllocFrame()
 	e.dstFrame.SetWidth(o.Width)
 	e.dstFrame.SetHeight(o.Height)
 	e.dstFrame.SetPixelFormat(e.encPixFmt)
-	if err := allocFrameBuffer(e.dstFrame); err != nil {
-		return err
+	if err := e.dstFrame.AllocBuffer(0); err != nil {
+		return fmt.Errorf("libav: allocate destination frame buffer: %w", err)
 	}
 	sws, err := astiav.CreateSoftwareScaleContext(o.Width, o.Height, srcFmt, o.Width, o.Height, e.encPixFmt,
 		astiav.NewSoftwareScaleContextFlags(astiav.SoftwareScaleContextFlagBilinear))
@@ -386,7 +384,11 @@ func (e *Encoder) readFrames(ctx context.Context, queue chan core.VideoFrame) {
 // applyPending applies queued bitrate / keyframe requests to the next frame.
 func (e *Encoder) applyPending() {
 	if v := int(e.bitrate.Swap(0)); v > 0 && v != e.curRate {
-		setRate(e.cc, v, v, ffmpeg.VBVBufsize(v, e.opts.FPS))
+		// libavcodec's libx264 wrapper notices these fields change before the
+		// next frame and reconfigures x264 in place (no flush, no new GOP).
+		e.cc.SetBitRate(int64(v))
+		e.cc.SetRateControlMaxRate(int64(v))
+		e.cc.SetRateControlBufferSize(ffmpeg.VBVBufsize(v, e.opts.FPS))
 		e.log.Info("bitrate changed", "from", e.curRate, "to", v)
 		e.curRate = v
 	}
@@ -400,12 +402,12 @@ func (e *Encoder) applyPending() {
 
 func (e *Encoder) encode(ctx context.Context, f core.VideoFrame) error {
 	written := time.Now()
-	if err := fillFrame(e.srcFrame, f.Data); err != nil {
+	if err := e.fillFrame(f.Data); err != nil {
 		e.log.Warn("dropping frame: bad raw data", "err", err, "len", len(f.Data))
 		return nil
 	}
-	if err := makeWritable(e.dstFrame); err != nil {
-		return err
+	if err := e.dstFrame.MakeWritable(); err != nil {
+		return fmt.Errorf("libav: make frame writable: %w", err)
 	}
 	if err := e.sws.ScaleFrame(e.srcFrame, e.dstFrame); err != nil {
 		return fmt.Errorf("libav: swscale: %w", err)
@@ -454,4 +456,20 @@ func (e *Encoder) flush(ctx context.Context) {
 		return
 	}
 	_ = e.drain(ctx)
+}
+
+// fillFrame copies one tightly packed raw image (no row padding, the layout
+// V4L2 delivers) into the source frame.
+func (e *Encoder) fillFrame(raw []byte) error {
+	need, err := e.srcFrame.ImageBufferSize(1)
+	if err != nil {
+		return err
+	}
+	if len(raw) < need {
+		return fmt.Errorf("short frame: %d bytes, need %d", len(raw), need)
+	}
+	if err := e.srcFrame.MakeWritable(); err != nil {
+		return err
+	}
+	return e.srcFrame.Data().SetBytes(raw[:need], 1)
 }
