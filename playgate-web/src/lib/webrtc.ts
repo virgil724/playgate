@@ -69,6 +69,18 @@ function waitForGathering(pc: RTCPeerConnection, timeoutMs = 3000): Promise<void
   });
 }
 
+/** How long a "disconnected" peer may take to recover before the viewer
+ * rebuilds it. Slightly above the host's 5s grace so the host has already
+ * dropped the old session by the time the new hello arrives. */
+export const DISCONNECT_RESTART_MS = 6000;
+
+/** A random per-attempt session id for hello (see SignalingClient.hello). */
+export function newSessionNonce(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export class ViewerConnection {
   private signaling: SignalingClient;
   private cb: WebRTCCallbacks;
@@ -87,6 +99,13 @@ export class ViewerConnection {
    * start() is still awaiting (React StrictMode double-mount) cannot
    * resurrect itself and keep polling/answering as a zombie. */
   private closed = false;
+  /** Pending automatic restart after a failed/lost connection. */
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Fires if a "disconnected" peer does not recover in time. */
+  private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Consecutive restarts without reaching "connected" (drives backoff). */
+  private restartAttempts = 0;
+  private onVisibility = (): void => this.handleVisibility();
 
   constructor(opts: ViewerConnectionOptions) {
     this.signaling = opts.signaling;
@@ -165,7 +184,62 @@ export class ViewerConnection {
 
     // Announce ourselves so the host sends us a (per-viewer) offer. The host no
     // longer broadcasts a single offer to the room; it offers per viewerId.
-    void this.signaling.hello().catch((err) => dlog("webrtc", "hello failed:", err));
+    this.sayHello();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.onVisibility);
+    }
+  }
+
+  /** Sends a hello with a fresh session nonce, so the host (re)offers us. */
+  private sayHello(): void {
+    void this.signaling.hello(newSessionNonce()).catch((err) => dlog("webrtc", "hello failed:", err));
+  }
+
+  /** Delay before the next automatic restart: 1s, 2s, 4s, ... capped at 10s. */
+  static restartDelayMs(attempt: number): number {
+    return Math.min(1000 * 2 ** attempt, 10_000);
+  }
+
+  private clearTimer(name: "restartTimer" | "disconnectTimer"): void {
+    const t = this[name];
+    if (t) clearTimeout(t);
+    this[name] = null;
+  }
+
+  private scheduleRestart(reason: string): void {
+    if (this.closed || this.restartTimer) return;
+    const delay = ViewerConnection.restartDelayMs(this.restartAttempts);
+    dlog("webrtc", `restart in ${delay}ms (${reason})`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      this.restartPeer(reason);
+    }, delay);
+  }
+
+  /** Throws away the current peer connection and asks the host for a new one.
+   * Used when the connection failed (e.g. the tab was backgrounded long enough
+   * for ICE to time out); without it the viewer would wait forever. */
+  private restartPeer(reason: string): void {
+    if (this.closed) return;
+    this.clearTimer("restartTimer");
+    this.clearTimer("disconnectTimer");
+    this.restartAttempts++;
+    dlog("webrtc", `restarting peer connection: ${reason}`);
+    this.pc?.close();
+    this.createPeer();
+    this.setState("waiting-offer", `reconnecting: ${reason}`);
+    this.sayHello();
+  }
+
+  /** Coming back to the tab: if the connection died meanwhile, reconnect now
+   * instead of waiting out the backoff. */
+  private handleVisibility(): void {
+    if (this.closed || document.visibilityState !== "visible") return;
+    const st = this.pc?.connectionState;
+    if (st === "failed" || st === "disconnected" || st === "closed") {
+      this.restartAttempts = 0;
+      this.restartPeer(`tab visible, connection ${st}`);
+    }
   }
 
   /** (Re)build the RTCPeerConnection. Called once from start() and again when
@@ -229,15 +303,29 @@ export class ViewerConnection {
 
     pc.onconnectionstatechange = () => {
       dlog("webrtc", `connectionState → ${pc.connectionState}`);
+      if (pc !== this.pc) return; // a replaced connection winding down
       switch (pc.connectionState) {
         case "connected":
+          this.restartAttempts = 0;
+          this.clearTimer("disconnectTimer");
           this.setState("connected");
           break;
         case "failed":
           this.setState("failed", "peer connection failed");
+          this.scheduleRestart("peer connection failed");
           break;
         case "disconnected":
           this.setState("connecting", "disconnected, retrying");
+          // "disconnected" often heals by itself; give it a few seconds (the
+          // host waits 5s too) before rebuilding.
+          if (!this.disconnectTimer) {
+            this.disconnectTimer = setTimeout(() => {
+              this.disconnectTimer = null;
+              if (this.pc === pc && pc.connectionState !== "connected") {
+                this.restartPeer("still disconnected");
+              }
+            }, DISCONNECT_RESTART_MS);
+          }
           break;
         case "closed":
           this.setState("closed");
@@ -286,6 +374,12 @@ export class ViewerConnection {
 
   private async handleOffer(offer: RTCSessionDescriptionInit, ts?: string): Promise<void> {
     if (!this.pc) return;
+    if (!this.remoteSet && ts && this.appliedOfferTs && ts <= this.appliedOfferTs) {
+      // After restartPeer: an offer no newer than the one the dead connection
+      // used belongs to the old host session; wait for the fresh one.
+      dlog("webrtc", `stale offer ignored after restart (ts=${ts} applied=${this.appliedOfferTs})`);
+      return;
+    }
     if (this.remoteSet) {
       // Both timestamps come from the Worker's clock, so a lexicographic
       // ISO-8601 comparison is safe (same trick as the host's stale-answer
@@ -380,6 +474,11 @@ export class ViewerConnection {
   close(): void {
     dlog("webrtc", "close()");
     this.closed = true;
+    this.clearTimer("restartTimer");
+    this.clearTimer("disconnectTimer");
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.onVisibility);
+    }
     this.signaling.stop();
     this.inputChannel?.close();
     this.controlChannel?.close();

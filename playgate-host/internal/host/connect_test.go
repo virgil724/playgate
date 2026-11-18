@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/webrtc/v4"
+
 	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/signaling"
@@ -28,6 +30,103 @@ func TestHandleFeedMessageIgnores(t *testing.T) {
 
 	if len(cm.sessions) != 0 {
 		t.Fatalf("expected no sessions created, got %d", len(cm.sessions))
+	}
+}
+
+// TestHelloWithNewSessionReplacesSession checks a viewer that rebuilt its peer
+// connection (new hello nonce) gets a fresh session and the old one is
+// cancelled, while a duplicate hello (same nonce) and a legacy hello without a
+// nonce leave the existing session alone.
+func TestHelloWithNewSessionReplacesSession(t *testing.T) {
+	type started struct {
+		ctx  context.Context
+		sess *viewerSession
+	}
+	starts := make(chan started, 8)
+	cm := &connManager{
+		log:      discardLogger(),
+		sessions: map[string]*viewerSession{},
+		startViewer: func(ctx context.Context, _ string, sess *viewerSession) {
+			starts <- started{ctx, sess}
+		},
+	}
+	hello := func(session string) {
+		v := map[string]any{"kind": "hello", "viewerId": "V"}
+		if session != "" {
+			v["session"] = session
+		}
+		b, _ := json.Marshal(v)
+		cm.handleFeedMessage(context.Background(), signaling.Message{Payload: b})
+	}
+	next := func() started {
+		select {
+		case s := <-starts:
+			return s
+		case <-time.After(time.Second):
+			t.Fatal("expected a session to start")
+			return started{}
+		}
+	}
+	noStart := func(what string) {
+		select {
+		case <-starts:
+			t.Fatalf("%s started a new session", what)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	hello("a")
+	first := next()
+	hello("a")
+	noStart("duplicate hello")
+	hello("")
+	noStart("legacy hello without a nonce")
+	if first.ctx.Err() != nil {
+		t.Fatal("first session cancelled by a duplicate hello")
+	}
+
+	hello("b")
+	second := next()
+	if first.ctx.Err() == nil {
+		t.Error("old session not cancelled after the viewer restarted")
+	}
+	if second.ctx.Err() != nil {
+		t.Error("new session born cancelled")
+	}
+	cm.mu.Lock()
+	cur := cm.sessions["V"]
+	cm.mu.Unlock()
+	if cur != second.sess || cur.nonce != "b" {
+		t.Errorf("sessions[V] = %+v, want the new session with nonce b", cur)
+	}
+}
+
+// TestAwaitPeerEndDisconnectGrace checks disconnected is given time to
+// recover, while failed ends the session immediately.
+func TestAwaitPeerEndDisconnectGrace(t *testing.T) {
+	run := func(states ...webrtc.PeerConnectionState) (time.Duration, chan webrtc.PeerConnectionState) {
+		ch := make(chan webrtc.PeerConnectionState, len(states)+1)
+		for _, s := range states {
+			ch <- s
+		}
+		start := time.Now()
+		done := make(chan struct{})
+		go func() { awaitPeerEnd(context.Background(), ch, 100*time.Millisecond); close(done) }()
+		select {
+		case <-done:
+			return time.Since(start), ch
+		case <-time.After(300 * time.Millisecond):
+			return -1, ch
+		}
+	}
+	if d, _ := run(webrtc.PeerConnectionStateFailed); d < 0 || d > 50*time.Millisecond {
+		t.Errorf("failed should end at once, took %v", d)
+	}
+	if d, _ := run(webrtc.PeerConnectionStateDisconnected); d < 90*time.Millisecond {
+		t.Errorf("disconnected ended after %v, want the 100ms grace", d)
+	}
+	if d, _ := run(webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateConnected); d >= 0 {
+		t.Errorf("recovered connection should keep the session, ended after %v", d)
 	}
 }
 

@@ -113,6 +113,16 @@ describe("SignalingClient (HTTP)", () => {
     expect(JSON.parse(opts.body as string)).toEqual({ type: "answer", sdp: "x", viewerId: c.viewerId });
   });
 
+  it("hello carries the session nonce only when given", async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const c = new SignalingClient({ baseUrl, roomId: "r1", peer: "viewer", wsFactory: null });
+    await c.hello("s-1");
+    await c.hello();
+    const bodies = fetchMock.mock.calls.map(([, opts]) => JSON.parse(opts.body as string));
+    expect(bodies[0]).toEqual({ kind: "hello", session: "s-1", viewerId: c.viewerId });
+    expect(bodies[1]).toEqual({ kind: "hello", viewerId: c.viewerId });
+  });
+
   it("viewer polls the host's messages and advances since", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

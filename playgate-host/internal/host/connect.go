@@ -123,6 +123,10 @@ func resolveICEServers(ctx context.Context, log *slog.Logger, cfg config.Config,
 
 // connManager reads the merged viewer feed and runs one peer per viewer.
 type connManager struct {
+	// startViewer runs one viewer session; nil means runViewer. Tests inject a
+	// stub so session bookkeeping can be checked without real peers.
+	startViewer func(ctx context.Context, id string, sess *viewerSession)
+
 	log     *slog.Logger
 	cfg     config.Config
 	mc      *metrics.Collector
@@ -152,6 +156,14 @@ type viewerSession struct {
 	mu       sync.Mutex
 	peer     *rtc.Peer
 	answered bool
+
+	// nonce is the viewer's per-attempt session id from its hello ("" for
+	// viewers that do not send one). A hello with a different nonce means the
+	// viewer rebuilt its RTCPeerConnection (e.g. after the tab was backgrounded
+	// and the connection failed), so this session is replaced.
+	nonce string
+	// cancel ends this session's runViewer.
+	cancel context.CancelFunc
 }
 
 func (s *viewerSession) setPeer(p *rtc.Peer) {
@@ -168,6 +180,8 @@ type viewerEnvelope struct {
 	Type     string `json:"type"`
 	SDP      string `json:"sdp"`
 	ViewerID string `json:"viewerId"`
+	// Session is the viewer's per-attempt nonce on hello (see viewerSession.nonce).
+	Session string `json:"session"`
 }
 
 // viewerOffer is the host→viewer offer payload; To carries the target viewerId
@@ -270,6 +284,15 @@ func (c *connManager) handleFeedMessage(ctx context.Context, m signaling.Message
 	}
 	c.mu.Lock()
 	sess, ok := c.sessions[env.ViewerID]
+	if ok && env.Kind == "hello" && env.Session != "" && env.Session != sess.nonce {
+		// The viewer rebuilt its peer connection: drop the old session (its
+		// runViewer tears down the old peer) and start a fresh one below. A
+		// repeated hello with the same nonce is a duplicate and is ignored.
+		c.log.Info("viewer restarted its connection; replacing session", "viewer", env.ViewerID)
+		sess.cancel()
+		delete(c.sessions, env.ViewerID)
+		ok = false
+	}
 	if !ok {
 		// Only a hello starts a session; stray answers for unknown viewers (e.g.
 		// from a dead session) are ignored.
@@ -277,10 +300,15 @@ func (c *connManager) handleFeedMessage(ctx context.Context, m signaling.Message
 			c.mu.Unlock()
 			return
 		}
-		sess = &viewerSession{}
+		sctx, cancel := context.WithCancel(ctx)
+		sess = &viewerSession{nonce: env.Session, cancel: cancel}
 		c.sessions[env.ViewerID] = sess
 		c.mu.Unlock()
-		go c.runViewer(ctx, env.ViewerID, sess)
+		start := c.startViewer
+		if start == nil {
+			start = c.runViewer
+		}
+		go start(sctx, env.ViewerID, sess)
 		return
 	}
 	c.mu.Unlock()
@@ -352,7 +380,11 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 	defer cancel()
 	defer func() {
 		c.mu.Lock()
-		delete(c.sessions, id)
+		// Only remove our own entry: a restarted viewer may already have a
+		// newer session under the same id.
+		if c.sessions[id] == sess {
+			delete(c.sessions, id)
+		}
 		c.mu.Unlock()
 	}()
 
@@ -466,22 +498,41 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 // The server caps its own wait at 25s; we ask for exactly 25s.
 const longPollWait = 25 * time.Second
 
-// awaitDisconnect blocks until the peer reaches a terminal connection state or
-// ctx is cancelled.
+// disconnectGrace is how long a "disconnected" peer may take to recover before
+// the host gives up on it. WebRTC's disconnected state is transient (consent
+// checks missed, e.g. while the viewer's tab is backgrounded) and often heals.
+const disconnectGrace = 5 * time.Second
+
+// awaitDisconnect blocks until the peer reaches a terminal connection state
+// (failed/closed, or disconnected for longer than disconnectGrace) or ctx is
+// cancelled.
 func (c *connManager) awaitDisconnect(ctx context.Context, peer *rtc.Peer) {
+	awaitPeerEnd(ctx, peer.ConnState(), disconnectGrace)
+}
+
+// awaitPeerEnd implements awaitDisconnect over a state channel; split out so
+// the grace logic is testable without a real peer.
+func awaitPeerEnd(ctx context.Context, states <-chan webrtc.PeerConnectionState, grace time.Duration) {
+	var graceC <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case s, ok := <-peer.ConnState():
+		case <-graceC:
+			return
+		case s, ok := <-states:
 			if !ok {
 				return
 			}
 			switch s {
-			case webrtc.PeerConnectionStateFailed,
-				webrtc.PeerConnectionStateClosed,
-				webrtc.PeerConnectionStateDisconnected:
+			case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 				return
+			case webrtc.PeerConnectionStateDisconnected:
+				if graceC == nil {
+					graceC = time.After(grace)
+				}
+			case webrtc.PeerConnectionStateConnected:
+				graceC = nil // recovered
 			}
 		}
 	}
