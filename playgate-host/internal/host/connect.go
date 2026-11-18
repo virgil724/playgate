@@ -364,6 +364,10 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		VideoFragmentBytes:  c.cfg.WebRTC.VideoFragmentBytes,
 		VideoBufferMaxBytes: c.cfg.WebRTC.VideoBufferMaxBytes,
 		VideoIDRPaceMS:      c.cfg.WebRTC.VideoIDRPaceMS,
+		EnableGCC:           c.cfg.WebRTC.GCC,
+	}
+	if rcfg.EnableGCC {
+		rcfg.GCCInitialBitrate, rcfg.GCCMinBitrate, rcfg.GCCMaxBitrate = gccBounds(c.cfg)
 	}
 	if c.kf != nil {
 		rcfg.OnVideoKeyframeRequest = c.kf.Request
