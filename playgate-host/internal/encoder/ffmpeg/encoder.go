@@ -33,7 +33,8 @@ const packetBufferSize = 4
 // Backpressure: frames are written to ffmpeg's stdin from a dedicated writer
 // goroutine fed by an internal bounded queue. When ffmpeg falls behind, the
 // newest frame replaces the oldest queued frame (drop-oldest) so the capture
-// stage never blocks. Encoded packets use the same drop-oldest discipline.
+// stage never blocks. Encoded packets never block it either; see emitPacket
+// for what is dropped when the consumer falls behind.
 type Encoder struct {
 	log  *slog.Logger
 	opts Options
@@ -42,13 +43,28 @@ type Encoder struct {
 	packets chan core.EncodedPacket
 	errs    chan error
 
-	// framesOut counts access units emitted across the encoder's whole life
-	// (spanning ffmpeg restarts). PTS is derived from this counter and the target
-	// FPS, NOT from wall-clock time: ffmpeg flushes frames to stdout in bursts, so
-	// wall-clock read-times bunch several frames into nearly-identical PTS, which
-	// collapses to duplicate RTP timestamps and makes a browser jitter buffer drop
-	// every frame but the keyframes. A counter gives evenly-spaced, monotonic PTS.
-	framesOut int64
+	// inFlight holds, oldest first, the stamps of frames written to ffmpeg whose
+	// access units have not come back yet. The encoder emits exactly one access
+	// unit per input frame, in order (no B-frames), so the head pairs with the
+	// next access unit read. PTS comes from the frame's capture time, NOT from
+	// the time the packet is read (ffmpeg can flush several at once, which would
+	// collapse into duplicate RTP timestamps) and NOT from a frame counter (which
+	// falls behind real time whenever a frame is dropped or ffmpeg restarts, and
+	// runs at the wrong speed if the device delivers a different rate than
+	// configured). Guarded by stampMu.
+	stampMu  sync.Mutex
+	inFlight []frameStamp
+
+	// PTS state, touched only by the reader goroutine (one at a time across
+	// restarts). ptsBase is the capture time PTS is measured from.
+	ptsBase time.Time
+	lastPTS time.Duration
+	havePTS bool
+
+	// waitKey is set once an inter frame has been dropped: every later inter
+	// frame references it, so they are dropped too until the next keyframe.
+	// Touched only by the reader goroutine.
+	waitKey bool
 
 	// restart signals the Run loop to tear down the current ffmpeg subprocess and
 	// relaunch it with the latest options (used by SetBitrate). Buffered size 1
@@ -62,6 +78,16 @@ type Encoder struct {
 	// burst of viewer PLIs into at most one restart per forceKeyframeDebounce.
 	lastForce time.Time
 }
+
+// frameStamp records when a frame was captured and when it entered ffmpeg.
+type frameStamp struct {
+	capture time.Time
+	written time.Time
+}
+
+// maxInFlight bounds inFlight. It only fills if ffmpeg swallows frames without
+// emitting packets (e.g. undecodable MJPEG input); the oldest stamp is dropped.
+const maxInFlight = 32
 
 // Ensure Encoder satisfies core.Module at compile time.
 var _ core.Module = (*Encoder)(nil)
@@ -209,6 +235,11 @@ func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err
 		return false, fmt.Errorf("encoder: build args: %w", err)
 	}
 
+	// Stamps belong to the previous subprocess's frames; none will come back.
+	e.stampMu.Lock()
+	e.inFlight = e.inFlight[:0]
+	e.stampMu.Unlock()
+
 	// A child context so we can stop the writer/reader without depending on the
 	// parent being cancelled (e.g. when ffmpeg dies on its own or we restart).
 	runCtx, cancel := context.WithCancel(ctx)
@@ -251,11 +282,18 @@ func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err
 		e.writeFrames(runCtx, stdin)
 	}()
 
-	// Reader: split stdout into access units and emit packets.
+	// Reader: demux stdout into access units and emit packets. A malformed
+	// stream cannot be resynchronised, so kill ffmpeg; that surfaces below as an
+	// unexpected exit.
 	readErr := make(chan error, 1)
 	go func() {
 		defer wg.Done()
-		readErr <- e.readPackets(runCtx, stdout)
+		err := e.readPackets(runCtx, stdout)
+		if err != nil && runCtx.Err() == nil {
+			e.log.Warn("ffmpeg output unreadable; stopping ffmpeg", "err", err)
+			cancel()
+		}
+		readErr <- err
 	}()
 
 	// Wait for ffmpeg to exit or the context to end.
@@ -319,6 +357,7 @@ func (e *Encoder) writeFrames(ctx context.Context, stdin io.WriteCloser) {
 				if !ok {
 					return // reader closed the queue: end of stream
 				}
+				e.pushStamp(frame.Timestamp)
 				if _, err := stdin.Write(frame.Data); err != nil {
 					// Broken pipe: ffmpeg is gone. Run's waitErr path reports it.
 					if !errors.Is(err, io.ErrClosedPipe) {
@@ -394,24 +433,25 @@ func (e *Encoder) enqueueFrame(queue chan core.VideoFrame, frame core.VideoFrame
 	}
 }
 
-// readPackets reads the Annex-B stream from ffmpeg's stdout, splits it into
-// access units, and forwards each as a core.EncodedPacket with drop-oldest
-// backpressure on the output channel. It returns the first non-EOF read error.
+// readPackets reads the FLV stream from ffmpeg's stdout, demuxes it into access
+// units, and forwards each as a core.EncodedPacket. It returns the first
+// non-EOF read error or demux error.
 func (e *Encoder) readPackets(ctx context.Context, stdout io.Reader) error {
-	splitter := NewAnnexBSplitter()
+	demux := NewFLVDemuxer()
 	buf := make([]byte, readChunkSize)
 	for {
 		n, err := stdout.Read(buf)
 		if n > 0 {
-			for _, au := range splitter.Push(buf[:n]) {
+			aus, derr := demux.Push(buf[:n])
+			for _, au := range aus {
 				e.emitPacket(ctx, au)
+			}
+			if derr != nil {
+				return derr
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				for _, au := range splitter.Flush() {
-					e.emitPacket(ctx, au)
-				}
 				return nil
 			}
 			return err
@@ -422,50 +462,96 @@ func (e *Encoder) readPackets(ctx context.Context, stdout io.Reader) error {
 	}
 }
 
-// emitPacket converts an access unit to a core.EncodedPacket and pushes it onto
-// the output channel using drop-oldest semantics so a slow consumer never
-// blocks the encoder.
-func (e *Encoder) emitPacket(ctx context.Context, au accessUnit) {
+// pushStamp records a frame about to be written to ffmpeg.
+func (e *Encoder) pushStamp(capture time.Time) {
+	e.stampMu.Lock()
+	if len(e.inFlight) >= maxInFlight {
+		e.inFlight = append(e.inFlight[:0], e.inFlight[1:]...)
+	}
+	e.inFlight = append(e.inFlight, frameStamp{capture: capture, written: time.Now()})
+	e.stampMu.Unlock()
+}
+
+// popStamp returns the stamp of the oldest frame still inside ffmpeg.
+func (e *Encoder) popStamp() (frameStamp, bool) {
+	e.stampMu.Lock()
+	defer e.stampMu.Unlock()
+	if len(e.inFlight) == 0 {
+		return frameStamp{}, false
+	}
+	st := e.inFlight[0]
+	e.inFlight = append(e.inFlight[:0], e.inFlight[1:]...)
+	return st, true
+}
+
+// nextPTS returns the PTS for the access unit produced from the frame stamped
+// st: its capture time relative to the first frame's. Without a capture time it
+// advances one nominal frame interval. The result is strictly increasing.
+func (e *Encoder) nextPTS(st frameStamp) time.Duration {
 	fps := e.opts.FPS
 	if fps <= 0 {
 		fps = 30
 	}
-	// Evenly-spaced monotonic PTS from the emitted-frame counter (see framesOut).
-	pts := time.Duration(e.framesOut) * time.Second / time.Duration(fps)
-	e.framesOut++
+	pts := e.lastPTS + time.Second/time.Duration(fps)
+	if !st.capture.IsZero() {
+		if e.ptsBase.IsZero() {
+			e.ptsBase = st.capture
+		}
+		pts = st.capture.Sub(e.ptsBase)
+	} else if !e.havePTS {
+		pts = 0
+	}
+	if e.havePTS && pts <= e.lastPTS {
+		pts = e.lastPTS + time.Millisecond
+	}
+	e.lastPTS, e.havePTS = pts, true
+	return pts
+}
+
+// emitPacket converts an access unit to a core.EncodedPacket and pushes it onto
+// the output channel without ever blocking the encoder on a slow consumer.
+//
+// When the channel is full an inter frame is dropped — and so is every inter
+// frame after it until the next keyframe, because each one references the frame
+// before it and decoding past a gap shows corruption rather than a clean pause.
+// A keyframe is never dropped: it replaces whatever is queued, since it makes
+// everything older than itself unnecessary.
+func (e *Encoder) emitPacket(ctx context.Context, au accessUnit) {
+	st, _ := e.popStamp()
 	pkt := core.EncodedPacket{
-		Data:       au.data,
-		PTS:        pts,
-		IsKeyframe: au.isKeyframe,
+		Data:        au.data,
+		PTS:         e.nextPTS(st),
+		IsKeyframe:  au.isKeyframe,
+		EncodeStart: st.written,
+	}
+	if e.waitKey {
+		if !pkt.IsKeyframe {
+			return
+		}
+		e.waitKey = false
 	}
 	select {
 	case e.packets <- pkt:
 		return
 	default:
 	}
-	// Channel full: drop the oldest queued packet to make room for the newer one,
-	// favouring fresh frames so the viewer's fps holds up under a slow consumer.
-	// A keyframe must never be dropped: a 1080p IDR spans hundreds of RTP packets
-	// and losing it freezes the decoder (green/stuck frame) until the next GOP —
-	// the exact opposite of smooth playback. If the oldest queued packet is a
-	// keyframe, put it back and drop the incoming inter-frame instead.
-	select {
-	case old := <-e.packets:
-		if old.IsKeyframe {
-			select {
-			case e.packets <- old:
-			default:
-			}
-			e.log.Debug("dropped encoded packet to preserve queued keyframe")
-			return
+	if !pkt.IsKeyframe {
+		e.waitKey = true
+		e.log.Debug("dropped encoded packet: consumer not keeping up; waiting for keyframe")
+		return
+	}
+	for drained := false; !drained; {
+		select {
+		case <-e.packets:
+		default:
+			drained = true
 		}
-	default:
 	}
 	select {
 	case e.packets <- pkt:
 	case <-ctx.Done():
 	default:
-		e.log.Debug("dropped encoded packet: consumer not keeping up")
+		e.waitKey = true
 	}
 }
 

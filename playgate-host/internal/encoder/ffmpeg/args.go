@@ -1,11 +1,11 @@
 // Package ffmpeg implements a core H.264 encoder that shells out to an ffmpeg
 // subprocess: it writes raw frames (rawvideo YUYV or mjpeg) to ffmpeg's stdin
-// and reads an H.264 Annex-B byte stream from its stdout, which it splits into
-// per-access-unit core.EncodedPacket values.
+// and reads an FLV-framed H.264 stream from its stdout, which it demuxes into
+// per-access-unit core.EncodedPacket values (Annex-B payloads).
 //
 // The package is deliberately CGo-free (it execs the ffmpeg binary) so it
 // cross-compiles to every platform. The Linux pipeline test that actually runs
-// the binary lives under cmd/. The argument assembly and Annex-B parsing logic
+// the binary lives under cmd/. The argument assembly and stream parsing logic
 // here are pure and unit-tested on any OS.
 package ffmpeg
 
@@ -128,7 +128,7 @@ func (LibX264) OutputArgs(o Options) []string {
 	}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
-	args = append(args, "-pix_fmt", "yuv420p", "-slices", "1") // 4:2:0 is what H.264/WebRTC decoders expect; force 1 slice per frame for Annex-B splitter
+	args = append(args, "-pix_fmt", "yuv420p", "-slices", "1") // 4:2:0 is what H.264/WebRTC decoders expect; 1 slice per frame
 	return args
 }
 
@@ -156,6 +156,10 @@ func (o Options) inputArgs() ([]string, error) {
 		}, nil
 	case core.PixelFormatMJPEG:
 		return []string{
+			// Without these ffmpeg reads several MB of frames to probe the stream
+			// before emitting anything; the first JPEG already describes it.
+			"-probesize", "32",
+			"-analyzeduration", "0",
 			"-f", "mjpeg",
 			"-framerate", strconv.Itoa(o.FPS),
 			"-i", "pipe:0",
@@ -166,8 +170,8 @@ func (o Options) inputArgs() ([]string, error) {
 }
 
 // BuildArgs assembles the full ffmpeg argument vector (excluding the binary
-// name itself) for the given options. The output is an H.264 Annex-B byte
-// stream on stdout.
+// name itself) for the given options. The output is an FLV stream on stdout
+// (see flv.go for why not raw Annex-B).
 func BuildArgs(o Options) ([]string, error) {
 	o = o.normalise()
 	if err := o.Validate(); err != nil {
@@ -177,8 +181,10 @@ func BuildArgs(o Options) ([]string, error) {
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
-		"-fflags", "nobuffer", // don't buffer input: minimise latency
 	}
+	// No "-fflags nobuffer": it makes ffmpeg discard the frames it reads while
+	// probing the input, so the first frame never comes out, and it does not make
+	// later frames any faster.
 
 	// Hardware codecs (e.g. VA-API) need device-init flags BEFORE the input and a
 	// hwupload filter AFTER it. Software codecs implement neither and contribute
@@ -200,10 +206,12 @@ func BuildArgs(o Options) ([]string, error) {
 
 	args = append(args, o.Codec.OutputArgs(o)...)
 
-	// Output: raw H.264 Annex-B byte stream on stdout.
+	// Output: FLV on stdout, one tag per access unit, flushed per packet. stdout
+	// is not seekable, so skip the metadata the muxer would try to patch at exit.
 	args = append(args,
-		"-f", "h264",
-		"-bsf:v", "h264_mp4toannexb", // ensure Annex-B start codes (no-op if already AnnexB)
+		"-f", "flv",
+		"-flvflags", "no_duration_filesize+no_metadata",
+		"-flush_packets", "1",
 		"pipe:1",
 	)
 	return args, nil

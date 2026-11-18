@@ -72,9 +72,12 @@ func TestBuildArgsYUYV(t *testing.T) {
 		t.Error("output should be yuv420p for decoder compatibility")
 	}
 
-	// Output container: raw h264 annex-b on pipe:1.
-	if !hasPair(args, "-f", "h264") {
-		t.Error("output format should be h264")
+	// Output container: FLV (length-framed access units) on pipe:1.
+	if !hasPair(args, "-f", "flv") {
+		t.Error("output format should be flv")
+	}
+	if !hasPair(args, "-flush_packets", "1") {
+		t.Error("output must be flushed per packet")
 	}
 	if args[len(args)-1] != "pipe:1" {
 		t.Errorf("last arg should be pipe:1, got %q", args[len(args)-1])
@@ -146,8 +149,9 @@ func TestBuildArgsZeroLatencyDefaults(t *testing.T) {
 	if !hasPair(args, "-bf", "0") {
 		t.Error("default should disable B-frames")
 	}
-	if !hasFlag(args, "-fflags") || !hasPair(args, "-fflags", "nobuffer") {
-		t.Error("default should set -fflags nobuffer")
+	// nobuffer makes ffmpeg discard the first frame (see BuildArgs).
+	if hasFlag(args, "-fflags") {
+		t.Error("default must not set -fflags nobuffer")
 	}
 }
 

@@ -9,10 +9,18 @@ import (
 	"github.com/playgate/playgate-host/internal/core"
 )
 
-// coalescer keeps the most-recently-seen InputCommand and makes it available
-// for consumption at a controlled rate.  Commands that arrive faster than the
-// rate limit are silently coalesced: only the latest one is kept. Commands that
-// arrive slower than the rate limit are emitted as-is with no artificial delay.
+// maxPendingEdges bounds how many distinct button states the coalescer queues
+// while rate-limited. Beyond it the oldest is dropped, so a burst can delay the
+// newest state by at most this many rate intervals.
+const maxPendingEdges = 4
+
+// coalescer queues InputCommands and makes them available for consumption at a
+// controlled rate. Commands that arrive faster than the rate limit are
+// coalesced while the buttons are unchanged: only the latest stick position is
+// kept. A command that changes the buttons is queued behind an unsent button
+// change instead of replacing it, so a press and release that land inside one
+// rate interval are both delivered rather than cancelling out. Commands that arrive
+// slower than the rate limit are emitted as-is with no artificial delay.
 //
 // Usage:
 //
@@ -27,9 +35,14 @@ import (
 // loop exactly how long to wait before the pending command becomes sendable.
 type coalescer struct {
 	mu       sync.Mutex
-	pending  *core.InputCommand // nil when nothing to send
-	interval time.Duration      // minimum time between emitted commands
+	pending  []core.InputCommand // oldest first; empty when nothing to send
+	interval time.Duration       // minimum time between emitted commands
 	lastSent time.Time
+
+	// sentButtons is the button state of the last command handed out by poll,
+	// valid once haveSent is set.
+	sentButtons uint32
+	haveSent    bool
 
 	// notify carries a single buffered signal: push() does a non-blocking send
 	// so the send loop wakes promptly without per-command allocation.
@@ -50,13 +63,25 @@ func newCoalescer(rateHz int) *coalescer {
 // loop selects on it to wake from idle.
 func (c *coalescer) notifyC() <-chan struct{} { return c.notify }
 
-// push stores cmd as the pending command. Any previous pending command that has
-// not yet been polled is overwritten (coalescing). Push is non-blocking and
-// safe to call from multiple goroutines. After storing, it signals notify so an
-// idle send loop wakes; the signal is dropped if one is already buffered.
+// push queues cmd. It replaces the newest queued command when that command
+// holds no button change the consumer still needs to see: either it has the
+// same buttons as cmd, or the same buttons as the last command sent (it is only
+// a stick update, which cmd supersedes). Otherwise cmd is appended. Push is
+// non-blocking and safe to call from multiple goroutines. After storing, it
+// signals notify so an idle send loop wakes; the signal is dropped if one is
+// already buffered.
 func (c *coalescer) push(cmd core.InputCommand) {
 	c.mu.Lock()
-	c.pending = &cmd
+	n := len(c.pending)
+	if n > 0 && (c.pending[n-1].Buttons == cmd.Buttons ||
+		(c.haveSent && c.pending[n-1].Buttons == c.sentButtons)) {
+		c.pending[n-1] = cmd
+	} else {
+		if n == maxPendingEdges {
+			c.pending = append(c.pending[:0], c.pending[1:]...)
+		}
+		c.pending = append(c.pending, cmd)
+	}
 	c.mu.Unlock()
 
 	select {
@@ -65,14 +90,15 @@ func (c *coalescer) push(cmd core.InputCommand) {
 	}
 }
 
-// poll returns the pending command if the rate-limit interval has elapsed since
-// the last successful poll. Returns (_, false) when there is nothing to send
-// (either no pending command or the interval has not elapsed yet).
+// poll returns the oldest pending command if the rate-limit interval has
+// elapsed since the last successful poll. Returns (_, false) when there is
+// nothing to send (either no pending command or the interval has not elapsed
+// yet).
 func (c *coalescer) poll() (core.InputCommand, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.pending == nil {
+	if len(c.pending) == 0 {
 		return core.InputCommand{}, false
 	}
 
@@ -81,9 +107,10 @@ func (c *coalescer) poll() (core.InputCommand, bool) {
 		return core.InputCommand{}, false
 	}
 
-	cmd := *c.pending
-	c.pending = nil
+	cmd := c.pending[0]
+	c.pending = append(c.pending[:0], c.pending[1:]...)
 	c.lastSent = now
+	c.sentButtons, c.haveSent = cmd.Buttons, true
 	return cmd, true
 }
 
@@ -97,7 +124,7 @@ func (c *coalescer) untilReady() time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.pending == nil {
+	if len(c.pending) == 0 {
 		return -1
 	}
 	if c.interval <= 0 {

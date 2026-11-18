@@ -43,6 +43,9 @@ const (
 	videoTrackID  = "video"
 	videoStreamID = "playgate"
 	audioTrackID  = "audio"
+	// Audio gets its own stream so the browser does not lip-sync the two tracks:
+	// that would hold video back to the audio path's (larger) playout delay.
+	audioStreamID = "playgate-audio"
 )
 
 // Config configures a Peer. The zero value is not valid; use DefaultConfig and
@@ -285,7 +288,7 @@ func (p *Peer) setupVideoTrack() error {
 func (p *Peer) setupAudioTrack() error {
 	track, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
-		audioTrackID, videoStreamID,
+		audioTrackID, audioStreamID,
 	)
 	if err != nil {
 		return fmt.Errorf("rtc: create audio track: %w", err)

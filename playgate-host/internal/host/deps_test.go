@@ -34,9 +34,6 @@ func TestLatencyTapRecordsAndForwards(t *testing.T) {
 		t.Fatal("tap did not forward the frame")
 	}
 
-	if tap.lastEnterTime().IsZero() {
-		t.Error("tap did not record the enter time")
-	}
 	deadline := time.Now().Add(time.Second)
 	for mc.Capture.Snapshot().Count == 0 {
 		if time.Now().After(deadline) {

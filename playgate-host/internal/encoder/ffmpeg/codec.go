@@ -104,7 +104,10 @@ func (V4L2M2M) OutputArgs(o Options) []string {
 	// the encoder converts. No preset/tune: those are x264-only.
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
-	args = append(args, "-pix_fmt", "yuv420p")
+	// 578 = Constrained Baseline (profile_idc 66 + constraint_set1), matching the
+	// profile-level-id the rtc layer negotiates. This encoder takes the generic
+	// numeric -profile only.
+	args = append(args, "-profile:v", "578", "-pix_fmt", "yuv420p")
 	return args
 }
 
@@ -141,8 +144,9 @@ func (VAAPI) OutputArgs(o Options) []string {
 	args := []string{"-c:v", CodecVAAPI}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
-	// VA-API low-latency: CBR rate control mode 2, no look-ahead.
-	args = append(args, "-rc_mode", "CBR")
+	// VA-API low-latency: CBR rate control mode 2, no look-ahead. Constrained
+	// Baseline matches the profile-level-id the rtc layer negotiates.
+	args = append(args, "-rc_mode", "CBR", "-profile:v", "constrained_baseline")
 	return args
 }
 
@@ -167,6 +171,9 @@ func (NVENC) OutputArgs(o Options) []string {
 		"-rc", "cbr", // constant bitrate for predictable bandwidth
 		"-zerolatency", "1",
 		"-delay", "0",
+		// nvenc's baseline is Constrained Baseline, matching the profile-level-id
+		// the rtc layer negotiates.
+		"-profile:v", "baseline",
 	}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)

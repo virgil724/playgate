@@ -77,6 +77,9 @@ type EncodedPacket struct {
 	Data       []byte
 	PTS        time.Duration // presentation timestamp relative to stream start
 	IsKeyframe bool          // true for IDR access units (seek/recovery points)
+	// EncodeStart is when the source frame was handed to the encoder, for
+	// measuring encode latency. Zero when the producer does not track it.
+	EncodeStart time.Time
 }
 
 // InputCommand is one controller state snapshot decoded from the WebRTC

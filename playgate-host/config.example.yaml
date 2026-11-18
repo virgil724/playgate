@@ -46,6 +46,8 @@ audio:
 # clean link -> additive increase. Changes are debounced by cooldown_seconds and
 # applied by restarting the ffmpeg subprocess (keyframe gating hides the blip).
 # Disabled by default: the encoder runs at the fixed encoder.bitrate.
+# NOTE: not wired up at present. Viewers share one encoder, so per-viewer ABR
+# would have them fight over its bitrate; enabling this has no effect.
 abr:
   enabled: false
   min_bitrate: 1000000    # floor (bits/sec) — bad network degrades to this, never stalls

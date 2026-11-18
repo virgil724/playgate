@@ -189,16 +189,12 @@ func buildSession(cfg config.Config) (*session.Manager, error) {
 // --- latency tap ---------------------------------------------------------
 
 // latencyTap forwards frames from capture to the encoder, recording for each
-// frame how long it waited in the capture buffer (capture stage) and the time it
-// entered the encoder (so the encode stage can be computed when a packet emerges).
+// frame how long it waited in the capture buffer (capture stage).
 type latencyTap struct {
 	log     *slog.Logger
 	metrics *metrics.Collector
 	in      <-chan core.VideoFrame
 	outCh   chan core.VideoFrame
-
-	mu        sync.Mutex
-	lastEnter time.Time // wall time the most recent frame was handed to the encoder
 }
 
 func newLatencyTap(log *slog.Logger, mc *metrics.Collector, in <-chan core.VideoFrame) *latencyTap {
@@ -212,14 +208,7 @@ func newLatencyTap(log *slog.Logger, mc *metrics.Collector, in <-chan core.Video
 
 func (t *latencyTap) out() <-chan core.VideoFrame { return t.outCh }
 
-// lastEnterTime returns the wall time the most recent frame entered the encoder.
-func (t *latencyTap) lastEnterTime() time.Time {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.lastEnter
-}
-
-// run forwards frames, recording capture-stage latency and the enter time.
+// run forwards frames, recording capture-stage latency.
 func (t *latencyTap) run(ctx context.Context) {
 	defer close(t.outCh)
 	for {
@@ -233,9 +222,6 @@ func (t *latencyTap) run(ctx context.Context) {
 			if t.metrics != nil && !frame.Timestamp.IsZero() {
 				t.metrics.Capture.Observe(time.Since(frame.Timestamp))
 			}
-			t.mu.Lock()
-			t.lastEnter = time.Now()
-			t.mu.Unlock()
 			select {
 			case t.outCh <- frame:
 			case <-ctx.Done():
@@ -249,7 +235,7 @@ func (t *latencyTap) run(ctx context.Context) {
 
 // encoderWrapper bundles the capture-source Run, the latency tap Run, and the
 // real ffmpeg encoder Run into a single core.Module-style unit, and instruments
-// the encode stage by timing packets against the latency tap's last enter time.
+// the encode stage from each packet's EncodeStart.
 // It exposes the encoder's packet output (re-tapped) as Packets.
 type encoderWrapper struct {
 	log     *slog.Logger
@@ -299,8 +285,7 @@ func (w *encoderWrapper) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); _ = w.enc.Run(ctx) }()
 
 	// Re-tap the encoder's packets to record encode-stage latency: the time from
-	// the most recent frame entering the encoder to the packet emerging. This is
-	// an approximation (frames and packets are not 1:1) but gives a useful p50/p95.
+	// a frame being handed to ffmpeg to its packet emerging.
 	encPackets := w.enc.Packets()
 	for {
 		select {
@@ -317,10 +302,8 @@ func (w *encoderWrapper) Run(ctx context.Context) error {
 				wg.Wait()
 				return nil
 			}
-			if w.metrics != nil {
-				if enter := w.tap.lastEnterTime(); !enter.IsZero() {
-					w.metrics.Encode.Observe(time.Since(enter))
-				}
+			if w.metrics != nil && !pkt.EncodeStart.IsZero() {
+				w.metrics.Encode.Observe(time.Since(pkt.EncodeStart))
 			}
 			select {
 			case w.outCh <- pkt:

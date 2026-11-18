@@ -154,8 +154,8 @@ framed by scanning for `\n`.
 #### `input` — controller state snapshot
 
 Sent by Go to forward the current controller state. Sent at up to 120 Hz
-(configurable via `WithRateHz`); the coalescer drops intermediate frames when
-the daemon cannot keep up.
+(configurable via `WithRateHz`); above that rate the coalescer drops
+intermediate stick positions but still delivers every button change, in order.
 
 ```json
 {"type":"input","buttons":1,"lx":0.5,"ly":-0.5,"rx":0.0,"ry":0.0}

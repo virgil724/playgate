@@ -172,6 +172,9 @@ export class ViewerConnection {
     this.inputChannel = null;
     this.controlChannel = null;
     this.pendingCandidates = [];
+    // Audio and video arrive in separate streams (so the browser does not
+    // lip-sync them); gather them into one for a single media element.
+    const remoteStream = new MediaStream();
 
     pc.ontrack = (ev) => {
       dlog("webrtc", `ontrack kind=${ev.track.kind} streams=${ev.streams.length}`);
@@ -188,7 +191,8 @@ export class ViewerConnection {
       } catch {
         /* unsupported: ignore */
       }
-      if (ev.streams[0]) this.cb.onTrack?.(ev.streams[0]);
+      remoteStream.addTrack(ev.track);
+      this.cb.onTrack?.(remoteStream);
     };
 
     pc.ondatachannel = (ev) => {

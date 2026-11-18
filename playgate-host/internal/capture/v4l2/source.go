@@ -104,8 +104,14 @@ func (s *Source) Start(_ context.Context) error {
 	}
 
 	// Frame rate is best-effort: some drivers reject S_PARM. Log, don't fail.
-	if err := dev.setFrameRate(uint32(s.cfg.FPS)); err != nil {
+	if tpf, err := dev.setFrameRate(uint32(s.cfg.FPS)); err != nil {
 		s.log.Debug("could not set frame rate", "err", err)
+	} else if tpf.Numerator != 0 && tpf.Denominator != uint32(s.cfg.FPS)*tpf.Numerator {
+		// The encoder is told capture.fps, so its bitrate and GOP length (in
+		// seconds) are off by the same factor as the real rate.
+		s.log.Warn("driver did not accept the configured frame rate",
+			"configured_fps", s.cfg.FPS,
+			"actual_fps", float64(tpf.Denominator)/float64(tpf.Numerator))
 	}
 
 	if err := dev.initBuffers(FrameBufferSize); err != nil {

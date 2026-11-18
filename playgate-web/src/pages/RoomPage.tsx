@@ -28,6 +28,7 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 const INPUT_BACKPRESSURE_BYTES = 2048;
 const ACTIVE_INPUT_REFRESH_MS = 1000 / 30;
 const NEUTRAL_RESEND_COUNT = 4;
+const GAMEPAD_POLL_MS = 4;
 
 export function RoomPage() {
   const { roomId = "" } = useParams();
@@ -356,6 +357,19 @@ export function RoomPage() {
 
   // Physical gamepad connect/disconnect indicator.
   const [padName, setPadName] = useState<string | null>(null);
+
+  // A physical pad has no change event, and the RAF loop above only samples it
+  // once per display frame. While one is connected, sample it faster so a press
+  // is sent within a few ms instead of waiting for the next frame.
+  useEffect(() => {
+    if (!padName) return;
+    const id = setInterval(() => {
+      if (!grantedRef.current) return;
+      const lastSent = lastSentInputRef.current;
+      if (!lastSent || !sameInputState(lastSent, currentInputState())) sendNowRef.current();
+    }, GAMEPAD_POLL_MS);
+    return () => clearInterval(id);
+  }, [padName, currentInputState]);
   useEffect(() => {
     const refresh = () => {
       const pads = navigator.getGamepads?.() ?? [];
