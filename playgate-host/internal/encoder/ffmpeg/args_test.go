@@ -198,3 +198,26 @@ func TestVBVBufsizeGuards(t *testing.T) {
 		t.Errorf("tiny bitrate should clamp to %d, got %d", minBufsize, got)
 	}
 }
+
+func TestIntraRefreshArgs(t *testing.T) {
+	o := DefaultOptions(1280, 720, 30, core.PixelFormatYUYV)
+	args, err := BuildArgs(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFlag(args, "-intra-refresh") {
+		t.Error("-intra-refresh present while disabled")
+	}
+	o.IntraRefresh = true
+	args, err = BuildArgs(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPair(args, "-intra-refresh", "1") {
+		t.Errorf("missing -intra-refresh 1: %v", args)
+	}
+	o.Codec = NVENC{}
+	if _, err := BuildArgs(o); err == nil {
+		t.Error("intra refresh with non-libx264 codec must be rejected")
+	}
+}

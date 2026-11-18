@@ -62,6 +62,18 @@ func TestValidateCodec(t *testing.T) {
 	}
 }
 
+func TestValidateIntraRefresh(t *testing.T) {
+	cfg := Default()
+	cfg.Encoder.IntraRefresh = true
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("libx264 intra_refresh should validate: %v", err)
+	}
+	cfg.Encoder.Codec = CodecNVENC
+	if err := cfg.Validate(); err == nil {
+		t.Error("intra_refresh with nvenc must be rejected")
+	}
+}
+
 func TestEncoderCodecKindDefault(t *testing.T) {
 	cfg := Default()
 	cfg.Encoder.Codec = ""

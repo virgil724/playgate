@@ -44,6 +44,7 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			cfg:    cfg,
 			mc:     mc,
 			enc:    enc,
+			forceKey: keyframeForcer(cfg, enc),
 			client:  client,
 			router:  router,
 			arouter: arouter,
@@ -53,6 +54,18 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 		}
 		return cm.loop(ctx)
 	}
+}
+
+// keyframeForcer returns the encoder's ForceKeyframe when intra-refresh is
+// enabled (late joiners need an IDR there), otherwise nil.
+func keyframeForcer(cfg config.Config, enc BitrateController) func() {
+	if !cfg.Encoder.IntraRefresh {
+		return nil
+	}
+	if k, ok := enc.(interface{ ForceKeyframe() }); ok {
+		return k.ForceKeyframe
+	}
+	return nil
 }
 
 // resolveICEServers fetches TURN credentials when enabled, falling back to the
@@ -92,6 +105,9 @@ type connManager struct {
 	cfg     config.Config
 	mc      *metrics.Collector
 	enc     BitrateController // ABR target; unused in multi-viewer (see runViewer)
+	// forceKey, when non-nil, requests a fresh keyframe from the encoder. Set only
+	// in intra-refresh mode, where no periodic IDR exists for late joiners.
+	forceKey func()
 	client  *signaling.Client
 	router  *VideoRouter
 	arouter *AudioRouter // nil when audio is disabled
@@ -299,6 +315,10 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 	if c.arouter != nil {
 		c.arouter.AddSink(peer)
 		defer c.arouter.RemoveSink(peer)
+	}
+
+	if c.forceKey != nil {
+		c.forceKey()
 	}
 
 	c.wireInput(sctx, peer)

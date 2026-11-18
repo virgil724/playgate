@@ -108,6 +108,10 @@ type EncoderConfig struct {
 	// Backend selects the encoder implementation: "cli" (ffmpeg subprocess,
 	// default) or "libav" (in-process libav; requires a -tags libav cgo build).
 	Backend string `yaml:"backend"`
+	// IntraRefresh replaces periodic IDR frames with x264 rolling intra refresh
+	// (-intra-refresh 1): no keyframe spikes, and packet loss heals within one
+	// GOP-sized refresh period. libx264 only. Default false.
+	IntraRefresh bool `yaml:"intra_refresh"`
 }
 
 // Encoder backend kinds.
@@ -375,6 +379,9 @@ func (c Config) Validate() error {
 	}
 	if c.Encoder.Bitrate <= 0 {
 		return fmt.Errorf("encoder bitrate must be positive, got %d", c.Encoder.Bitrate)
+	}
+	if c.Encoder.IntraRefresh && c.EncoderCodecKind() != CodecLibX264 {
+		return fmt.Errorf("encoder intra_refresh requires codec %q, got %q", CodecLibX264, c.EncoderCodecKind())
 	}
 	switch c.Encoder.Codec {
 	case "", CodecLibX264, CodecV4L2M2M, CodecVAAPI, CodecNVENC:

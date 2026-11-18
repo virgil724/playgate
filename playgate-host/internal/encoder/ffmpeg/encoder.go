@@ -541,6 +541,12 @@ func (e *Encoder) emitPacket(ctx context.Context, au accessUnit) {
 	default:
 	}
 	if !pkt.IsKeyframe {
+		if e.opts.IntraRefresh {
+			// No IDRs follow in intra-refresh mode; waiting for one would stall
+			// forever. The rolling refresh heals the gap.
+			e.log.Debug("dropped encoded packet: consumer not keeping up (intra-refresh)")
+			return
+		}
 		e.waitKey = true
 		e.log.Debug("dropped encoded packet: consumer not keeping up; waiting for keyframe")
 		return

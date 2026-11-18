@@ -41,6 +41,9 @@ type Options struct {
 	// Phase 3 hardware encoders (h264_v4l2m2m, vaapi, nvenc) plug in here by
 	// supplying a different Codec without touching the subprocess plumbing.
 	Codec Codec
+	// IntraRefresh enables x264 rolling intra refresh instead of periodic IDRs
+	// (libx264 only). GOPSize is then the refresh period.
+	IntraRefresh bool
 }
 
 // DefaultOptions returns low-latency software-encode defaults for live
@@ -97,6 +100,9 @@ func (o Options) Validate() error {
 	default:
 		return fmt.Errorf("encoder: unsupported input format %v (want YUYV, NV12 or MJPEG)", o.InputFormat)
 	}
+	if o.IntraRefresh && o.Codec != nil && o.Codec.Name() != CodecLibX264 {
+		return fmt.Errorf("encoder: intra refresh requires libx264, got %s", o.Codec.Name())
+	}
 	return nil
 }
 
@@ -128,6 +134,9 @@ func (LibX264) OutputArgs(o Options) []string {
 	}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
+	if o.IntraRefresh {
+		args = append(args, "-intra-refresh", "1")
+	}
 	args = append(args, "-pix_fmt", "yuv420p", "-slices", "1") // 4:2:0 is what H.264/WebRTC decoders expect; 1 slice per frame
 	return args
 }
