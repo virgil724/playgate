@@ -54,6 +54,8 @@ export function RoomPage() {
   const [conn, setConn] = useState<ConnectionState>("idle");
   const [connDetail, setConnDetail] = useState("");
   const [granted, setGranted] = useState(false);
+  // The host does not gate input (session disabled): no token needed.
+  const [openRoom, setOpenRoom] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [queuePos, setQueuePos] = useState<number | null>(null);
   const [statusMsg, setStatusMsg] = useState("");
@@ -196,6 +198,16 @@ export function RoomPage() {
   const onChange = useCallback(() => forceRender((n) => n + 1), []);
 
   const handleControlEvent = useCallback((ev: ControlEvent) => {
+    if (ev.kind === "open") {
+      // Ungated host: control without a token, for as long as we're connected.
+      setOpenRoom(true);
+      setStatusMsg(describeEvent(ev));
+      grantedRef.current = true;
+      setGranted(true);
+      setRemaining(null);
+      setQueuePos(null);
+      return;
+    }
     const viewerId = sessionRef.current?.viewerId ?? "";
     // Events are broadcast to every viewer on the control channel; only react to
     // the ones addressed to our own session. Without this, all clients would
@@ -643,7 +655,7 @@ export function RoomPage() {
         )}
       </div>
 
-      {!session && (
+      {!session && !openRoom && (
         <div className="panel" style={{ margin: 12 }}>
           <strong>Have a token code?</strong>
           <div className="row" style={{ marginTop: 8 }}>

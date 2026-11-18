@@ -456,6 +456,11 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 	sendControl := func(b []byte) error { return peer.SendControl(b) }
 
 	if !c.sink.SessionEnabled() {
+		peer.OnControlOpen(func() {
+			if err := peer.SendControl(openRoomEvent); err != nil {
+				c.log.Debug("open-room event send failed", "err", err)
+			}
+		})
 		go c.sink.HandleCommands(ctx, peer.Commands(), sendControl)
 		return
 	}
