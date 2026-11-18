@@ -21,6 +21,22 @@ import (
 	"github.com/playgate/playgate-host/internal/session"
 )
 
+// encoderInputFormat returns the pixel format the capture source actually
+// emits, which the encoder must be configured for. The generated sources have a
+// fixed format (synthetic: YUYV, testsrc: NV12) regardless of capture.format;
+// only real devices honour the configured format. A mismatch makes the encoder
+// drop every frame as "format mismatch".
+func encoderInputFormat(cfg config.Config) (core.PixelFormat, error) {
+	switch cfg.Capture.Source {
+	case config.CaptureSynthetic:
+		return core.PixelFormatYUYV, nil
+	case config.CaptureTestSrc:
+		return core.PixelFormatNV12, nil
+	default:
+		return v4l2.ParsePixelFormat(cfg.Capture.Format)
+	}
+}
+
 // buildDeps constructs the real pipeline modules from cfg, inserting latency
 // taps between capture→encoder→router and wiring a real signaling-backed
 // connection loop.
@@ -35,7 +51,7 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	tap := newLatencyTap(log, mc, capture.Frames())
 
 	// --- encoder ---
-	pixfmt, err := v4l2.ParsePixelFormat(cfg.Capture.Format)
+	pixfmt, err := encoderInputFormat(cfg)
 	if err != nil {
 		return Deps{}, fmt.Errorf("host: capture format: %w", err)
 	}
