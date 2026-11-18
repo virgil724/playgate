@@ -116,7 +116,7 @@ func New(log *slog.Logger, opts ffmpeg.Options, in <-chan core.VideoFrame) (core
 		in:        in,
 		packets:   make(chan core.EncodedPacket, packetBufferSize),
 		errs:      make(chan error, 1),
-		emit:      ffmpeg.NewPacketEmitter(log, o.FPS),
+		emit:      newEmitter(log, o),
 		codecName: name,
 		curRate:   o.Bitrate,
 		stamps:    make(map[int64]frameStamp),
@@ -136,6 +136,13 @@ func New(log *slog.Logger, opts ffmpeg.Options, in <-chan core.VideoFrame) (core
 		return nil, err
 	}
 	return e, nil
+}
+
+// newEmitter builds the packet emitter for o, carrying the intra-refresh mode.
+func newEmitter(log *slog.Logger, o ffmpeg.Options) *ffmpeg.PacketEmitter {
+	p := ffmpeg.NewPacketEmitter(log, o.FPS)
+	p.IntraRefresh = o.IntraRefresh
+	return p
 }
 
 // open allocates and opens the codec, frames and scaler.
@@ -189,6 +196,12 @@ func (e *Encoder) open(srcFmt astiav.PixelFormat) error {
 			// (X264_TYPE_IDR), not a plain I frame.
 			[2]string{"forced-idr", "1"},
 		)
+		if o.IntraRefresh {
+			// Rolling intra refresh (same libx264 option the cli backend passes as
+			// -intra-refresh 1). The emitter's IntraRefresh flag stops it waiting
+			// for IDRs that will no longer come.
+			opts = append(opts, [2]string{"intra-refresh", "1"})
+		}
 	case ffmpeg.CodecNVENC:
 		// Mirrors ffmpeg.NVENC.OutputArgs.
 		opts = append(opts,

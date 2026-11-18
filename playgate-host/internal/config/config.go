@@ -5,6 +5,7 @@ import (
 	"math"
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -93,9 +94,19 @@ type EncoderConfig struct {
 	// GOPSeconds * capture.fps.
 	KeyframeInterval int `yaml:"keyframe_interval"`
 	// GOPSeconds is the keyframe interval in seconds; the effective GOP is
-	// round(capture.fps * gop_seconds) frames. Default 2. Ignored when
-	// keyframe_interval is set.
+	// round(capture.fps * gop_seconds) frames. Unset/0 picks a backend-dependent
+	// default: 3 for backend libav (keyframes are cheap and PLI-driven there, so
+	// a long GOP is safe), 2 for backend cli. Ignored when keyframe_interval is
+	// set.
 	GOPSeconds float64 `yaml:"gop_seconds"`
+	// KeyframeDebounceMS is the minimum spacing between encoder ForceKeyframe
+	// calls triggered by viewers (RTCP PLI/FIR, WebCodecs keyframe requests, new
+	// viewer joins). It is the single keyframe-rate knob: one host-wide coalescer
+	// uses it, and the cli backend also uses it as its restart debounce. Unset/0
+	// picks a backend default: 150 for libav (a forced IDR is cheap), 1000 for
+	// cli (a forced IDR restarts ffmpeg). webrtc.video_keyframe_min_interval_ms is
+	// a legacy alias that applies only while this is unset.
+	KeyframeDebounceMS int `yaml:"keyframe_debounce_ms"`
 	// FFmpegPath is the path to the ffmpeg binary.
 	FFmpegPath string `yaml:"ffmpeg_path"`
 	// Codec selects the H.264 encoder (T13): "libx264" (software, default),
@@ -122,7 +133,8 @@ const (
 
 // GOPFrames returns the effective GOP size in frames for the given frame rate:
 // keyframe_interval when explicitly set (> 0), otherwise round(fps*gop_seconds)
-// (gop_seconds <= 0 means 1s), never less than 1.
+// (gop_seconds unset/0 means the backend default, see DefaultGOPSeconds), never
+// less than 1.
 func (e EncoderConfig) GOPFrames(fps int) int {
 	if e.KeyframeInterval > 0 {
 		return e.KeyframeInterval
@@ -132,13 +144,46 @@ func (e EncoderConfig) GOPFrames(fps int) int {
 	}
 	sec := e.GOPSeconds
 	if sec <= 0 {
-		sec = 1
+		sec = e.DefaultGOPSeconds()
 	}
 	g := int(math.Round(float64(fps) * sec))
 	if g < 1 {
 		g = 1
 	}
 	return g
+}
+
+// DefaultGOPSeconds is the gop_seconds used when it is unset: 3 for the libav
+// backend (cheap on-demand keyframes via PLI), 2 for the cli backend.
+func (e EncoderConfig) DefaultGOPSeconds() float64 {
+	if e.Backend == BackendLibav {
+		return 3
+	}
+	return 2
+}
+
+// Default keyframe debounce per backend (see EncoderConfig.KeyframeDebounceMS).
+const (
+	DefaultKeyframeDebounceLibavMS = 150
+	DefaultKeyframeDebounceCLIMS   = 1000
+)
+
+// KeyframeDebounce resolves the effective minimum spacing between encoder
+// ForceKeyframe calls: encoder.keyframe_debounce_ms, else the legacy
+// webrtc.video_keyframe_min_interval_ms, else the backend default.
+func (c Config) KeyframeDebounce() time.Duration {
+	ms := c.Encoder.KeyframeDebounceMS
+	if ms <= 0 {
+		ms = c.WebRTC.VideoKeyframeMinIntervalMS
+	}
+	if ms <= 0 {
+		if c.EncoderBackendKind() == BackendLibav {
+			ms = DefaultKeyframeDebounceLibavMS
+		} else {
+			ms = DefaultKeyframeDebounceCLIMS
+		}
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // Encoder codec kinds (T13). These mirror ffmpeg encoder names.
@@ -212,7 +257,9 @@ type WebRTCConfig struct {
 	// negative disables pacing.
 	VideoIDRPaceMS int `yaml:"video_idr_pace_ms"`
 	// VideoKeyframeMinIntervalMS coalesces viewer keyframe requests to at most
-	// one encoder ForceKeyframe per interval. Default 250.
+	// one encoder ForceKeyframe per interval. Legacy alias of
+	// encoder.keyframe_debounce_ms (which wins when both are set); unset uses the
+	// encoder's backend default.
 	VideoKeyframeMinIntervalMS int `yaml:"video_keyframe_min_interval_ms"`
 }
 
@@ -314,7 +361,6 @@ func Default() Config {
 		Encoder: EncoderConfig{
 			Bitrate:          6_000_000,
 			Preset:           "ultrafast",
-			GOPSeconds:       2,
 			FFmpegPath:       "ffmpeg",
 			Codec:            CodecLibX264,
 			Backend:          BackendCLI,
@@ -340,7 +386,6 @@ func Default() Config {
 			VideoFragmentBytes:         1200,
 			VideoBufferMaxBytes:        262144,
 			VideoIDRPaceMS:             8,
-			VideoKeyframeMinIntervalMS: 250,
 		},
 		Overlay: OverlayConfig{TextFile: "playgate-overlay.txt"},
 		Input: InputConfig{
@@ -408,6 +453,9 @@ func (c Config) Validate() error {
 	}
 	if c.Encoder.GOPSeconds < 0 || math.IsNaN(c.Encoder.GOPSeconds) || math.IsInf(c.Encoder.GOPSeconds, 0) {
 		return fmt.Errorf("encoder gop_seconds must be a finite value >= 0, got %v", c.Encoder.GOPSeconds)
+	}
+	if c.Encoder.KeyframeDebounceMS < 0 {
+		return fmt.Errorf("encoder keyframe_debounce_ms must be >= 0, got %d", c.Encoder.KeyframeDebounceMS)
 	}
 	if c.Encoder.Bitrate <= 0 {
 		return fmt.Errorf("encoder bitrate must be positive, got %d", c.Encoder.Bitrate)

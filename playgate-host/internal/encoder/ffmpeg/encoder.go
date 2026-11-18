@@ -68,7 +68,7 @@ type Encoder struct {
 	// encoder args are rebuilt from opts on each (re)launch under this lock.
 	mu sync.Mutex
 	// lastForce is when ForceKeyframe last triggered a restart, used to debounce a
-	// burst of viewer PLIs into at most one restart per forceKeyframeDebounce.
+	// burst of viewer PLIs into at most one restart per debounce window.
 	lastForce time.Time
 }
 
@@ -136,24 +136,32 @@ func (e *Encoder) SetBitrate(bps int) {
 	}
 }
 
-// forceKeyframeDebounce bounds how often ForceKeyframe may restart ffmpeg, so a
-// burst of viewer PLIs (which arrive once per lost/garbled frame) cannot turn
-// into a restart loop. One second matches the default GOP, so a forced IDR is
-// never more than ~1 GOP earlier than the scheduled one anyway.
-const forceKeyframeDebounce = time.Second
+// DefaultForceKeyframeDebounce is the default bound on how often ForceKeyframe
+// may restart ffmpeg, so a burst of viewer PLIs (which arrive once per
+// lost/garbled frame) cannot turn into a restart loop. Override with
+// Options.ForceKeyframeDebounce.
+const DefaultForceKeyframeDebounce = time.Second
+
+// forceDebounce returns the effective ForceKeyframe debounce.
+func (e *Encoder) forceDebounce() time.Duration {
+	if e.opts.ForceKeyframeDebounce > 0 {
+		return e.opts.ForceKeyframeDebounce
+	}
+	return DefaultForceKeyframeDebounce
+}
 
 // ForceKeyframe asks the encoder to emit an IDR as soon as possible. ffmpeg
 // cannot inject an on-demand IDR into a running subprocess, so — like SetBitrate
 // — this restarts the subprocess (the relaunched ffmpeg emits an IDR
 // immediately; the rtc layer's keyframe gating hides the brief gap). It is the
 // host's response to a viewer Picture Loss Indication. Calls are debounced by
-// forceKeyframeDebounce and coalesced onto the single restart slot, so a PLI
-// storm costs at most one restart per second. Safe for concurrent use and
+// the configured debounce and coalesced onto the single restart slot, so a PLI
+// storm costs at most one restart per debounce window. Safe for concurrent use and
 // non-blocking.
 func (e *Encoder) ForceKeyframe() {
 	e.mu.Lock()
 	now := time.Now()
-	if !e.lastForce.IsZero() && now.Sub(e.lastForce) < forceKeyframeDebounce {
+	if !e.lastForce.IsZero() && now.Sub(e.lastForce) < e.forceDebounce() {
 		e.mu.Unlock()
 		return
 	}
