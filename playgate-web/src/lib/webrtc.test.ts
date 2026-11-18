@@ -12,6 +12,13 @@ describe("reconnect policy", () => {
     expect(DISCONNECT_RESTART_MS).toBeGreaterThan(5000);
   });
 
+  it("keeps a connected viewer connected through signaling errors", () => {
+    expect(ViewerConnection.signalingErrorChangesState("connected")).toBe(false);
+    for (const s of ["new", "connecting", "disconnected", "failed", undefined] as const) {
+      expect(ViewerConnection.signalingErrorChangesState(s)).toBe(true);
+    }
+  });
+
   it("generates a distinct session nonce per attempt", () => {
     const seen = new Set(Array.from({ length: 100 }, () => newSessionNonce()));
     expect(seen.size).toBe(100);

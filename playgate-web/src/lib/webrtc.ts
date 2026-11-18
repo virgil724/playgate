@@ -180,7 +180,7 @@ export class ViewerConnection {
     this.setState("waiting-offer");
     this.signaling.startPolling(
       (msg) => void this.handleSignal(msg),
-      (err) => this.setState("connecting", `signaling: ${String(err)}`),
+      (err) => this.onSignalingError(err),
     );
 
     // Announce ourselves so the host sends us a (per-viewer) offer. The host no
@@ -192,6 +192,24 @@ export class ViewerConnection {
     if (typeof window !== "undefined") {
       window.addEventListener("online", this.onOnline);
     }
+  }
+
+  /** A signaling (WS/poll) error. Signaling is only needed to set up the peer
+   * connection; once media flows over WebRTC a signaling outage (network blip,
+   * backgrounded tab) does not affect it, so a connected viewer keeps its
+   * "connected" state instead of being covered by a "connecting" overlay that
+   * nothing would ever clear. */
+  private onSignalingError(err: unknown): void {
+    if (ViewerConnection.signalingErrorChangesState(this.pc?.connectionState)) {
+      this.setState("connecting", `signaling: ${String(err)}`);
+    } else {
+      dlog("webrtc", `signaling error while connected (media unaffected): ${String(err)}`);
+    }
+  }
+
+  /** Whether a signaling error should change the viewer's connection state. */
+  static signalingErrorChangesState(pcState: RTCPeerConnectionState | undefined): boolean {
+    return pcState !== "connected";
   }
 
   /** Sends a hello with a fresh session nonce, so the host (re)offers us. */
