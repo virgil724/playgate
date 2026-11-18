@@ -192,7 +192,9 @@ type WebRTCConfig struct {
 	// ICEServers is the list of STUN/TURN server URLs.
 	ICEServers []string `yaml:"ice_servers"`
 	// GCC enables Pion's Google Congestion Control bandwidth estimator (TWCC).
-	// Off by default.
+	// Off by default. Requires encoder.backend "libav" (live bitrate changes);
+	// validation rejects it with the CLI backend. WebCodecs-transport viewers
+	// produce no TWCC feedback and are ignored by the estimate aggregation.
 	GCC bool `yaml:"gcc"`
 
 	// VideoTransport selects how video reaches viewers: "track" (default, RTP
@@ -426,6 +428,11 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("encoder backend must be %q or %q, got %q",
 			BackendCLI, BackendLibav, c.Encoder.Backend)
+	}
+	if c.WebRTC.GCC && c.EncoderBackendKind() != BackendLibav {
+		// GCC retunes the encoder every few hundred ms; the CLI backend restarts
+		// ffmpeg on every bitrate change, which would stutter constantly.
+		return fmt.Errorf("webrtc gcc requires encoder backend %q (cli restarts ffmpeg on every bitrate change)", BackendLibav)
 	}
 	switch c.WebRTC.VideoTransport {
 	case "", VideoTransportTrack, VideoTransportWebCodecs, VideoTransportAuto:

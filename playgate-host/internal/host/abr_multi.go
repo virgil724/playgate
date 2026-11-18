@@ -19,10 +19,9 @@ const (
 	liveBitrateInterval = 500 * time.Millisecond
 )
 
-// ABRSignal is one input to the ABR loop. Today only Stats is consumed (AIMD).
-// TargetBps is reserved for a direct-target source such as GCC (T9): when > 0 a
-// source is saying "use this bitrate" instead of providing loss/RTT. It is
-// deliberately not consumed yet.
+// ABRSignal is one input to the ABR loop. Stats feeds the AIMD controller.
+// TargetBps, when > 0, is a direct target from GCC (webrtc.gcc): the runner then
+// follows it (clamped, smoothed) instead of running AIMD.
 type ABRSignal struct {
 	Stats     rtc.StatsSample
 	TargetBps int
@@ -58,8 +57,16 @@ type viewerStatsRegistry struct {
 	// controller returns the viewer id currently holding control ("" if none).
 	controller func() string
 
+	// gcc makes Signal() report a GCC-derived TargetBps.
+	gcc bool
+
 	mu      sync.Mutex
 	viewers map[string]StatsSource
+}
+
+// targetSource is implemented by sources with a GCC estimate (*rtc.Peer).
+type targetSource interface {
+	TargetBitrate() (bps int, ok bool)
 }
 
 func newViewerStatsRegistry(controller func() string) *viewerStatsRegistry {
@@ -116,8 +123,68 @@ func (r *viewerStatsRegistry) Stats() rtc.StatsSample {
 	return worst
 }
 
-// Signal implements SignalSource.
-func (r *viewerStatsRegistry) Signal() ABRSignal { return ABRSignal{Stats: r.Stats()} }
+// Signal implements SignalSource. With GCC enabled TargetBps is the controlling
+// viewer's estimate when available, else the minimum over viewers that have one
+// (viewers without an estimate, e.g. WebCodecs transport, are ignored). With no
+// estimates TargetBps is 0 and the runner falls back to AIMD on Stats.
+func (r *viewerStatsRegistry) Signal() ABRSignal {
+	sig := ABRSignal{Stats: r.Stats()}
+	if r.gcc {
+		sig.TargetBps = r.targetBps()
+	}
+	return sig
+}
+
+func (r *viewerStatsRegistry) targetBps() int {
+	ctrlID := ""
+	if r.controller != nil {
+		ctrlID = r.controller()
+	}
+	r.mu.Lock()
+	srcs := make(map[string]StatsSource, len(r.viewers))
+	for id, s := range r.viewers {
+		srcs[id] = s
+	}
+	r.mu.Unlock()
+	est := func(s StatsSource) (int, bool) {
+		ts, ok := s.(targetSource)
+		if !ok {
+			return 0, false
+		}
+		bps, ok := ts.TargetBitrate()
+		return bps, ok && bps > 0
+	}
+	if s, ok := srcs[ctrlID]; ok && ctrlID != "" {
+		if bps, ok := est(s); ok {
+			return bps
+		}
+	}
+	min := 0
+	for _, s := range srcs {
+		if bps, ok := est(s); ok && (min == 0 || bps < min) {
+			min = bps
+		}
+	}
+	return min
+}
+
+// gccBounds returns the initial/min/max bitrates handed to the GCC estimator.
+func gccBounds(cfg config.Config) (initial, min, max int) {
+	initial, min, max = cfg.Encoder.Bitrate, cfg.ABR.MinBitrate, cfg.ABR.MaxBitrate
+	if min <= 0 {
+		min = 500_000
+	}
+	if max <= 0 {
+		max = initial
+		if max < 8_000_000 {
+			max = 8_000_000
+		}
+	}
+	if initial <= 0 {
+		initial = min
+	}
+	return initial, min, max
+}
 
 // startHostABR starts the single host-level ABR loop when cfg.ABR.Enabled and
 // returns the registry viewers must register with; nil when ABR is disabled.
@@ -134,6 +201,7 @@ func startHostABR(ctx context.Context, log *slog.Logger, cfg config.Config, enc 
 		controller = sink.manager.CurrentViewerID
 	}
 	reg := newViewerStatsRegistry(controller)
+	reg.gcc = cfg.WebRTC.GCC
 	cooldown, interval := abrTimings(cfg, caps)
 	ctrl := abr.New(abr.Config{
 		Min:           cfg.ABR.MinBitrate,

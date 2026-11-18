@@ -187,8 +187,13 @@ type Peer struct {
 
 // TargetBitrate returns the congestion controller's current target send bitrate
 // in bits per second. ok is false when GCC is disabled or the estimator is not
-// yet available.
+// yet available. It is also false while the WebCodecs DataChannel transport is
+// the active video path: that video carries no RTP/TWCC, so the estimator has no
+// feedback and its value would be meaningless.
 func (p *Peer) TargetBitrate() (bps int, ok bool) {
+	if p.vs != nil && p.vs.isWebCodecs() {
+		return 0, false
+	}
 	p.bweMu.Lock()
 	e := p.bwe
 	p.bweMu.Unlock()

@@ -34,7 +34,18 @@ type abrRunner struct {
 	interval time.Duration
 	// signal, when non-nil, replaces stats as the loop input (see SignalSource).
 	signal SignalSource
+
+	// GCC-mode state (used when a signal carries TargetBps > 0).
+	now         func() time.Time
+	gccSmoothed float64   // EWMA of clamped GCC target
+	gccApplied  int       // last bitrate pushed to the encoder (0 = Start)
+	gccLast     time.Time // time of last push, for cooldown
 }
+
+const (
+	gccEWMAAlpha  = 0.3  // weight of the newest GCC sample
+	gccMinChange  = 0.05 // hysteresis: ignore changes under 5% of applied
+)
 
 // newABRRunner builds an abrRunner from config. It returns nil when ABR is
 // disabled so the caller can skip wiring entirely.
@@ -96,8 +107,12 @@ func (a *abrRunner) run(ctx context.Context) {
 func (a *abrRunner) tick() {
 	var s rtc.StatsSample
 	if a.signal != nil {
-		// TargetBps (GCC, T9) is intentionally not consumed yet.
-		s = a.signal.Signal().Stats
+		sig := a.signal.Signal()
+		if sig.TargetBps > 0 {
+			a.tickGCC(sig)
+			return
+		}
+		s = sig.Stats
 	} else {
 		s = a.stats.Stats()
 	}
@@ -114,4 +129,44 @@ func (a *abrRunner) tick() {
 		"loss", s.LossFraction,
 		"rtt", s.RTT)
 	a.enc.SetBitrate(d.Target)
+}
+
+// tickGCC follows a direct GCC target: clamp to [Min,Max], EWMA-smooth, then
+// apply only when it differs from the applied bitrate by >= gccMinChange and the
+// controller cooldown has elapsed. The AIMD controller is bypassed.
+func (a *abrRunner) tickGCC(sig ABRSignal) {
+	cfg := a.ctrl.Config()
+	if a.now == nil {
+		a.now = time.Now
+	}
+	t := sig.TargetBps
+	if t < cfg.Min {
+		t = cfg.Min
+	}
+	if t > cfg.Max {
+		t = cfg.Max
+	}
+	if a.gccApplied == 0 {
+		a.gccApplied = a.ctrl.Target()
+		a.gccSmoothed = float64(a.gccApplied)
+	}
+	a.gccSmoothed = gccEWMAAlpha*float64(t) + (1-gccEWMAAlpha)*a.gccSmoothed
+	next := int(a.gccSmoothed)
+	diff := next - a.gccApplied
+	if diff < 0 {
+		diff = -diff
+	}
+	if float64(diff) < gccMinChange*float64(a.gccApplied) {
+		return
+	}
+	now := a.now()
+	if !a.gccLast.IsZero() && now.Sub(a.gccLast) < cfg.Cooldown {
+		return
+	}
+	a.log.Info("abr gcc bitrate change",
+		"bitrate", next, "gcc_target", sig.TargetBps,
+		"loss", sig.Stats.LossFraction, "rtt", sig.Stats.RTT)
+	a.gccApplied = next
+	a.gccLast = now
+	a.enc.SetBitrate(next)
 }

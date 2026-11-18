@@ -95,6 +95,12 @@ webrtc:
   video_fragment_bytes: 1200        # DataChannel message size, 600-1400
   video_buffer_max_bytes: 262144    # drop a whole frame above this BufferedAmount
   video_idr_pace_ms: 8              # spread large IDRs over this many ms
+  # Google Congestion Control (TWCC) as the ABR input instead of AIMD loss/RTT.
+  # Requires encoder.backend: libav (the cli backend restarts ffmpeg per change)
+  # and abr.enabled. Target is clamped to abr.min/max_bitrate, smoothed, and
+  # applied only on >=5% changes. Viewers on the webcodecs transport send no
+  # TWCC and are ignored; if none have an estimate, AIMD is used.
+  gcc: false
   video_keyframe_min_interval_ms: 250  # coalesce viewer keyframe requests
 
 # Controller input target (T5).

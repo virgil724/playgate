@@ -11,7 +11,7 @@ func TestWebRTCGCCConfig(t *testing.T) {
 		t.Fatal("webrtc.gcc must default to false")
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("webrtc:\n  gcc: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("encoder:\n  backend: libav\nwebrtc:\n  gcc: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
@@ -40,5 +40,18 @@ func TestVideoTransportValidate(t *testing.T) {
 	c.WebRTC.VideoFragmentBytes = 1200
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWebRTCGCCRequiresLibav(t *testing.T) {
+	c := Default()
+	c.WebRTC.GCC = true
+	c.Encoder.Backend = BackendCLI
+	if err := c.Validate(); err == nil {
+		t.Fatal("gcc with cli backend must be rejected")
+	}
+	c.Encoder.Backend = BackendLibav
+	if err := c.Validate(); err != nil {
+		t.Fatalf("gcc with libav: %v", err)
 	}
 }
