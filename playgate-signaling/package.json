@@ -12,9 +12,9 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240529.0",
+    "@cloudflare/workers-types": "^5.20261118.1",
     "typescript": "^5.4.5",
     "vitest": "^2.1.0",
-    "wrangler": "^3.57.0"
+    "wrangler": "^4.164.0"
   }
 }
