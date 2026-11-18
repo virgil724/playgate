@@ -32,6 +32,9 @@ encoder:
   preset: ultrafast     # x264 preset (libx264 only; favour latency over size)
   gop_seconds: 2        # keyframe interval in seconds; GOP frames = round(capture.fps * gop_seconds)
   # keyframe_interval: 60 # optional explicit GOP in frames; when > 0 it overrides gop_seconds
+  # intra_refresh: false # libx264 only: rolling intra refresh instead of periodic IDR frames (no
+  #                       keyframe bitrate spikes; loss heals within one GOP-sized refresh period).
+  #                       A new viewer triggers one encoder restart to get its first IDR.
   ffmpeg_path: ffmpeg   # path to the ffmpeg binary
   # H.264 encoder (T13). Default libx264 (software) keeps the original behaviour.
   #   libx264        software / CPU (default, always available)

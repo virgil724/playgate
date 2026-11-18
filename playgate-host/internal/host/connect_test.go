@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/signaling"
 )
 
@@ -25,6 +26,28 @@ func TestHandleFeedMessageIgnores(t *testing.T) {
 
 	if len(cm.sessions) != 0 {
 		t.Fatalf("expected no sessions created, got %d", len(cm.sessions))
+	}
+}
+
+type fakeKeyEnc struct{ n int }
+
+func (f *fakeKeyEnc) SetBitrate(int)   {}
+func (f *fakeKeyEnc) ForceKeyframe()   { f.n++ }
+
+func TestKeyframeForcerOnlyInIntraRefresh(t *testing.T) {
+	enc := &fakeKeyEnc{}
+	cfg := config.Default()
+	if keyframeForcer(cfg, enc) != nil {
+		t.Fatal("forcer must be nil when intra_refresh is off")
+	}
+	cfg.Encoder.IntraRefresh = true
+	f := keyframeForcer(cfg, enc)
+	if f == nil {
+		t.Fatal("forcer must be set in intra-refresh mode")
+	}
+	f()
+	if enc.n != 1 {
+		t.Fatalf("ForceKeyframe calls = %d", enc.n)
 	}
 }
 
