@@ -2,6 +2,7 @@
 package config
 
 import (
+	"math"
 	"fmt"
 	"os"
 
@@ -63,8 +64,14 @@ type EncoderConfig struct {
 	// Preset is the ffmpeg x264 preset, e.g. "ultrafast". Used by the libx264
 	// codec only; hardware codecs use their own equivalents.
 	Preset string `yaml:"preset"`
-	// KeyframeInterval is the GOP size in frames.
+	// KeyframeInterval is an explicit GOP size in frames. When > 0 it takes
+	// precedence over GOPSeconds; leave it 0 (default) to derive the GOP from
+	// GOPSeconds * capture.fps.
 	KeyframeInterval int `yaml:"keyframe_interval"`
+	// GOPSeconds is the keyframe interval in seconds; the effective GOP is
+	// round(capture.fps * gop_seconds) frames. Default 1. Ignored when
+	// keyframe_interval is set.
+	GOPSeconds float64 `yaml:"gop_seconds"`
 	// FFmpegPath is the path to the ffmpeg binary.
 	FFmpegPath string `yaml:"ffmpeg_path"`
 	// Codec selects the H.264 encoder (T13): "libx264" (software, default),
@@ -74,6 +81,27 @@ type EncoderConfig struct {
 	// VAAPIDevice is the DRM render node for the h264_vaapi codec, e.g.
 	// /dev/dri/renderD128. Ignored by other codecs; empty uses the default node.
 	VAAPIDevice string `yaml:"vaapi_device"`
+}
+
+// GOPFrames returns the effective GOP size in frames for the given frame rate:
+// keyframe_interval when explicitly set (> 0), otherwise round(fps*gop_seconds)
+// (gop_seconds <= 0 means 1s), never less than 1.
+func (e EncoderConfig) GOPFrames(fps int) int {
+	if e.KeyframeInterval > 0 {
+		return e.KeyframeInterval
+	}
+	if fps <= 0 {
+		fps = 30
+	}
+	sec := e.GOPSeconds
+	if sec <= 0 {
+		sec = 1
+	}
+	g := int(math.Round(float64(fps) * sec))
+	if g < 1 {
+		g = 1
+	}
+	return g
 }
 
 // Encoder codec kinds (T13). These mirror ffmpeg encoder names.
@@ -219,7 +247,7 @@ func Default() Config {
 		Encoder: EncoderConfig{
 			Bitrate:          6_000_000,
 			Preset:           "ultrafast",
-			KeyframeInterval: 60,
+			GOPSeconds:       1,
 			FFmpegPath:       "ffmpeg",
 			Codec:            CodecLibX264,
 		},
@@ -300,6 +328,12 @@ func (c Config) Validate() error {
 	}
 	if c.Capture.FPS <= 0 {
 		return fmt.Errorf("capture fps must be positive, got %d", c.Capture.FPS)
+	}
+	if c.Encoder.KeyframeInterval < 0 {
+		return fmt.Errorf("encoder keyframe_interval must be >= 0, got %d", c.Encoder.KeyframeInterval)
+	}
+	if c.Encoder.GOPSeconds < 0 || math.IsNaN(c.Encoder.GOPSeconds) || math.IsInf(c.Encoder.GOPSeconds, 0) {
+		return fmt.Errorf("encoder gop_seconds must be a finite value >= 0, got %v", c.Encoder.GOPSeconds)
 	}
 	if c.Encoder.Bitrate <= 0 {
 		return fmt.Errorf("encoder bitrate must be positive, got %d", c.Encoder.Bitrate)

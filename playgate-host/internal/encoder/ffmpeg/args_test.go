@@ -173,12 +173,24 @@ func TestLibX264Name(t *testing.T) {
 	}
 }
 
-// TestBufsizeIsHalfBitrate documents the low-latency rate-control choice.
-func TestBufsizeIsHalfBitrate(t *testing.T) {
+// TestBufsizeIsTwoFrames documents the low-latency rate-control choice.
+func TestBufsizeIsTwoFrames(t *testing.T) {
 	o := DefaultOptions(1280, 720, 30, core.PixelFormatYUYV)
 	o.Bitrate = 6_000_000
 	args := (LibX264{}).OutputArgs(o.normalise())
-	if !hasPair(args, "-bufsize", "3000000") {
-		t.Errorf("bufsize should be half of bitrate; args: %s", strings.Join(args, " "))
+	if !hasPair(args, "-bufsize", "400000") {
+		t.Errorf("bufsize should be bitrate/fps*2; args: %s", strings.Join(args, " "))
+	}
+}
+
+func TestVBVBufsizeGuards(t *testing.T) {
+	if got := vbvBufsize(6_000_000, 60); got != 200_000 {
+		t.Errorf("60fps bufsize = %d, want 200000", got)
+	}
+	if got := vbvBufsize(6_000_000, 0); got != 400_000 {
+		t.Errorf("fps<=0 should be treated as 30, got %d", got)
+	}
+	if got := vbvBufsize(100_000, 60); got != minBufsize {
+		t.Errorf("tiny bitrate should clamp to %d, got %d", minBufsize, got)
 	}
 }

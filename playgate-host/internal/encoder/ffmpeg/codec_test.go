@@ -93,7 +93,7 @@ func TestLibX264Args(t *testing.T) {
 	if !hasPair(args, "-preset", "ultrafast") || !hasPair(args, "-tune", "zerolatency") {
 		t.Error("libx264 should keep x264 preset/tune")
 	}
-	if !hasPair(args, "-b:v", "5000000") || !hasPair(args, "-maxrate", "5000000") || !hasPair(args, "-bufsize", "2500000") {
+	if !hasPair(args, "-b:v", "5000000") || !hasPair(args, "-maxrate", "5000000") || !hasPair(args, "-bufsize", "333332") {
 		t.Errorf("rate control not applied; args: %s", strings.Join(args, " "))
 	}
 	if !hasPair(args, "-g", "30") || !hasPair(args, "-keyint_min", "30") || !hasPair(args, "-bf", "0") {

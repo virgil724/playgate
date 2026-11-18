@@ -41,7 +41,7 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	encOpts.FFmpegPath = cfg.Encoder.FFmpegPath
 	encOpts.Bitrate = cfg.Encoder.Bitrate
 	encOpts.Preset = cfg.Encoder.Preset
-	encOpts.GOPSize = cfg.Encoder.KeyframeInterval
+	encOpts.GOPSize = cfg.Encoder.GOPFrames(cfg.Capture.FPS)
 
 	// T13: select the configured codec (libx264 / v4l2m2m / vaapi / nvenc).
 	codec, err := ffmpeg.CodecFromName(cfg.EncoderCodecKind(), cfg.Encoder.VAAPIDevice)
