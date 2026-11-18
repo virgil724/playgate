@@ -18,7 +18,7 @@ set -euo pipefail
 
 FFMPEG_VERSION="${FFMPEG_VERSION:-6.1.1}"
 # x264 stable branch commit (x264 0.164). Override to bump.
-X264_REF="${X264_REF:-31e19f92f00c7003fa115047ce50978bc98c3a0d}"
+X264_REF="${X264_REF:-b35605ace3ddf7c1a5d67a2eb553f034aef41d55}"
 JOBS="${JOBS:-$(nproc)}"
 
 FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
