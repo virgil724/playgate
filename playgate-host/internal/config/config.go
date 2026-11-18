@@ -20,6 +20,7 @@ type Config struct {
 	Signaling SignalingConfig `yaml:"signaling"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
 	Server    ServerConfig    `yaml:"server"`
+	Overlay   OverlayConfig   `yaml:"overlay"`
 }
 
 // Capture source kinds.
@@ -28,6 +29,9 @@ const (
 	CaptureV4L2 = "v4l2"
 	// CaptureSynthetic generates a pure-Go test pattern (dev mode, any OS).
 	CaptureSynthetic = "synthetic"
+	// CaptureTestSrc runs ffmpeg's lavfi testsrc2 with frame-counter and
+	// input-overlay text burned in (dev/diagnostics; needs ffmpeg).
+	CaptureTestSrc = "testsrc"
 )
 
 // Input target kinds.
@@ -36,6 +40,9 @@ const (
 	InputNXBT = "nxbt"
 	// InputLog logs commands instead of forwarding them (dev mode, any OS).
 	InputLog = "log"
+	// InputOverlay writes the received controller state to overlay.text_file,
+	// which the testsrc capture source burns into the picture.
+	InputOverlay = "overlay"
 )
 
 // CaptureConfig configures the video capture source (T2: v4l2 / synthetic).
@@ -52,6 +59,23 @@ type CaptureConfig struct {
 	FPS int `yaml:"fps"`
 	// Format is the requested pixel format string, e.g. "YUYV" or "MJPEG".
 	Format string `yaml:"format"`
+	// TestSrc configures the "testsrc" capture source.
+	TestSrc TestSrcConfig `yaml:"testsrc"`
+}
+
+// TestSrcConfig configures the ffmpeg lavfi test-picture capture source.
+type TestSrcConfig struct {
+	// FontFile is an optional TrueType font for drawtext, e.g.
+	// C:/Windows/Fonts/consola.ttf. Empty uses ffmpeg's fontconfig default.
+	FontFile string `yaml:"font_file"`
+}
+
+// OverlayConfig is shared by the overlay input target (writer) and the testsrc
+// capture source (reader).
+type OverlayConfig struct {
+	// TextFile is the file the overlay input target writes and ffmpeg drawtext
+	// reloads each frame.
+	TextFile string `yaml:"text_file"`
 }
 
 // EncoderConfig configures the H.264 encoder (T3: ffmpeg subprocess; T13: codec).
@@ -241,6 +265,7 @@ func Default() Config {
 		WebRTC: WebRTCConfig{
 			ICEServers: []string{"stun:stun.l.google.com:19302"},
 		},
+		Overlay: OverlayConfig{TextFile: "playgate-overlay.txt"},
 		Input: InputConfig{
 			Target:     InputNXBT,
 			SocketPath: "/run/nxbt/nxbt.sock",
@@ -291,9 +316,9 @@ func Load(path string) (Config, error) {
 // intentionally light for T1; downstream modules add their own checks.
 func (c Config) Validate() error {
 	switch c.Capture.Source {
-	case "", CaptureV4L2, CaptureSynthetic:
+	case "", CaptureV4L2, CaptureSynthetic, CaptureTestSrc:
 	default:
-		return fmt.Errorf("capture source must be %q or %q, got %q", CaptureV4L2, CaptureSynthetic, c.Capture.Source)
+		return fmt.Errorf("capture source must be %q, %q or %q, got %q", CaptureV4L2, CaptureSynthetic, CaptureTestSrc, c.Capture.Source)
 	}
 	if c.Capture.Width <= 0 || c.Capture.Height <= 0 {
 		return fmt.Errorf("capture resolution must be positive, got %dx%d", c.Capture.Width, c.Capture.Height)
@@ -333,9 +358,12 @@ func (c Config) Validate() error {
 		}
 	}
 	switch c.Input.Target {
-	case "", InputNXBT, InputLog:
+	case "", InputNXBT, InputLog, InputOverlay:
 	default:
-		return fmt.Errorf("input target must be %q or %q, got %q", InputNXBT, InputLog, c.Input.Target)
+		return fmt.Errorf("input target must be %q, %q or %q, got %q", InputNXBT, InputLog, InputOverlay, c.Input.Target)
+	}
+	if (c.Input.Target == InputOverlay || c.Capture.Source == CaptureTestSrc) && c.Overlay.TextFile == "" {
+		return fmt.Errorf("overlay.text_file must be set when using the overlay input target or testsrc capture")
 	}
 	if c.Session.Enabled && c.Session.PublicKeyBase64 == "" && c.Session.PublicKeyFile == "" {
 		return fmt.Errorf("session.enabled requires public_key_base64 or public_key_file")

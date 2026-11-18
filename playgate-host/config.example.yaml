@@ -12,6 +12,20 @@ capture:
                         # NV12 is half the bandwidth, so many USB cards offer 60fps in NV12)
   format: YUYV          # YUYV | NV12 | MJPEG — must be a format the card lists at this resolution
 
+# Diagnostics: ffmpeg test picture (frame counter + live controller input).
+# To try it, set capture.source: testsrc and input.target: overlay:
+#   capture:
+#     source: testsrc          # needs ffmpeg (encoder.ffmpeg_path); emits NV12
+#     width: 1280
+#     height: 720
+#     fps: 30
+#     testsrc:
+#       font_file: C:/Windows/Fonts/consola.ttf   # optional; Windows usually needs it
+#   input:
+#     target: overlay          # writes pressed buttons/sticks/seq to overlay.text_file
+#   overlay:
+#     text_file: playgate-overlay.txt   # shared by testsrc (reads) and overlay target (writes)
+
 # H.264 encoder (T3: ffmpeg subprocess; T13: hardware codec selection).
 encoder:
   bitrate: 6000000      # bits per second (ABR start bitrate when abr.enabled)
