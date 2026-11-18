@@ -106,6 +106,7 @@ export class ViewerConnection {
   /** Consecutive restarts without reaching "connected" (drives backoff). */
   private restartAttempts = 0;
   private onVisibility = (): void => this.handleVisibility();
+  private onOnline = (): void => this.reconnectIfDead("network back online");
 
   constructor(opts: ViewerConnectionOptions) {
     this.signaling = opts.signaling;
@@ -188,6 +189,9 @@ export class ViewerConnection {
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", this.onVisibility);
     }
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.onOnline);
+    }
   }
 
   /** Sends a hello with a fresh session nonce, so the host (re)offers us. */
@@ -234,11 +238,19 @@ export class ViewerConnection {
   /** Coming back to the tab: if the connection died meanwhile, reconnect now
    * instead of waiting out the backoff. */
   private handleVisibility(): void {
-    if (this.closed || document.visibilityState !== "visible") return;
+    if (document.visibilityState !== "visible") return;
+    this.reconnectIfDead("tab visible");
+  }
+
+  /** Tab visible again or network back (e.g. Wi-Fi ↔ mobile switch): a dead
+   * connection is rebuilt right away instead of waiting for ICE to time out
+   * and the backoff to elapse. A healthy one is left alone. */
+  private reconnectIfDead(why: string): void {
+    if (this.closed) return;
     const st = this.pc?.connectionState;
     if (st === "failed" || st === "disconnected" || st === "closed") {
       this.restartAttempts = 0;
-      this.restartPeer(`tab visible, connection ${st}`);
+      this.restartPeer(`${why}, connection ${st}`);
     }
   }
 
@@ -478,6 +490,9 @@ export class ViewerConnection {
     this.clearTimer("disconnectTimer");
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.onVisibility);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.onOnline);
     }
     this.signaling.stop();
     this.inputChannel?.close();
