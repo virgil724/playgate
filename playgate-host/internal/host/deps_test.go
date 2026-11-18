@@ -93,6 +93,30 @@ func TestBuildDepsSyntheticLog(t *testing.T) {
 	}
 }
 
+// TestEncoderInputFormatFollowsSource guards against the encoder being set up
+// for capture.format while a generated source emits a fixed format: testsrc
+// with the default YUYV config used to drop every frame.
+func TestEncoderInputFormatFollowsSource(t *testing.T) {
+	cases := []struct {
+		source, format string
+		want           core.PixelFormat
+	}{
+		{config.CaptureTestSrc, "YUYV", core.PixelFormatNV12},
+		{config.CaptureSynthetic, "NV12", core.PixelFormatYUYV},
+		{config.CaptureV4L2, "NV12", core.PixelFormatNV12},
+		{config.CaptureV4L2, "YUYV", core.PixelFormatYUYV},
+	}
+	for _, c := range cases {
+		cfg := config.Default()
+		cfg.Capture.Source = c.source
+		cfg.Capture.Format = c.format
+		got, err := encoderInputFormat(cfg)
+		if err != nil || got != c.want {
+			t.Errorf("source=%s format=%s: got %v, %v; want %v", c.source, c.format, got, err, c.want)
+		}
+	}
+}
+
 func TestBuildDepsLibavBackendErrorsInDefaultBuild(t *testing.T) {
 	cfg := config.Default()
 	cfg.Capture.Source = config.CaptureSynthetic
