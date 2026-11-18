@@ -107,6 +107,10 @@ export const KEYREASON = {
 export const CAP_WEBCODECS_H264 = 0x01;
 export const CAP_HARDWARE = 0x02;
 export const CAP_ANNEXB_NO_DESC = 0x04;
+export const CAP_FEC_XOR = 0x08;
+export const CAP_FEC_RS = 0x10;
+/** Max parity_count this viewer will process (HELLO max_fec). */
+export const MAX_FEC_ADVERTISED = 255;
 
 export const NO_FRAME_ID = 0xffffffff;
 

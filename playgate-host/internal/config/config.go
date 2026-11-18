@@ -258,6 +258,13 @@ type WebRTCConfig struct {
 	// many ms to avoid self-induced burst loss. Default 8; 0 uses the default,
 	// negative disables pacing.
 	VideoIDRPaceMS int `yaml:"video_idr_pace_ms"`
+	// VideoFEC selects application-level FEC for the WebCodecs transport:
+	// "off" (default), "xor" or "rs" (Reed-Solomon over GF(256)). Parity is
+	// only sent to viewers whose HELLO advertises the scheme.
+	VideoFEC string `yaml:"video_fec"`
+	// VideoFECRatio is parity fragments per data fragment: m = ceil(k*ratio),
+	// at least 1 for frames of 2+ fragments. Range 0-1, default 0.1.
+	VideoFECRatio float64 `yaml:"video_fec_ratio"`
 	// VideoKeyframeMinIntervalMS coalesces viewer keyframe requests to at most
 	// one encoder ForceKeyframe per interval. Legacy alias of
 	// encoder.keyframe_debounce_ms (which wins when both are set); unset uses the
@@ -388,6 +395,8 @@ func Default() Config {
 			VideoFragmentBytes:         1200,
 			VideoBufferMaxBytes:        262144,
 			VideoIDRPaceMS:             8,
+			VideoFEC:                   "off",
+			VideoFECRatio:              0.1,
 		},
 		Overlay: OverlayConfig{TextFile: "playgate-overlay.txt"},
 		Input: InputConfig{
@@ -490,6 +499,14 @@ func (c Config) Validate() error {
 	}
 	if fb := c.WebRTC.VideoFragmentBytes; fb != 0 && (fb < 600 || fb > 1400) {
 		return fmt.Errorf("webrtc video_fragment_bytes must be within 600-1400, got %d", fb)
+	}
+	switch c.WebRTC.VideoFEC {
+	case "", "off", "xor", "rs":
+	default:
+		return fmt.Errorf("webrtc video_fec must be \"off\", \"xor\" or \"rs\", got %q", c.WebRTC.VideoFEC)
+	}
+	if r := c.WebRTC.VideoFECRatio; r < 0 || r > 1 {
+		return fmt.Errorf("webrtc video_fec_ratio must be within 0-1, got %v", r)
 	}
 	if c.WebRTC.VideoBufferMaxBytes < 0 || c.WebRTC.VideoKeyframeMinIntervalMS < 0 {
 		return fmt.Errorf("webrtc video_buffer_max_bytes and video_keyframe_min_interval_ms must be >= 0")

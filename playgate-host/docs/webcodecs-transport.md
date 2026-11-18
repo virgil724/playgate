@@ -1,6 +1,6 @@
 # WebCodecs video transport over an unreliable DataChannel
 
-Status: design (T10). Implemented by T11 (host) and T12 (web); FEC by T13.
+Status: design (T10). Implemented by T11 (host) and T12 (web); FEC (section 8) by T13.
 All integers are **big-endian** unless stated otherwise.
 
 ## 0. Terminology warning: "delivery mode"
@@ -117,7 +117,7 @@ flow host to viewer only.
 | 12  | 4    | `frame_size`    | Total Annex-B access-unit length in bytes (sum of data-fragment payloads, no padding). |
 | 16  | 2    | `frag_idx`      | 0-based index. Data fragments are `0..data_count-1`; parity fragments are `data_count..data_count+parity_count-1`. |
 | 18  | 2    | `data_count`    | `k`, number of data fragments, >= 1. |
-| 20  | 2    | `parity_count`  | `m`, number of parity fragments, 0 until T13. Total fragments `n = k+m`. |
+| 20  | 2    | `parity_count`  | `m`, number of parity fragments (0 = no FEC; see section 8). Total fragments `n = k+m`. |
 | 22  | 1    | `codec`         | `0` = H.264 Annex-B. `1`=HEVC, `2`=AV1 reserved. |
 | 23  | 1    | `fec_scheme`    | `0` none, `1` XOR (single parity), `2` Reed-Solomon over GF(256), other values reserved. Receivers that do not implement the scheme treat parity fragments as absent. |
 | 24  | 4    | `send_ms`       | Host monotonic milliseconds at send, low 32 bits. Used for jitter/e2e-delay estimation (delta between frames, never absolute). |
@@ -130,8 +130,9 @@ Rules
   `k > 65535 - m` must not be sent (an IDR of 77 MB; cap enforced by the encoder bitrate anyway).
   Receivers derive each data fragment's expected length from `frame_size`, so a short
   or long fragment is invalid and discarded.
-- **Parity fragments** always have payload length `1172` (shorter data is zero-padded
-  for the computation only; padding is not transmitted for data fragments).
+- **Parity fragments** always have payload length `stride` (= the data fragment payload
+  length, `1172` by default; see section 8). Shorter data (only the last fragment) is
+  zero-padded for the computation only; padding is not transmitted for data fragments.
 - Frames are sent as `k` fragments back to back, fragment 0 first. Keyframes are not
   interleaved with the next delta frame.
 - `frame_id` and `frag_idx` uniquely identify a message; duplicates are ignored.
@@ -208,7 +209,7 @@ Sent every `report_interval_ms` (viewer default 250, host may override via `hell
 | 10  | 2    | `frames_lost`    | Frames abandoned (timeout / superseded) since the previous report. |
 | 12  | 2    | `frags_recv`     | Fragments received since the previous report. |
 | 14  | 2    | `frags_expected` | Fragments expected for those frames (`sum(n)` of observed frames; lets host compute raw loss rate for T13/FEC ratio and ABR). |
-| 16  | 2    | `recovered`      | Frames completed thanks to parity (0 until T13). |
+| 16  | 2    | `recovered`      | Frames that were completed by FEC recovery (at least one data fragment rebuilt from parity), not fragments. 0 without FEC. |
 | 18  | 2    | `decode_queue`   | `VideoDecoder.decodeQueueSize` at report time. |
 | 20  | 2    | `jitter_ms_x10`  | Smoothed inter-frame arrival jitter in 0.1 ms. |
 | 22  | 2    | `dec_ms_x10`     | Smoothed decode time (submit to output) in 0.1 ms. |
@@ -221,7 +222,7 @@ required for correctness; a host may ignore it.
 | Off | Size | Field        | Notes |
 |-----|------|--------------|-------|
 | 4   | 1    | `caps`       | bit0 WebCodecs H.264 supported (`VideoDecoder.isConfigSupported` true); bit1 hardware accelerated config accepted; bit2 Annex-B without `description` accepted; bit3 can do XOR FEC; bit4 can do RS FEC. |
-| 5   | 1    | `max_fec`    | Max `parity_count` viewer will process. |
+| 5   | 1    | `max_fec`    | Max `parity_count` viewer will process. The host never sends more parity fragments than this; `0` therefore means "no parity" even if a cap bit is set. Viewers that support FEC send `255`. |
 | 6   | 2    | `report_ms`  | Requested report interval. 0 = default. |
 | 8   | 4    | reserved     | 0 |
 
@@ -233,9 +234,9 @@ Host replies by sending a keyframe (reason "initial join"); it must not send vid
   RPS/long-term-ref support (libav backend, NVENC `invalidateRefFrames`) re-encodes the next
   P-frame without them instead of a full IDR. Fields `last_good_id` and `lost_id` in 4.1 already
   carry the information; the host today ignores them.
-- `type 0x05` FEC_CONFIG (host to viewer, on `videofb`): reserved, T13 defines it.
-  Until then, FEC parameters are in each fragment header (`parity_count`, `fec_scheme`), so
-  no out-of-band negotiation is needed for correctness.
+- `type 0x05` FEC_CONFIG (host to viewer, on `videofb`): still reserved and **not used by T13**.
+  FEC parameters are in each fragment header (`parity_count`, `fec_scheme`), and the scheme is
+  negotiated by the HELLO cap bits alone, so no out-of-band message is needed for correctness.
 - Unknown `type` or `version`: receiver ignores the message. Never close the channel.
 
 ## 5. Browser pipeline (T12)
@@ -253,7 +254,9 @@ videochannel.onmessage -> parseHeader -> Reassembler -> FrameAssembler
 - Place data fragments at `idx * stride` (stride = fragment 0's payload length, or from the first fragment seen: use
   the host's known `MAX_FRAGMENT_PAYLOAD`; if fragment 0 never arrives but others do, use the length of
   any non-last fragment). Validate `idx < k`, lengths consistent with `frame_size`; drop on mismatch.
-- A frame is **complete** when all `k` data fragments arrived (or `k` of `n` with FEC after recovery, T13).
+- A frame is **complete** when all `k` data fragments arrived, or, with FEC, when enough of the `n`
+  fragments arrived and the missing data fragments were rebuilt from parity (section 8). Recovery is
+  attempted on every arrival once `received_data + received_parity >= k`, before any loss declaration.
 - **Completion order.** Frames are submitted to the decoder strictly in increasing `frame_id`.
   If frame `N+1` completes before `N`:
   - hold `N+1` for at most `reorder_wait_ms` (default 5 ms, bounded by one frame interval);
@@ -364,21 +367,66 @@ It sends `{"kind":"video_transport","use":"track"}`, tears down the canvas pipel
 Returning to `webcodecs` is not automatic within a session. The reverse-compat case (host without
 `video` channel): viewer sees no `video` label within 3 s of control open and uses `track`.
 
-## 8. Reserved FEC layout (T13)
+## 8. FEC (T13)
 
-- Fields already in the header: `parity_count`, `fec_scheme`, `PARITY` flag, frag index range.
-- Parity fragment `j` (index `k+j`) payload length = stride. Scheme 1 (XOR): `m == 1`, parity =
-  XOR of all `k` data fragments zero-padded to stride; recovers any single lost data fragment.
-  Scheme 2 (RS over GF(256), systematic): `m` parity fragments, any `k` of `n` fragments recover the frame
-  (poly 0x11d, Vandermonde/Cauchy matrix; pick one and document in T13 before coding;
-  `n <= 255` is required for GF(256), so `k+m <= 255`, otherwise split frames into stripes of
-  <= 255, with `frag_idx` interpreted per stripe: **reserved**, T13 decides; until then FEC is only
-  allowed for frames with `n <= 255`).
-- Parity count policy: host chooses `m = ceil(k * fec_ratio)` from config `webrtc.video_fec_ratio`
-  (default 0) and may raise it from FRAME_REPORT loss rate. Never FEC-protect when `k == 1`.
-  Parity fragments are sent after the data fragments of the same frame.
-- Receiver without FEC support ignores `PARITY` fragments (so FEC can be enabled per viewer when the
-  HELLO `caps` bits allow; host must not send parity when the bit is clear).
+Off by default (`webrtc.video_fec: off`). Everything below is wire-compatible with the 28-byte
+header; no new header fields.
+
+### 8.1 Shards
+
+- `stride` is the data-fragment payload length (`fragment_bytes - 28`, 1172 by default). A parity
+  fragment's payload length equals `stride`, so a receiver that has seen any parity fragment also
+  knows `stride`.
+- Shard `i` (`0 <= i < k`) is bytes `[i*stride, (i+1)*stride)` of the access unit. The **last** shard
+  is zero-padded up to `stride` for the computation only. After recovery the receiver trims the
+  rebuilt last shard to `frame_size - (k-1)*stride` bytes (the length it already derives from
+  `frame_size`). Parity shard `j` is sent as fragment `frag_idx = k + j`, with `PARITY` set,
+  `parity_count = m`, `fec_scheme` set and every other header field copied from the data fragments
+  (including `KEY`/`PARAM`). Parity fragments are sent after all data fragments of the frame.
+- FEC applies only when `k >= 2` and `k + m <= 255`. Larger frames (about > 290 KB at the default
+  stride) and single-fragment frames are sent without parity (`parity_count = 0`, `fec_scheme = 0`).
+  Striping is **not** defined; the per-frame decision is carried by the header, so viewers need no
+  other state.
+
+### 8.2 Scheme 1: XOR (interleaved groups)
+
+`m` parity shards (1 <= m <= k). Data shard `i` belongs to group `i mod m`; parity shard `j` is the
+XOR of all data shards of group `j`. Each group recovers at most one lost data fragment, so up to
+`m` consecutive lost data fragments (a burst) are always recoverable when their parity arrived.
+`m = 1` is the plain "XOR of all k fragments" scheme. Cheap (no multiplications).
+
+### 8.3 Scheme 2: Reed-Solomon over GF(256), systematic
+
+- Field: GF(2^8), primitive polynomial `0x11d`, generator `2`; `exp[i] = 2^i`, `log` its inverse
+  (`exp[8] = 0x1d`, `exp[254] = 0x8e`). Addition is XOR.
+- Parity shard `j` (`0 <= j < m`) = sum over `i` of `C[j][i] * data[i]` (per byte), with the Cauchy
+  matrix `C[j][i] = 1 / ((k + j) XOR i)`. The x-set `{k..k+m-1}` and y-set `{0..k-1}` are disjoint,
+  so every entry is defined and every square submatrix is invertible: **any `k` of the `n = k+m`
+  fragments recover the frame** (MDS). The data fragments stay verbatim (systematic).
+- Recovery with `e` missing data fragments: pick any `e` received parity shards, subtract the
+  contribution of the known data shards, and solve the `e x e` Cauchy system by Gauss-Jordan.
+- Golden vector (checked by both implementations): `k = 4, m = 2, stride = 8`,
+  `data[i][b] = (i*37 + b*11 + 5) & 0xff`:
+  XOR parity `4a4a7e564abad6ce`, `5e4acadef6cadab6`;
+  RS parity `b84d6d2bb562d3ff`, `8a99c8d08dfeb396`.
+  Table checks: `gfMul(0x53,0xca) = 143`, `gfInv(0x53) = 140`, `C[0][0] = 71` and `C[1][3] = 122` for `k = 4`.
+- Implementations: `playgate-host/internal/rtc/videofec.go`, `playgate-web/src/lib/webcodecs/fec.ts`.
+  No third-party library: a table-driven GF(256) with a small solver is ~150 lines, and the
+  parameters above must be identical on both ends, which a dependency would not guarantee.
+
+### 8.4 Negotiation and policy
+
+- HELLO `caps` bit3 = viewer can decode XOR, bit4 = RS; `max_fec` = max `parity_count`. The viewer
+  in `playgate-web` advertises both bits and `max_fec = 255`.
+- The host sends parity only when its configured scheme's bit is set in that viewer's HELLO; there
+  is no automatic switch between schemes. Receivers that do not know a `fec_scheme` treat parity
+  fragments as absent, so enabling FEC never breaks an old viewer.
+- Host config: `webrtc.video_fec: off | xor | rs` and `webrtc.video_fec_ratio` (0-1, default 0.1).
+  `m = ceil(k * ratio)`, at least 1 for `k >= 2`, capped by the viewer's `max_fec`, by `255 - k`
+  and, for XOR, by `k`. Never protect `k == 1`. Adapting the ratio from FRAME_REPORT loss is future work.
+- Parity fragments are part of the same send burst: they count toward pacing (the
+  more-than-8-fragments spread) and obey the same per-frame `BufferedAmount` drop (the check
+  happens before the frame, parity included, is queued).
 
 ## 9. Test and acceptance notes
 
@@ -432,3 +480,14 @@ Implemented in `playgate-web/src/lib/webcodecs/`. Points where the spec was ambi
    `frags_expected` adds `k+m` once per distinct `frame_id`, including frames that arrive late.
 6. **Stride.** Taken from the first non-last data fragment seen; the last fragment is placed at
    `frame_size - len`, so fragment 0 is not required to arrive first.
+
+## 12. T13 FEC notes (clarifications, no wire changes)
+
+1. Parity payload length is `stride`, not a hard-coded 1172, because `video_fragment_bytes` is configurable.
+2. The XOR scheme is interleaved groups (`i mod m`), a superset of the single-parity text that
+   section 8 used to reserve (`m == 1` is identical).
+3. `FRAME_REPORT.recovered` counts **frames** rescued by FEC. `frags_recv` / `frags_expected` still
+   count parity fragments, so the host can compute raw fragment loss with or without FEC.
+4. A recovered frame is indistinguishable from a normally completed one for the rest of the pipeline
+   (ordering, loss declaration, keyframe policy).
+5. `FEC_CONFIG (0x05)` stays reserved and unused.

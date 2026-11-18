@@ -50,6 +50,11 @@ type videoSenderConfig struct {
 	// WantKeyframe asks the encoder for an IDR (coalesced/rate limited by the
 	// caller). May be nil.
 	WantKeyframe func()
+	// FEC is the parity scheme to use: FECNone (default), FECXOR or FECRS.
+	// Parity is only sent to viewers whose HELLO advertises the scheme.
+	FEC int
+	// FECRatio is parity fragments per data fragment (m = ceil(k*ratio)).
+	FECRatio float64
 	// SendAck delivers a control-channel JSON message. May be nil.
 	SendAck func([]byte)
 }
@@ -68,6 +73,8 @@ type videoSender struct {
 	dc          dcSender
 	active      string
 	hello       bool
+	helloCaps   uint8
+	helloMaxFEC uint8
 	needsKey    bool
 	bumpPending bool // epoch++ at the next IDR sent
 	epoch       uint16
@@ -201,6 +208,7 @@ func (s *videoSender) handleFeedback(b []byte) {
 	case Hello:
 		s.mu.Lock()
 		s.hello = true
+		s.helloCaps, s.helloMaxFEC = m.Caps, m.MaxFEC
 		fallback := m.Caps&CapWebCodecsH264 == 0 && (s.cfg.Mode == VideoTransportWebCodecs || s.cfg.Mode == VideoTransportAuto)
 		active := s.active
 		if active == VideoTransportWebCodecs {
@@ -216,6 +224,24 @@ func (s *videoSender) handleFeedback(b []byte) {
 			s.wantKey() // initial join
 		}
 	}
+}
+
+// fecForViewerLocked returns the configured FEC scheme if this viewer's HELLO
+// advertises it, plus the viewer's max parity count. Caller holds s.mu.
+func (s *videoSender) fecForViewerLocked() (scheme, maxParity int) {
+	switch s.cfg.FEC {
+	case FECXOR:
+		if s.helloCaps&CapFECXOR == 0 {
+			return FECNone, 0
+		}
+	case FECRS:
+		if s.helloCaps&CapFECRS == 0 {
+			return FECNone, 0
+		}
+	default:
+		return FECNone, 0
+	}
+	return s.cfg.FEC, int(s.helloMaxFEC)
 }
 
 // lastReport returns the most recent FRAME_REPORT.
@@ -308,9 +334,16 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 		SendMS:  uint32(time.Since(processStart).Milliseconds()),
 	}
 	dc := s.dc
+	fecScheme, fecMax := s.fecForViewerLocked()
 	s.mu.Unlock()
 
-	msgs, err := FragmentFrame(meta, au, s.stride)
+	scheme, m := FECNone, 0
+	if fecScheme != FECNone {
+		if m = FECParityCount(fecScheme, FragmentCount(len(au), s.stride), s.cfg.FECRatio, fecMax); m > 0 {
+			scheme = fecScheme
+		}
+	}
+	msgs, err := FragmentFrameFEC(meta, au, s.stride, scheme, m)
 	if err != nil {
 		s.mu.Lock()
 		s.needsKey = true

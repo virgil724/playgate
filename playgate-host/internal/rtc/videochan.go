@@ -36,6 +36,8 @@ func (p *Peer) setupVideoChannels() error {
 		FragmentBytes: p.cfg.VideoFragmentBytes,
 		BufferMax:     uint64(p.cfg.VideoBufferMaxBytes),
 		IDRPaceMS:     p.cfg.VideoIDRPaceMS,
+		FEC:           ParseFECScheme(p.cfg.VideoFEC),
+		FECRatio:      p.cfg.VideoFECRatio,
 		Log:           p.log,
 		WantKeyframe:  p.cfg.OnVideoKeyframeRequest,
 		SendAck: func(b []byte) {

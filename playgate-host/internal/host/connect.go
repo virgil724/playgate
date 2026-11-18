@@ -365,6 +365,8 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		VideoBufferMaxBytes: c.cfg.WebRTC.VideoBufferMaxBytes,
 		VideoIDRPaceMS:      c.cfg.WebRTC.VideoIDRPaceMS,
 		EnableGCC:           c.cfg.WebRTC.GCC,
+		VideoFEC:            c.cfg.WebRTC.VideoFEC,
+		VideoFECRatio:       c.cfg.WebRTC.VideoFECRatio,
 	}
 	if rcfg.EnableGCC {
 		rcfg.GCCInitialBitrate, rcfg.GCCMinBitrate, rcfg.GCCMaxBitrate = gccBounds(c.cfg)

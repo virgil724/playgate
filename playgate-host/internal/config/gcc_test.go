@@ -55,3 +55,44 @@ func TestWebRTCGCCRequiresLibav(t *testing.T) {
 		t.Fatalf("gcc with libav: %v", err)
 	}
 }
+
+func TestVideoFECValidate(t *testing.T) {
+	for _, fec := range []string{"", "off", "xor", "rs"} {
+		cfg := Default()
+		cfg.WebRTC.VideoFEC = fec
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("video_fec %q: %v", fec, err)
+		}
+	}
+	bad := Default()
+	bad.WebRTC.VideoFEC = "ldpc"
+	if err := bad.Validate(); err == nil {
+		t.Error("unknown video_fec should fail validation")
+	}
+	for _, r := range []float64{-0.1, 1.5} {
+		cfg := Default()
+		cfg.WebRTC.VideoFECRatio = r
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("video_fec_ratio %v should fail validation", r)
+		}
+	}
+	if d := Default().WebRTC; d.VideoFEC != "off" || d.VideoFECRatio != 0.1 {
+		t.Errorf("defaults: video_fec=%q ratio=%v", d.VideoFEC, d.VideoFECRatio)
+	}
+}
+
+// TestVideoFECYAMLOff checks an unquoted `off` decodes as the string "off"
+// (yaml.v3 does not treat it as a YAML 1.1 boolean for a string field).
+func TestVideoFECYAMLOff(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte("webrtc:\n  video_fec: off\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.WebRTC.VideoFEC != "off" {
+		t.Errorf("video_fec = %q, want off", cfg.WebRTC.VideoFEC)
+	}
+}

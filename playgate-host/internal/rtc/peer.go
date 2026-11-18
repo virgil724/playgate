@@ -108,6 +108,11 @@ type Config struct {
 	// VideoIDRPaceMS spreads frames of more than 8 fragments over this many
 	// milliseconds. 0 means DefaultVideoIDRPaceMS; negative disables pacing.
 	VideoIDRPaceMS int
+	// VideoFEC is the parity scheme: "off" (default), "xor" or "rs". Parity is
+	// only sent to viewers whose HELLO advertises it.
+	VideoFEC string
+	// VideoFECRatio is parity fragments per data fragment (m = ceil(k*ratio)).
+	VideoFECRatio float64
 	// OnVideoKeyframeRequest is invoked when the WebCodecs sender needs an IDR
 	// (viewer KEYFRAME_REQUEST, HELLO, dropped frame, transport switch). The
 	// callee is responsible for rate limiting (the host coalesces to 250 ms).
