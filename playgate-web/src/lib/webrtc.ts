@@ -19,6 +19,7 @@
 import { SignalingClient, classifySignal, type SignalingMessage } from "./signaling";
 import { type ControlEvent, parseControlEvent } from "./control-events";
 import { dlog } from "./log";
+import { VIDEO_CHANNEL_LABEL, VIDEOFB_CHANNEL_LABEL } from "./webcodecs/protocol";
 
 export type ConnectionState =
   | "idle"
@@ -36,6 +37,11 @@ export interface WebRTCCallbacks {
   onControlOpen?: () => void;
   onInputOpen?: () => void;
   onControlMessage?: (data: string) => void;
+  /** Host-created WebCodecs video transport channels (see webcodecs/transport.ts). */
+  onVideoChannel?: (ch: RTCDataChannel) => void;
+  onVideoFbChannel?: (ch: RTCDataChannel) => void;
+  /** A fresh RTCPeerConnection was built (initial start or host recycle). */
+  onPeerCreated?: () => void;
 }
 
 export interface ViewerConnectionOptions {
@@ -172,6 +178,7 @@ export class ViewerConnection {
     this.inputChannel = null;
     this.controlChannel = null;
     this.pendingCandidates = [];
+    this.cb.onPeerCreated?.();
     // Audio and video arrive in separate streams (so the browser does not
     // lip-sync them); gather them into one for a single media element.
     const remoteStream = new MediaStream();
@@ -200,6 +207,8 @@ export class ViewerConnection {
       dlog("webrtc", `ondatachannel label=${ch.label}`);
       if (ch.label === "control") this.attachControlChannel(ch);
       else if (ch.label === "input") this.attachInputChannel(ch);
+      else if (ch.label === VIDEO_CHANNEL_LABEL) this.cb.onVideoChannel?.(ch);
+      else if (ch.label === VIDEOFB_CHANNEL_LABEL) this.cb.onVideoFbChannel?.(ch);
     };
 
     pc.oniceconnectionstatechange = () => {

@@ -13,6 +13,12 @@ import {
   describeEvent,
 } from "../lib/control-events";
 import { VirtualGamepad } from "../components/VirtualGamepad";
+import {
+  VideoTransportController,
+  parseTransportOverride,
+  type TransportMode,
+} from "../lib/webcodecs/transport";
+import type { PipelineStats } from "../lib/webcodecs/pipeline";
 import { dlog, subscribeLog, logHistory, type LogEntry } from "../lib/log";
 
 const CONN_LABEL: Record<ConnectionState, string> = {
@@ -34,6 +40,13 @@ export function RoomPage() {
   const { roomId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // `?transport=track|webcodecs` testing override, read once (the code-redeem
+  // flow below clears the query string).
+  const transportOverrideRef = useRef(parseTransportOverride(searchParams.get("transport")));
+  const [transportMode, setTransportMode] = useState<TransportMode>("pending");
+  const transportModeRef = useRef<TransportMode>("pending");
+  const [wcStats, setWcStats] = useState<PipelineStats | null>(null);
   const connRef = useRef<ViewerConnection | null>(null);
   const gamepadRef = useRef(new GamepadState());
   const grantedRef = useRef(false);
@@ -204,7 +217,18 @@ export function RoomPage() {
       peer: "viewer",
       token: sess?.token,
     });
-    const connection = new ViewerConnection({
+    const transport = new VideoTransportController({
+      getCanvas: () => canvasRef.current,
+      sendControl: (m) => connection.sendControl(m),
+      getPeer: () => connection.peerConnection,
+      override: transportOverrideRef.current,
+      onMode: (m) => {
+        transportModeRef.current = m;
+        setTransportMode(m);
+        if (m !== "webcodecs") setWcStats(null);
+      },
+    });
+    const connection: ViewerConnection = new ViewerConnection({
       signaling,
       authPayload: sess ? { token: sess.token } : undefined,
       callbacks: {
@@ -215,13 +239,19 @@ export function RoomPage() {
             setRtt("-");
             setVideoStats("-");
             setAudioStats("-");
+            setWcStats(null);
           }
         },
+        onPeerCreated: () => transport.peerReset(),
+        onControlOpen: () => transport.onControlOpen(),
+        onVideoChannel: (ch) => transport.onVideoChannel(ch),
+        onVideoFbChannel: (ch) => transport.onVideoFbChannel(ch),
         onTrack: (stream) => {
           if (videoRef.current) videoRef.current.srcObject = stream;
         },
         onControlEvent: handleControlEvent,
         onControlMessage: (data) => {
+          transport.onControlMessage(data);
           try {
             const m = JSON.parse(data);
             if (m.kind === "pong" && typeof m.ts === "number") {
@@ -251,6 +281,15 @@ export function RoomPage() {
       inputFramesSentRef.current = 0;
       inputFramesDroppedRef.current = 0;
 
+      const wc = transportModeRef.current === "webcodecs" ? transport.getStats() : null;
+      if (wc) {
+        setWcStats(wc);
+        setVideoStats(
+          `WebCodecs ${wc.codec} ${wc.mode}${wc.hardware ? " hw" : ""} | ${wc.fps.toFixed(0)} fps | ` +
+            `lost ${wc.framesLost} | decode ${wc.decodeMs.toFixed(1)}ms`,
+        );
+      }
+
       const conn = connRef.current;
       if (!conn) return;
       const pc = conn.peerConnection;
@@ -263,7 +302,7 @@ export function RoomPage() {
           if (s.type === "inbound-rtp" && s.kind === "audio") ainb = s;
         });
         if (inb && inb.codecId) codec = stats.get(inb.codecId);
-        if (inb) {
+        if (inb && !wc) {
           const fmt = codec?.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
           // Browser-side latency: average jitter-buffer delay and decode time
           // (cumulative counters → per-frame average). These are the streaming-
@@ -305,6 +344,7 @@ export function RoomPage() {
     return () => {
       clearInterval(pingInterval);
       clearInterval(statsInterval);
+      transport.close();
       connection.close();
       connRef.current = null;
     };
@@ -506,7 +546,46 @@ export function RoomPage() {
       </div>
 
       <div className="video-wrap">
-        <video ref={videoRef} playsInline autoPlay muted />
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          muted
+          style={transportMode === "webcodecs" ? { display: "none" } : undefined}
+        />
+        <canvas ref={canvasRef} style={transportMode === "webcodecs" ? undefined : { display: "none" }} />
+        {showLogs && wcStats && (
+          <div
+            className="mono"
+            style={{
+              position: "absolute",
+              left: 8,
+              top: 8,
+              zIndex: 2,
+              padding: "4px 8px",
+              fontSize: 11,
+              lineHeight: 1.4,
+              background: "rgba(0,0,0,.55)",
+              borderRadius: 4,
+              pointerEvents: "none",
+            }}
+          >
+            <div>
+              {wcStats.fps.toFixed(0)} fps | {wcStats.codec} {wcStats.mode}
+              {wcStats.hardware ? " hw" : ""}
+            </div>
+            <div>
+              complete {wcStats.framesComplete} | lost {wcStats.framesLost} | dropped {wcStats.framesDropped}
+            </div>
+            <div>
+              decode {wcStats.decodeMs.toFixed(1)}ms | jitter {wcStats.jitterMs.toFixed(1)}ms | queue{" "}
+              {wcStats.queue} | inflight {wcStats.inflight}
+            </div>
+            <div>
+              key requests {wcStats.keyRequests} | decoder errors {wcStats.decoderErrors}
+            </div>
+          </div>
+        )}
         {conn !== "connected" && (
           <div className="overlay-status">
             <div className="status-pill">{CONN_LABEL[conn]}</div>

@@ -410,3 +410,25 @@ Returning to `webcodecs` is not automatic within a session. The reverse-compat c
 7. **Multi-GOP policy.** With PLI-driven recovery the GOP can grow (T6 plans 3 s), which also affects late-join time.
 8. **Audio sync.** Audio stays on RTP; video in this mode carries `pts_us` only, so lip sync is best-effort.
    There is no shared clock mapping between RTP audio and `pts_us` in v1.
+
+## 11. T12 viewer implementation notes (clarifications, no wire changes)
+
+Implemented in `playgate-web/src/lib/webcodecs/`. Points where the spec was ambiguous:
+
+1. **Frame-id gaps.** The viewer treats a gap in `frame_id` before a delta frame as a lost frame
+   (needs a KEY). So the host must only skip `frame_id`s (e.g. a frame dropped for `BufferedAmount`)
+   when it also sets `needsKey` and the next frame sent is a KEY, exactly as 3.4 says.
+2. **5.2.8 `decodeQueueSize > 4`.** Dropping a delta frame corrupts every following frame, so the viewer
+   also sets `needsKey` and sends KEYFRAME_REQUEST (reason 3), not only counts the drop.
+3. **Parked deltas.** If a delta completes while an earlier KEY frame is still reassembling, it is kept
+   (not dropped) and delivered right after the KEY completes; otherwise reordering around an IDR would
+   trigger a second loss.
+4. **Viewer sequence.** On control open the viewer sends `video_transport use=webcodecs` (or `track`);
+   `HELLO` goes out only once both `video` and `videofb` are open and the decoder probe finished.
+   A host ack `active:"track"` after the viewer asked for `webcodecs` is treated as "host refuses" and
+   triggers the fallback. The host must therefore not send `active:"track"` for a viewer that asked for
+   `webcodecs` unless it really will not stream over the DataChannel.
+5. **FRAME_REPORT counters.** `frags_recv` counts every valid fragment (including parity);
+   `frags_expected` adds `k+m` once per distinct `frame_id`, including frames that arrive late.
+6. **Stride.** Taken from the first non-last data fragment seen; the last fragment is placed at
+   `frame_size - len`, so fragment 0 is not required to arrive first.
