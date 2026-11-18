@@ -16,7 +16,8 @@ capture:
 encoder:
   bitrate: 6000000      # bits per second (ABR start bitrate when abr.enabled)
   preset: ultrafast     # x264 preset (libx264 only; favour latency over size)
-  keyframe_interval: 60 # GOP size in frames
+  gop_seconds: 2        # keyframe interval in seconds; GOP frames = round(capture.fps * gop_seconds)
+  # keyframe_interval: 60 # optional explicit GOP in frames; when > 0 it overrides gop_seconds
   ffmpeg_path: ffmpeg   # path to the ffmpeg binary
   # H.264 encoder (T13). Default libx264 (software) keeps the original behaviour.
   #   libx264        software / CPU (default, always available)

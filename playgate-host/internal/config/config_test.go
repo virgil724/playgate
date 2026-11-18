@@ -122,3 +122,39 @@ func TestValidateEncoderBackend(t *testing.T) {
 		t.Errorf("empty backend should default to cli")
 	}
 }
+
+func TestGOPFrames(t *testing.T) {
+	e := EncoderConfig{GOPSeconds: 1}
+	if got := e.GOPFrames(30); got != 30 {
+		t.Errorf("1s@30fps = %d, want 30", got)
+	}
+	e.GOPSeconds = 2.5
+	if got := e.GOPFrames(30); got != 75 {
+		t.Errorf("2.5s@30fps = %d, want 75", got)
+	}
+	e.GOPSeconds = 0
+	if got := e.GOPFrames(60); got != 60 {
+		t.Errorf("unset gop_seconds should mean 1s, got %d", got)
+	}
+	e.KeyframeInterval = 45 // explicit frames wins
+	e.GOPSeconds = 3
+	if got := e.GOPFrames(60); got != 45 {
+		t.Errorf("keyframe_interval should take precedence, got %d", got)
+	}
+	if got := Default().Encoder.GOPFrames(30); got != 30 {
+		t.Errorf("default GOP = %d, want 30 (1s)", got)
+	}
+}
+
+func TestValidateGOP(t *testing.T) {
+	cfg := Default()
+	cfg.Encoder.GOPSeconds = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative gop_seconds should be rejected")
+	}
+	cfg = Default()
+	cfg.Encoder.KeyframeInterval = -5
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative keyframe_interval should be rejected")
+	}
+}
