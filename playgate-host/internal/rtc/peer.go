@@ -69,6 +69,10 @@ type Config struct {
 	// time.Now.
 	now func() time.Time
 
+	// LoopbackOnly restricts ICE gathering to loopback (udp4, no mDNS). Test-only:
+	// avoids Windows firewall prompts. Production leaves it false.
+	LoopbackOnly bool
+
 	// OnKeyframeRequest, if set, is invoked when the viewer's RTCP receiver asks
 	// for a keyframe (Picture Loss Indication / Full Intra Request). The host wires
 	// this to the encoder's ForceKeyframe so a decoder that lost an IDR recovers
@@ -290,6 +294,9 @@ func NewPeer(cfg Config) (*Peer, error) {
 
 	s := webrtc.SettingEngine{}
 	s.SetIncludeLoopbackCandidate(true)
+	if cfg.LoopbackOnly {
+		applyLoopbackOnly(&s)
+	}
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(m),
 		webrtc.WithInterceptorRegistry(ir),

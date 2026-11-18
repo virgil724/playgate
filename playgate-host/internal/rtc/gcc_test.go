@@ -11,7 +11,7 @@ import (
 )
 
 func TestTargetBitrateDisabled(t *testing.T) {
-	p, err := NewPeer(Config{})
+	p, err := NewPeer(Config{LoopbackOnly: true, })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestLoopbackGCC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	host, err := NewPeer(Config{
+	host, err := NewPeer(Config{LoopbackOnly: true, 
 		CommandBuffer:     8,
 		EnableGCC:         true,
 		GCCInitialBitrate: 2_000_000,
@@ -39,7 +39,7 @@ func TestLoopbackGCC(t *testing.T) {
 	}
 	defer host.Close()
 
-	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	browser, err := NewLoopbackPeerConnection()
 	if err != nil {
 		t.Fatal(err)
 	}
