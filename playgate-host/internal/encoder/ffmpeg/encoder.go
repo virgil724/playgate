@@ -55,16 +55,9 @@ type Encoder struct {
 	stampMu  sync.Mutex
 	inFlight []frameStamp
 
-	// PTS state, touched only by the reader goroutine (one at a time across
-	// restarts). ptsBase is the capture time PTS is measured from.
-	ptsBase time.Time
-	lastPTS time.Duration
-	havePTS bool
-
-	// waitKey is set once an inter frame has been dropped: every later inter
-	// frame references it, so they are dropped too until the next keyframe.
-	// Touched only by the reader goroutine.
-	waitKey bool
+	// emit owns PTS derivation and the keyframe-preserving output hand-off. It
+	// is touched only by the reader goroutine (one at a time across restarts).
+	emit *PacketEmitter
 
 	// restart signals the Run loop to tear down the current ffmpeg subprocess and
 	// relaunch it with the latest options (used by SetBitrate). Buffered size 1
@@ -109,6 +102,7 @@ func New(log *slog.Logger, opts Options, in <-chan core.VideoFrame) (*Encoder, e
 		packets: make(chan core.EncodedPacket, packetBufferSize),
 		errs:    make(chan error, 1),
 		restart: make(chan struct{}, 1),
+		emit:    NewPacketEmitter(log, o.FPS),
 	}, nil
 }
 
@@ -489,75 +483,12 @@ func (e *Encoder) popStamp() (frameStamp, bool) {
 	return st, true
 }
 
-// nextPTS returns the PTS for the access unit produced from the frame stamped
-// st: its capture time relative to the first frame's. Without a capture time it
-// advances one nominal frame interval. The result is strictly increasing.
-func (e *Encoder) nextPTS(st frameStamp) time.Duration {
-	fps := e.opts.FPS
-	if fps <= 0 {
-		fps = 30
-	}
-	pts := e.lastPTS + time.Second/time.Duration(fps)
-	if !st.capture.IsZero() {
-		if e.ptsBase.IsZero() {
-			e.ptsBase = st.capture
-		}
-		pts = st.capture.Sub(e.ptsBase)
-	} else if !e.havePTS {
-		pts = 0
-	}
-	if e.havePTS && pts <= e.lastPTS {
-		pts = e.lastPTS + time.Millisecond
-	}
-	e.lastPTS, e.havePTS = pts, true
-	return pts
-}
-
-// emitPacket converts an access unit to a core.EncodedPacket and pushes it onto
-// the output channel without ever blocking the encoder on a slow consumer.
-//
-// When the channel is full an inter frame is dropped — and so is every inter
-// frame after it until the next keyframe, because each one references the frame
-// before it and decoding past a gap shows corruption rather than a clean pause.
-// A keyframe is never dropped: it replaces whatever is queued, since it makes
-// everything older than itself unnecessary.
+// emitPacket forwards an access unit through the shared PacketEmitter: PTS from
+// the capture time of the frame it was encoded from, and a non-blocking,
+// keyframe-preserving hand-off (see PacketEmitter.Emit).
 func (e *Encoder) emitPacket(ctx context.Context, au accessUnit) {
 	st, _ := e.popStamp()
-	pkt := core.EncodedPacket{
-		Data:        au.data,
-		PTS:         e.nextPTS(st),
-		IsKeyframe:  au.isKeyframe,
-		EncodeStart: st.written,
-	}
-	if e.waitKey {
-		if !pkt.IsKeyframe {
-			return
-		}
-		e.waitKey = false
-	}
-	select {
-	case e.packets <- pkt:
-		return
-	default:
-	}
-	if !pkt.IsKeyframe {
-		e.waitKey = true
-		e.log.Debug("dropped encoded packet: consumer not keeping up; waiting for keyframe")
-		return
-	}
-	for drained := false; !drained; {
-		select {
-		case <-e.packets:
-		default:
-			drained = true
-		}
-	}
-	select {
-	case e.packets <- pkt:
-	case <-ctx.Done():
-	default:
-		e.waitKey = true
-	}
+	e.emit.Emit(ctx, e.packets, au.data, au.isKeyframe, st.capture, st.written)
 }
 
 // reportSubprocessExit emits an error describing why ffmpeg stopped. It is
