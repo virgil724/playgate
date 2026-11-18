@@ -367,6 +367,18 @@ It sends `{"kind":"video_transport","use":"track"}`, tears down the canvas pipel
 Returning to `webcodecs` is not automatic within a session. The reverse-compat case (host without
 `video` channel): viewer sees no `video` label within 3 s of control open and uses `track`.
 
+### 7.1 Browser support policy
+
+| Browser | WebCodecs mode | Notes |
+|---|---|---|
+| Chrome / Edge / Chromium (desktop, Android) | Supported | Primary target. |
+| Firefox | Allowed, not officially supported | Viewer tries `webcodecs` and logs a notice; problems are accepted as reports and fixed later, not treated as release blockers. |
+| Safari, and every iOS/iPadOS browser (all WebKit) | Not supported | Viewer always uses `track`. `?transport=webcodecs` forces it for testing only. |
+
+Detection is by user agent (`isWebKit` / `isFirefox` in `playgate-web/src/lib/webcodecs/transport.ts`):
+an `AppleWebKit` UA without `Chrome`, `Chromium`, `Edg/`, `OPR/` or `Android` counts as WebKit,
+which also covers iOS Chrome (`CriOS`) and iOS Firefox (`FxiOS`).
+
 ## 8. FEC (T13)
 
 Off by default (`webrtc.video_fec: off`). Everything below is wire-compatible with the 28-byte
@@ -449,8 +461,8 @@ XOR of all data shards of group `j`. Each group recovers at most one lost data f
    If IDR bursts exceed ~100 ms, split the IDR across `idr_pace_ms` or reduce IDR size (T1 VBV).
 3. **Does Pion hold unreliable-message order in its send queue and drop expired ones?** With
    `maxRetransmits=0` messages should be abandoned, not queued; verify with a netem test before relying on it.
-4. **Annex-B without `description` on Safari/Firefox.** Needs a real-browser matrix (Chrome desktop, Chrome
-   Android, Safari 17+, Firefox). avcC mode is the designed fallback.
+4. **Annex-B without `description` on Firefox.** Firefox is not officially supported (see 7.1); verify
+   only when a user reports a problem. avcC mode is the designed fallback. Safari is out of scope.
 5. **Secure context.** `VideoDecoder` requires HTTPS or localhost; confirm deployments of `playgate-web`
    are HTTPS. If not, `track` is the only mode.
 6. **Per-viewer encode.** Host has one encoder shared across viewers; a per-viewer `ForceKeyframe` is an IDR

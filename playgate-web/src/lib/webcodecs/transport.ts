@@ -3,7 +3,9 @@
  * (spec sections 6 and 7).
  *
  * Wanted transport: `webcodecs` unless `?transport=track`, WebCodecs is
- * unavailable, or we already fell back this session. The choice is announced
+ * unavailable, the browser is WebKit (Safari is not supported; only
+ * `?transport=webcodecs` forces it, for testing), or we already fell back
+ * this session. Firefox is allowed but not officially supported. The choice is announced
  * to the host on the control channel; any failure sends `use:"track"` and
  * hands rendering back to the always-wired RTP <video>.
  */
@@ -23,12 +25,31 @@ export function parseTransportOverride(v: string | null): TransportOverride {
   return v === "track" || v === "webcodecs" ? v : null;
 }
 
+/**
+ * Reports whether the user agent is a WebKit engine (desktop Safari, or any
+ * browser on iOS/iPadOS, which all run WebKit). WebCodecs mode is not
+ * supported there; those viewers stay on the RTP track.
+ */
+export function isWebKit(ua: string = typeof navigator !== "undefined" ? navigator.userAgent : ""): boolean {
+  if (!/AppleWebKit/.test(ua)) return false;
+  // Chromium (desktop, Android, Edge, Opera) also says AppleWebKit; iOS
+  // Chrome (CriOS) and Firefox (FxiOS) do not say "Chrome", so they count as WebKit.
+  return !/Chrome|Chromium|Edg\/|OPR\/|Android/.test(ua);
+}
+
+/** Reports whether the user agent is Firefox (allowed, not officially supported). */
+export function isFirefox(ua: string = typeof navigator !== "undefined" ? navigator.userAgent : ""): boolean {
+  return /Firefox\//.test(ua) && !/Seamonkey\//.test(ua);
+}
+
 export interface TransportOptions {
   getCanvas: () => HTMLCanvasElement | null;
   sendControl: (msg: string) => void;
   getPeer: () => RTCPeerConnection | null;
   onMode: (mode: TransportMode, reason?: string) => void;
   override?: TransportOverride;
+  /** User agent string; defaults to navigator.userAgent (injectable for tests). */
+  userAgent?: string;
 }
 
 export class VideoTransportController {
@@ -50,7 +71,19 @@ export class VideoTransportController {
   }
 
   private wantWebCodecs(): boolean {
-    return this.o.override !== "track" && !this.fellBack && webCodecsAvailable();
+    if (this.o.override === "track" || this.fellBack || !webCodecsAvailable()) return false;
+    const ua = this.o.userAgent;
+    if (this.o.override !== "webcodecs" && isWebKit(ua)) return false;
+    return true;
+  }
+
+  /** The reason WebCodecs is not wanted, for logging; null when it is wanted. */
+  private notWantedReason(): string | null {
+    if (this.wantWebCodecs()) return null;
+    if (this.o.override === "track") return "?transport=track";
+    if (this.fellBack) return "fell back earlier this session";
+    if (!webCodecsAvailable()) return "WebCodecs unavailable or not a secure context";
+    return "Safari/WebKit is not supported";
   }
 
   private setMode(m: TransportMode, reason?: string): void {
@@ -70,8 +103,11 @@ export class VideoTransportController {
   onControlOpen(): void {
     if (!this.wantWebCodecs()) {
       this.o.sendControl(JSON.stringify({ kind: "video_transport", use: "track" }));
-      this.setMode("track");
+      this.setMode("track", this.notWantedReason() ?? undefined);
       return;
+    }
+    if (isFirefox(this.o.userAgent)) {
+      dlog("webcodecs", "Firefox: WebCodecs mode is not officially supported; please report problems");
     }
     this.o.sendControl(JSON.stringify({ kind: "video_transport", use: "webcodecs" }));
     this.clearTimer("labelTimer");
