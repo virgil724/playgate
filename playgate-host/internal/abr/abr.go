@@ -26,10 +26,14 @@ type Sample struct {
 	// LossFraction is the fraction of packets lost since the previous sample,
 	// in [0,1] (e.g. 0.05 = 5% loss).
 	LossFraction float64
-	// RTT is the most recent round-trip time. Currently advisory: high RTT alone
-	// does not trigger a decrease (loss is the primary signal), but it is retained
-	// for future policy and exposed on Decision for logging.
+	// RTT is the most recent round-trip time, for logging. The RTT-based
+	// decision is made by the sample producer and passed as Congested.
 	RTT time.Duration
+	// Congested asks for a decrease regardless of loss: the path is queueing
+	// (RTT well above its baseline) or the sender's queue overflowed. Loss-only
+	// control reacts too late on transports that queue rather than drop (the
+	// WebCodecs DataChannel path, where RTT climbed past 1s before loss rose).
+	Congested bool
 }
 
 // Config parameters for the AIMD controller. Zero values are replaced by
@@ -145,6 +149,9 @@ const (
 	ReasonDecrease
 	// ReasonIncrease: link stayed clean for the window; additive increase.
 	ReasonIncrease
+	// ReasonCongestion: the sample reported congestion (queueing delay or a
+	// full send queue) below the loss threshold; multiplicative decrease.
+	ReasonCongestion
 )
 
 // String renders a Reason for logging.
@@ -154,6 +161,8 @@ func (r Reason) String() string {
 		return "decrease"
 	case ReasonIncrease:
 		return "increase"
+	case ReasonCongestion:
+		return "congestion"
 	default:
 		return "none"
 	}
@@ -225,7 +234,7 @@ func (c *Controller) Observe(s Sample) Decision {
 
 	// Maintain the clean-window timer independently of cooldown so that once
 	// cooldown expires an already-clean link can increase immediately.
-	if loss > c.cfg.LossThreshold {
+	if loss > c.cfg.LossThreshold || s.Congested {
 		c.haveCleanTS = false
 	} else if !c.haveCleanTS {
 		c.cleanSince = now
@@ -243,6 +252,9 @@ func (c *Controller) Observe(s Sample) Decision {
 	case loss > c.cfg.LossThreshold:
 		candidate = int(float64(c.target) * c.cfg.DecreaseFactor)
 		reason = ReasonDecrease
+	case s.Congested:
+		candidate = int(float64(c.target) * c.cfg.DecreaseFactor)
+		reason = ReasonCongestion
 	case c.haveCleanTS && now.Sub(c.cleanSince) >= c.cfg.CleanWindow:
 		candidate = c.target + c.cfg.IncreaseStep
 		reason = ReasonIncrease

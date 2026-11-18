@@ -124,7 +124,7 @@ func (a *abrRunner) tick() {
 	if !s.Valid {
 		return
 	}
-	d := a.ctrl.Observe(abr.Sample{LossFraction: s.LossFraction, RTT: s.RTT})
+	d := a.ctrl.Observe(abr.Sample{LossFraction: s.LossFraction, RTT: s.RTT, Congested: s.Congested})
 	if !d.Changed {
 		return
 	}
@@ -132,7 +132,9 @@ func (a *abrRunner) tick() {
 		"reason", d.Reason.String(),
 		"bitrate", d.Target,
 		"loss", s.LossFraction,
-		"rtt", s.RTT)
+		"rtt", s.RTT,
+		"congested", s.Congested,
+		"source", s.Source)
 	a.enc.SetBitrate(d.Target)
 }
 

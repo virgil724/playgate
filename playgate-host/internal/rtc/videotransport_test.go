@@ -616,6 +616,20 @@ func TestWebCodecsLoopback(t *testing.T) {
 	}
 	waitFor(ctx, t, func() bool { return wants.Load() > before })
 
+	// ABR on this path: a FRAME_REPORT yields a valid webcodecs sample, and
+	// Pion reports the SCTP smoothed RTT that queueing detection relies on.
+	if err := fb.Send(frameReport(10, 0, 100, 100, 30)); err != nil {
+		t.Fatal(err)
+	}
+	var sample StatsSample
+	waitFor(ctx, t, func() bool { sample = host.Stats(); return sample.Valid })
+	if sample.Source != "webcodecs" || sample.LossFraction != 0 || sample.Congested {
+		t.Fatalf("webcodecs sample = %+v", sample)
+	}
+	if srtt := sctpSRTT(host.pc.GetStats()); srtt <= 0 || srtt > time.Second {
+		t.Fatalf("SCTP SRTT = %v, want a positive sub-second value", srtt)
+	}
+
 	// Switch back to the track: acked, and DataChannel video stops.
 	if err := ctrl.SendText(`{"kind":"video_transport","use":"track"}`); err != nil {
 		t.Fatal(err)

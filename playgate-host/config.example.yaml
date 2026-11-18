@@ -84,6 +84,10 @@ abr:
   min_bitrate: 1000000    # floor (bits/sec) — bad network degrades to this, never stalls
   max_bitrate: 8000000    # ceiling (bits/sec)
   loss_threshold: 0.05    # packet-loss fraction (0..1) that triggers a decrease
+  # WebCodecs viewers (webrtc.video_transport) are covered too: their loss comes
+  # from FRAME_REPORTs, and queueing (SCTP RTT well above its recent minimum, or
+  # the video send queue filling up) also triggers a decrease below the loss
+  # threshold. Needs enabled: true.
   sample_interval_ms: 2000 # how often WebRTC stats are sampled
   cooldown_seconds: 10    # minimum time between two bitrate changes
 

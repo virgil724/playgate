@@ -19,6 +19,13 @@ type StatsSample struct {
 	// Valid is false when no remote-inbound video stats were present yet (e.g.
 	// before the first RTCP receiver report arrives).
 	Valid bool
+	// Congested is a delay/queue congestion signal independent of loss: the
+	// path's RTT has grown well past its recent minimum, or the host's own send
+	// queue overflowed. Set only for the WebCodecs (DataChannel) path, where
+	// SCTP queues instead of dropping, so loss alone reacts far too late.
+	Congested bool
+	// Source names where the sample came from: "rtp" or "webcodecs".
+	Source string
 }
 
 // Stats queries the underlying PeerConnection and extracts an ABR StatsSample.
@@ -32,7 +39,91 @@ type StatsSample struct {
 // coarser granularity (we poll on a timer instead of reacting to each RR), which
 // is exactly what the ABR cooldown wants anyway.
 func (p *Peer) Stats() StatsSample {
-	return sampleFromReport(p.pc.GetStats())
+	report := p.pc.GetStats()
+	if p.vs != nil && p.vs.Active() == VideoTransportWebCodecs {
+		// No RTP flows on this path, so there are no receiver reports: use the
+		// viewer's FRAME_REPORTs, our send queue and the SCTP RTT instead.
+		return p.vs.linkStats(sctpSRTT(report))
+	}
+	out := sampleFromReport(report)
+	out.Source = "rtp"
+	return out
+}
+
+// sctpSRTT returns the SCTP association's smoothed RTT from a stats report, or
+// 0 when unavailable.
+func sctpSRTT(report webrtc.StatsReport) time.Duration {
+	for _, s := range report {
+		if st, ok := s.(webrtc.SCTPTransportStats); ok && st.SmoothedRoundTripTime > 0 {
+			return time.Duration(st.SmoothedRoundTripTime * float64(time.Second))
+		}
+	}
+	return 0
+}
+
+// Congestion thresholds for the WebCodecs path.
+const (
+	// rttWindow is how many recent SRTT samples define the "uncongested" RTT
+	// baseline (at the ABR's 0.5-2s sampling, about 30-120s). A window rather
+	// than an all-time minimum lets the baseline follow a network change.
+	rttWindow = 60
+	// queueDelayMin is the RTT growth over the baseline treated as queueing;
+	// together with the 2x factor it ignores normal jitter on short paths.
+	queueDelayMin = 60 * time.Millisecond
+)
+
+// linkStats folds the viewer's reports since the previous call and the SCTP
+// RTT into an ABR sample for this viewer.
+func (s *videoSender) linkStats(srtt time.Duration) StatsSample {
+	ls := s.takeLinkSample()
+	s.mu.Lock()
+	base := s.recordRTT(srtt)
+	bufMax := s.cfg.BufferMax
+	s.mu.Unlock()
+	return webcodecsSample(ls, srtt, base, bufMax)
+}
+
+// recordRTT adds srtt to the window and returns the window minimum (0 if
+// none). Caller holds s.mu.
+func (s *videoSender) recordRTT(srtt time.Duration) time.Duration {
+	if srtt > 0 {
+		s.rttWin = append(s.rttWin, srtt)
+		if len(s.rttWin) > rttWindow {
+			s.rttWin = s.rttWin[len(s.rttWin)-rttWindow:]
+		}
+	}
+	var min time.Duration
+	for _, r := range s.rttWin {
+		if min == 0 || r < min {
+			min = r
+		}
+	}
+	return min
+}
+
+// webcodecsSample turns WebCodecs link counters into a StatsSample. Pure, for
+// testing. Loss is the worse of fragment loss (what the network dropped,
+// before FEC) and frame loss (what the viewer could not use); congestion is a
+// sustained RTT rise over the baseline, a send queue past half its limit, or
+// any frame the host had to drop for a full queue.
+func webcodecsSample(ls videoLinkSample, srtt, baseRTT time.Duration, bufferMax uint64) StatsSample {
+	out := StatsSample{Source: "webcodecs", RTT: srtt}
+	out.Valid = ls.Reports > 0 || ls.SenderDropped > 0
+	if ls.FragsExpected > 0 && ls.FragsRecv < ls.FragsExpected {
+		out.LossFraction = 1 - float64(ls.FragsRecv)/float64(ls.FragsExpected)
+	}
+	if n := ls.FramesComplete + ls.FramesLost; n > 0 {
+		if fl := float64(ls.FramesLost) / float64(n); fl > out.LossFraction {
+			out.LossFraction = fl
+		}
+	}
+	queueing := baseRTT > 0 && srtt > 2*baseRTT && srtt-baseRTT > queueDelayMin
+	overfull := bufferMax > 0 && ls.Buffered > bufferMax/2
+	out.Congested = queueing || overfull || ls.SenderDropped > 0
+	if out.Congested {
+		out.Valid = true
+	}
+	return out
 }
 
 // sampleFromReport extracts the loss fraction and RTT from the remote-inbound

@@ -90,6 +90,47 @@ type videoSender struct {
 
 	framesSent    uint64
 	framesDropped uint64
+
+	// link accumulates FRAME_REPORT counters (each report covers only the
+	// interval since the previous one, every ~250ms) until the ABR loop takes a
+	// sample, so no report is lost between ABR samples.
+	link        videoLinkSample
+	dropsAtTake uint64
+	// rttWin holds recent SCTP SRTT samples; its minimum is the uncongested
+	// RTT baseline for queueing-delay detection (see linkStats).
+	rttWin []time.Duration
+}
+
+// videoLinkSample is what the viewer reported about the WebCodecs path since
+// the previous takeLinkSample, plus the host's own view of its send queue.
+type videoLinkSample struct {
+	FramesComplete uint64
+	FramesLost     uint64
+	FragsRecv      uint64
+	FragsExpected  uint64
+	// Jitter is the viewer's latest smoothed inter-frame arrival jitter.
+	Jitter time.Duration
+	// Reports is how many FRAME_REPORTs were folded in (0 = no data).
+	Reports int
+	// SenderDropped counts whole frames the host dropped because the channel's
+	// send buffer was over its limit.
+	SenderDropped uint64
+	// Buffered is the channel's current BufferedAmount in bytes.
+	Buffered uint64
+}
+
+// takeLinkSample returns the accumulated link counters and resets them.
+func (s *videoSender) takeLinkSample() videoLinkSample {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.link
+	s.link = videoLinkSample{}
+	out.SenderDropped = s.framesDropped - s.dropsAtTake
+	s.dropsAtTake = s.framesDropped
+	if s.dc != nil {
+		out.Buffered = s.dc.BufferedAmount()
+	}
+	return out
 }
 
 func newVideoSender(cfg videoSenderConfig) *videoSender {
@@ -204,6 +245,12 @@ func (s *videoSender) handleFeedback(b []byte) {
 	case FrameReport:
 		s.mu.Lock()
 		s.report, s.haveReport = m, true
+		s.link.FramesComplete += uint64(m.FramesComplete)
+		s.link.FramesLost += uint64(m.FramesLost)
+		s.link.FragsRecv += uint64(m.FragsRecv)
+		s.link.FragsExpected += uint64(m.FragsExpected)
+		s.link.Jitter = time.Duration(m.JitterMSx10) * time.Millisecond / 10
+		s.link.Reports++
 		s.mu.Unlock()
 	case Hello:
 		s.mu.Lock()

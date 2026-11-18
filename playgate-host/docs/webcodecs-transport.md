@@ -453,9 +453,16 @@ XOR of all data shards of group `j`. Each group recovers at most one lost data f
 
 ## 10. Open questions
 
-1. **Bitrate adaptation in DataChannel mode.** GCC (T8) is RTP/TWCC only. Options: derive
-   target bitrate from `FRAME_REPORT` loss and `BufferedAmount` (AIMD in `internal/abr`), or use the
-   SCTP RTT. Needs a decision before T9 covers this mode.
+1. **Bitrate adaptation in DataChannel mode.** *Resolved:* the AIMD ABR (`internal/abr`) drives it.
+   For a viewer on this path `rtc.Peer.Stats()` builds its sample from (a) all `FRAME_REPORT`s since
+   the previous ABR sample (they are summed; each covers only ~250ms): loss is the worse of fragment
+   loss `1 - frags_recv/frags_expected` and frame loss `frames_lost/(complete+lost)`; (b) the host's
+   own send queue: `BufferedAmount` over half of `video_buffer_max_bytes`, or any whole frame dropped
+   for a full queue; (c) the SCTP association's smoothed RTT against its minimum over the last 60
+   samples (RTT > 2x baseline and > baseline + 60ms means queueing). (b) and (c) set
+   `Congested`, which makes AIMD decrease even with loss under the threshold: SCTP queues rather
+   than drops, and in a real test RTT climbed past 1s while loss stayed low. GCC still covers only
+   RTP viewers.
 2. **SCTP congestion control.** SCTP is congestion controlled even with `maxRetransmits=0` and
    can stall a burst (large IDR) behind cwnd; Chrome's cwnd behaviour vs Pion's was not measured.
    If IDR bursts exceed ~100 ms, split the IDR across `idr_pace_ms` or reduce IDR size (T1 VBV).

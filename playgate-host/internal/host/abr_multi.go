@@ -86,10 +86,22 @@ func (r *viewerStatsRegistry) Unregister(id string) {
 	r.mu.Unlock()
 }
 
+// worseSample reports whether a is a worse link than b: congested beats
+// uncongested, then higher loss, then higher RTT.
+func worseSample(a, b rtc.StatsSample) bool {
+	if a.Congested != b.Congested {
+		return a.Congested
+	}
+	if a.LossFraction != b.LossFraction {
+		return a.LossFraction > b.LossFraction
+	}
+	return a.RTT > b.RTT
+}
+
 // Stats aggregates: the controlling viewer's sample when it is registered and
-// valid; otherwise the worst valid sample (highest loss, then highest RTT).
-// With no valid samples (including no viewers) it returns Valid=false, which
-// makes the ABR loop hold the current bitrate.
+// valid; otherwise the worst valid sample (congested first, then highest loss,
+// then highest RTT). With no valid samples (including no viewers) it returns
+// Valid=false, which makes the ABR loop hold the current bitrate.
 func (r *viewerStatsRegistry) Stats() rtc.StatsSample {
 	ctrlID := ""
 	if r.controller != nil {
@@ -115,8 +127,7 @@ func (r *viewerStatsRegistry) Stats() rtc.StatsSample {
 		if !sm.Valid {
 			continue
 		}
-		if !worst.Valid || sm.LossFraction > worst.LossFraction ||
-			(sm.LossFraction == worst.LossFraction && sm.RTT > worst.RTT) {
+		if !worst.Valid || worseSample(sm, worst) {
 			worst = sm
 		}
 	}

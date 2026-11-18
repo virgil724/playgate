@@ -49,6 +49,21 @@ func TestRegistryWorstOfWhenNoController(t *testing.T) {
 	}
 }
 
+// TestWorseSampleRanksCongestionFirst checks a congested viewer (queueing on
+// the WebCodecs path) outranks a lossier but uncongested one, so ABR backs off
+// for the viewer whose link is actually overloaded.
+func TestWorseSampleRanksCongestionFirst(t *testing.T) {
+	congested := rtc.StatsSample{Valid: true, LossFraction: 0.01, Congested: true}
+	lossy := rtc.StatsSample{Valid: true, LossFraction: 0.04}
+	if !worseSample(congested, lossy) || worseSample(lossy, congested) {
+		t.Error("congested sample should rank worse than a lossier uncongested one")
+	}
+	slow := rtc.StatsSample{Valid: true, LossFraction: 0.04, RTT: 90 * time.Millisecond}
+	if !worseSample(slow, lossy) {
+		t.Error("equal loss should fall back to higher RTT")
+	}
+}
+
 func TestRegistryRegisterUnregister(t *testing.T) {
 	r := newViewerStatsRegistry(nil)
 	r.Register("a", constStats{smp(0.1, time.Millisecond)})

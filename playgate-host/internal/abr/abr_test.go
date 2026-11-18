@@ -59,6 +59,25 @@ func TestDecreaseOnLoss(t *testing.T) {
 	}
 }
 
+// TestDecreaseOnCongestion checks a congestion signal cuts the bitrate even
+// with loss under the threshold, and keeps the link from counting as clean.
+func TestDecreaseOnCongestion(t *testing.T) {
+	clk := newClock()
+	c := New(testConfig(), clk.now)
+	clk.add(11 * time.Second)
+	d := c.Observe(Sample{LossFraction: 0.01, Congested: true})
+	if !d.Changed || d.Reason != ReasonCongestion || d.Target != 2_000_000 {
+		t.Fatalf("expected congestion decrease to 2000000, got %+v", d)
+	}
+	// Still congested: no additive increase even after the clean window.
+	for i := 0; i < 3; i++ {
+		clk.add(11 * time.Second)
+		if d := c.Observe(Sample{Congested: true}); d.Reason == ReasonIncrease {
+			t.Fatalf("increased while congested: %+v", d)
+		}
+	}
+}
+
 func TestDecreaseClampedToMin(t *testing.T) {
 	clk := newClock()
 	cfg := testConfig()
