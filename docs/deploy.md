@@ -348,14 +348,15 @@ Because it uses cgo it **cannot be cross-compiled**: build each arch natively
 (amd64 on an amd64 Linux host, arm64 on an arm64 host such as a Pi), or let Docker
 buildx do it per platform (QEMU for the foreign arch).
 
-FFmpeg version: CI and the Docker image both use **Ubuntu 24.04 = FFmpeg 6.1**
-(libavcodec60 / libavformat60 / libavutil58 / libswscale7). go-astiav must be the
-release built for FFmpeg 6.1. (Debian bookworm is 5.1 and trixie is 7.1, so the
-libav image deliberately uses `ubuntu:24.04` rather than Debian.) The binary links
-FFmpeg dynamically, so the target machine needs the matching runtime libs.
+FFmpeg version: CI and the Docker image both use **Debian trixie = FFmpeg 7.1**
+(libavcodec61 / libavformat61 / libavutil59 / libswscale8 / libswresample5 /
+libavfilter10 / libavdevice61). go-astiav v0.39.0 targets the FFmpeg 7.x C API
+(its README says n7.0; 7.1 has the same library majors) and is used with the
+7.1 libs. Debian bookworm (5.1) and Ubuntu 24.04 (6.1) are too old. The binary
+links FFmpeg dynamically, so the target machine needs the matching runtime libs.
 
 ```bash
-# Native build (Ubuntu 24.04 / Debian-family); dev packages needed once:
+# Native build (Debian 13 trixie or another FFmpeg 7.1 distro); dev packages needed once:
 sudo apt-get install -y gcc pkg-config libavcodec-dev libavformat-dev \
   libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev libswresample-dev
 make build-libav-amd64      # on amd64  -> dist/playgate-host-libav-linux-amd64
@@ -370,18 +371,18 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 #### Fully static libav release (primary distributable, manual)
 
-The dynamic build above needs FFmpeg 6.1 runtime libs on the target, which
-Raspberry Pi OS / Debian bookworm (FFmpeg 5.1) do not have. For a
+The dynamic build above needs FFmpeg 7.1 runtime libs on the target, which
+Raspberry Pi OS bookworm (FFmpeg 5.1) and Ubuntu 24.04 (6.1) do not have. For a
 self-contained binary, run the manually triggered **release-libav-static**
 workflow; it is separate from `ci.yml` / `release.yml`, which stay pure-Go:
 
 ```bash
 gh workflow run release-libav-static.yml -f tag=v0.1.0   # tag must already have a release
-# optional: -f ffmpeg_version=6.1.1  -f ref=<git ref of source to build>
+# optional: -f ffmpeg_version=7.1.5  -f ref=<git ref of source to build>
 ```
 
 It builds on native amd64 and arm64 runners inside Alpine (musl): x264 and
-FFmpeg 6.1.x from source as static libs (cached per arch/version/script hash),
+FFmpeg 7.1.x from source as static libs (cached per arch/version/script hash),
 then `CGO_ENABLED=1 go build -tags libav,netgo,osusergo` with
 `-linkmode external -extldflags "-static"`. It runs the libav tests, checks
 `file`/`ldd` report a static binary, smoke-runs it on `debian:bookworm-slim`, and

@@ -16,7 +16,7 @@
 #      scripts/build-ffmpeg-static.sh build /opt/ffstatic'
 set -euo pipefail
 
-FFMPEG_VERSION="${FFMPEG_VERSION:-6.1.1}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.5}"
 # x264 stable branch commit (x264 0.164). Override to bump.
 X264_REF="${X264_REF:-b35605ace3ddf7c1a5d67a2eb553f034aef41d55}"
 JOBS="${JOBS:-$(nproc)}"

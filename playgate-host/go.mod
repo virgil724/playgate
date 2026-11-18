@@ -3,7 +3,7 @@ module github.com/playgate/playgate-host
 go 1.25.3
 
 require (
-	github.com/asticode/go-astiav v0.19.0
+	github.com/asticode/go-astiav v0.39.0
 	github.com/coder/websocket v1.8.14
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/rtcp v1.2.16
