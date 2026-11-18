@@ -30,7 +30,14 @@ capture:
 encoder:
   bitrate: 6000000      # bits per second (ABR start bitrate when abr.enabled)
   preset: ultrafast     # x264 preset (libx264 only; favour latency over size)
-  gop_seconds: 2        # keyframe interval in seconds; GOP frames = round(capture.fps * gop_seconds)
+  # gop_seconds: keyframe interval in seconds; GOP frames = round(capture.fps * gop_seconds).
+  # Unset picks a backend default: 3 for backend libav (cheap PLI-driven keyframes), 2 for cli.
+  # gop_seconds: 2
+  # keyframe_debounce_ms: minimum spacing between viewer-triggered ForceKeyframe calls (RTCP PLI,
+  # WebCodecs keyframe requests, new viewers). Unset: 150 for libav, 1000 for cli. With the cli
+  # backend RTCP PLI is not wired at all (a forced IDR restarts ffmpeg). Supersedes
+  # webrtc.video_keyframe_min_interval_ms.
+  # keyframe_debounce_ms: 150
   # keyframe_interval: 60 # optional explicit GOP in frames; when > 0 it overrides gop_seconds
   # intra_refresh: false # libx264 only: rolling intra refresh instead of periodic IDR frames (no
   #                       keyframe bitrate spikes; loss heals within one GOP-sized refresh period).
@@ -92,7 +99,8 @@ webrtc:
   video_fragment_bytes: 1200        # DataChannel message size, 600-1400
   video_buffer_max_bytes: 262144    # drop a whole frame above this BufferedAmount
   video_idr_pace_ms: 8              # spread large IDRs over this many ms
-  video_keyframe_min_interval_ms: 250  # coalesce viewer keyframe requests
+  # video_keyframe_min_interval_ms: legacy alias of encoder.keyframe_debounce_ms (used only when
+  # that is unset). Prefer encoder.keyframe_debounce_ms.
 
 # Controller input target (T5).
 input:

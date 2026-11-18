@@ -12,6 +12,7 @@ package ffmpeg
 import (
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/playgate/playgate-host/internal/core"
 )
@@ -44,6 +45,9 @@ type Options struct {
 	// IntraRefresh enables x264 rolling intra refresh instead of periodic IDRs
 	// (libx264 only). GOPSize is then the refresh period.
 	IntraRefresh bool
+	// ForceKeyframeDebounce bounds how often ForceKeyframe may restart the ffmpeg
+	// subprocess (CLI backend). 0 uses DefaultForceKeyframeDebounce (1s).
+	ForceKeyframeDebounce time.Duration
 }
 
 // DefaultOptions returns low-latency software-encode defaults for live

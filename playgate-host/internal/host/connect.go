@@ -10,6 +10,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/playgate/playgate-host/internal/config"
+	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/metrics"
 	"github.com/playgate/playgate-host/internal/rtc"
 	"github.com/playgate/playgate-host/internal/signaling"
@@ -43,11 +44,10 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 		// every viewer shares the single encoder.
 		var kf *keyframeCoalescer
 		if k, ok := enc.(interface{ ForceKeyframe() }); ok {
-			interval := time.Duration(cfg.WebRTC.VideoKeyframeMinIntervalMS) * time.Millisecond
-			if interval <= 0 {
-				interval = 250 * time.Millisecond
-			}
-			kf = newKeyframeCoalescer(interval, k.ForceKeyframe)
+			// One knob: encoder.keyframe_debounce_ms (legacy alias
+			// webrtc.video_keyframe_min_interval_ms; backend default 150ms libav,
+			// 1s cli). See config.Config.KeyframeDebounce.
+			kf = newKeyframeCoalescer(cfg.KeyframeDebounce(), k.ForceKeyframe)
 			defer kf.Stop()
 		}
 
@@ -58,6 +58,7 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			mc:     mc,
 			enc:    enc,
 			forceKey: keyframeForcer(cfg, enc),
+			cheapKey: cheapKeyframe(enc),
 			client:  client,
 			router:  router,
 			arouter: arouter,
@@ -79,6 +80,13 @@ func keyframeForcer(cfg config.Config, enc BitrateController) func() {
 		return k.ForceKeyframe
 	}
 	return nil
+}
+
+// cheapKeyframe reports whether enc can force a keyframe without disturbing
+// other viewers (core.EncoderCaps.CheapKeyframe, true for the libav backend).
+func cheapKeyframe(enc BitrateController) bool {
+	c, ok := enc.(interface{ Caps() core.EncoderCaps })
+	return ok && c.Caps().CheapKeyframe
 }
 
 // resolveICEServers fetches TURN credentials when enabled, falling back to the
@@ -122,6 +130,9 @@ type connManager struct {
 	// in intra-refresh mode, where no periodic IDR exists for late joiners.
 	forceKey func()
 	kf      *keyframeCoalescer // coalesced ForceKeyframe; nil if the encoder cannot
+	// cheapKey is the encoder's Caps().CheapKeyframe: RTCP PLI/FIR and new-viewer
+	// joins are then routed to kf. Otherwise (cli backend) they are not.
+	cheapKey bool
 	client  *signaling.Client
 	router  *VideoRouter
 	arouter *AudioRouter // nil when audio is disabled
@@ -296,13 +307,38 @@ func (c *connManager) applyAnswer(sess *viewerSession, env viewerEnvelope) {
 	}
 }
 
+// pliHandler returns the RTCP PLI/FIR callback: the shared coalescer when the
+// encoder has cheap keyframes, otherwise nil (not wired).
+func (c *connManager) pliHandler() func() {
+	if c.cheapKey && c.kf != nil {
+		return c.kf.Request
+	}
+	return nil
+}
+
+// requestJoinKeyframe asks for one keyframe for a newly joined viewer. With
+// cheap keyframes it goes through the coalescer (which also covers the
+// intra-refresh late-joiner case, so it never fires twice); otherwise only
+// intra-refresh mode forces one, since no periodic IDR exists there.
+func (c *connManager) requestJoinKeyframe() {
+	switch {
+	case c.cheapKey && c.kf != nil:
+		c.kf.Request()
+	case c.forceKey != nil:
+		c.forceKey()
+	}
+}
+
 // runViewer builds the peer for one viewer, registers it with the routers, sends
 // the offer, and waits for that viewer to disconnect, then cleans up.
 //
-// NOTE: we intentionally do NOT wire OnKeyframeRequest to the encoder — an
-// on-demand IDR means restarting ffmpeg (new SPS/PPS, PTS reset), which disrupts
-// every other viewer. A late joiner instead waits for the next scheduled GOP
-// keyframe (per-peer gating in rtc.Peer.WriteSample).
+// Keyframe policy: OnKeyframeRequest (RTCP PLI/FIR) is wired to the shared,
+// coalesced ForceKeyframe only when the encoder reports Caps().CheapKeyframe
+// (libav backend: in-process IDR, no disruption to other viewers). With the cli
+// backend an on-demand IDR means restarting ffmpeg (new SPS/PPS, PTS reset),
+// which disrupts every viewer, so PLI is deliberately NOT wired there and a
+// late joiner waits for the next scheduled GOP keyframe (per-peer gating in
+// rtc.Peer.WriteSample).
 //
 // ABR is intentionally not run per viewer: it drives the single shared encoder
 // bitrate, so N viewers would fight over it. Multi-viewer runs at fixed bitrate.
@@ -328,6 +364,7 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 	if c.kf != nil {
 		rcfg.OnVideoKeyframeRequest = c.kf.Request
 	}
+	rcfg.OnKeyframeRequest = c.pliHandler()
 	peer, err := rtc.NewPeer(rcfg)
 	if err != nil {
 		log.Warn("create peer failed", "err", err)
@@ -343,9 +380,7 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		defer c.arouter.RemoveSink(peer)
 	}
 
-	if c.forceKey != nil {
-		c.forceKey()
-	}
+	c.requestJoinKeyframe()
 
 	c.wireInput(sctx, peer)
 

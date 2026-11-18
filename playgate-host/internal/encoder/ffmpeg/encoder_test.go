@@ -246,3 +246,33 @@ func TestEmitPacketIntraRefreshNoWaitKey(t *testing.T) {
 		}
 	}
 }
+
+func TestForceKeyframeDebounceConfigurable(t *testing.T) {
+	mk := func(d time.Duration) *Encoder {
+		opts := DefaultOptions(640, 480, 30, core.PixelFormatYUYV)
+		opts.ForceKeyframeDebounce = d
+		enc, err := New(quietLogger(), opts, make(chan core.VideoFrame))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return enc
+	}
+	if got := mk(0).forceDebounce(); got != DefaultForceKeyframeDebounce {
+		t.Errorf("default debounce = %v, want %v", got, DefaultForceKeyframeDebounce)
+	}
+	enc := mk(20 * time.Millisecond)
+	if got := enc.forceDebounce(); got != 20*time.Millisecond {
+		t.Fatalf("debounce = %v, want 20ms", got)
+	}
+	enc.ForceKeyframe()
+	enc.ForceKeyframe() // inside the window: dropped
+	if len(enc.restart) != 1 {
+		t.Fatalf("pending restarts = %d, want 1", len(enc.restart))
+	}
+	<-enc.restart
+	time.Sleep(40 * time.Millisecond)
+	enc.ForceKeyframe() // window elapsed: fires again
+	if len(enc.restart) != 1 {
+		t.Fatalf("restart after window = %d, want 1", len(enc.restart))
+	}
+}

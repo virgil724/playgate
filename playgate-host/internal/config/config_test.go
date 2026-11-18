@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadOverlaysDefaults(t *testing.T) {
@@ -145,9 +146,18 @@ func TestGOPFrames(t *testing.T) {
 		t.Errorf("2.5s@30fps = %d, want 75", got)
 	}
 	e.GOPSeconds = 0
-	if got := e.GOPFrames(60); got != 60 {
-		t.Errorf("unset gop_seconds should mean 1s, got %d", got)
+	if got := e.GOPFrames(60); got != 120 {
+		t.Errorf("unset gop_seconds on cli should mean 2s, got %d", got)
 	}
+	e.Backend = BackendLibav
+	if got := e.GOPFrames(60); got != 180 {
+		t.Errorf("unset gop_seconds on libav should mean 3s, got %d", got)
+	}
+	e.GOPSeconds = 1 // explicit value wins over the backend default
+	if got := e.GOPFrames(60); got != 60 {
+		t.Errorf("explicit gop_seconds on libav = %d, want 60", got)
+	}
+	e.Backend = ""
 	e.KeyframeInterval = 45 // explicit frames wins
 	e.GOPSeconds = 3
 	if got := e.GOPFrames(60); got != 45 {
@@ -155,6 +165,34 @@ func TestGOPFrames(t *testing.T) {
 	}
 	if got := Default().Encoder.GOPFrames(30); got != 60 {
 		t.Errorf("default GOP = %d, want 60 (2s)", got)
+	}
+	cfg := Default()
+	cfg.Encoder.Backend = BackendLibav
+	if got := cfg.Encoder.GOPFrames(30); got != 90 {
+		t.Errorf("default libav GOP = %d, want 90 (3s)", got)
+	}
+}
+
+func TestKeyframeDebounce(t *testing.T) {
+	cfg := Default()
+	if got := cfg.KeyframeDebounce(); got != time.Second {
+		t.Errorf("cli default = %v, want 1s", got)
+	}
+	cfg.Encoder.Backend = BackendLibav
+	if got := cfg.KeyframeDebounce(); got != 150*time.Millisecond {
+		t.Errorf("libav default = %v, want 150ms", got)
+	}
+	cfg.WebRTC.VideoKeyframeMinIntervalMS = 400 // legacy alias applies when unset
+	if got := cfg.KeyframeDebounce(); got != 400*time.Millisecond {
+		t.Errorf("legacy alias = %v, want 400ms", got)
+	}
+	cfg.Encoder.KeyframeDebounceMS = 90 // new knob wins
+	if got := cfg.KeyframeDebounce(); got != 90*time.Millisecond {
+		t.Errorf("explicit = %v, want 90ms", got)
+	}
+	cfg.Encoder.KeyframeDebounceMS = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative keyframe_debounce_ms should be rejected")
 	}
 }
 

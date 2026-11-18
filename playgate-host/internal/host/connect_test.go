@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/playgate/playgate-host/internal/config"
+	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/signaling"
 )
 
@@ -48,6 +50,85 @@ func TestKeyframeForcerOnlyInIntraRefresh(t *testing.T) {
 	f()
 	if enc.n != 1 {
 		t.Fatalf("ForceKeyframe calls = %d", enc.n)
+	}
+}
+
+type fakeCapsEnc struct {
+	fakeKeyEnc
+	cheap bool
+}
+
+func (f *fakeCapsEnc) Caps() core.EncoderCaps { return core.EncoderCaps{CheapKeyframe: f.cheap} }
+
+func newTestKeyMgr(enc *fakeCapsEnc, cfg config.Config) *connManager {
+	cm := &connManager{
+		kf:       newKeyframeCoalescer(time.Hour, enc.ForceKeyframe),
+		cheapKey: cheapKeyframe(enc),
+		forceKey: keyframeForcer(cfg, enc),
+	}
+	return cm
+}
+
+func TestPLIOnlyWithCheapKeyframe(t *testing.T) {
+	cli := &fakeCapsEnc{cheap: false}
+	cm := newTestKeyMgr(cli, config.Default())
+	defer cm.kf.Stop()
+	if cm.pliHandler() != nil {
+		t.Fatal("PLI must not be wired for a non-cheap-keyframe encoder")
+	}
+
+	libav := &fakeCapsEnc{cheap: true}
+	cm = newTestKeyMgr(libav, config.Default())
+	defer cm.kf.Stop()
+	h := cm.pliHandler()
+	if h == nil {
+		t.Fatal("PLI must be wired when CheapKeyframe is true")
+	}
+	for i := 0; i < 10; i++ { // burst coalesces: first fires, the rest are deferred
+		h()
+	}
+	if libav.n != 1 {
+		t.Fatalf("ForceKeyframe calls = %d, want 1 (coalesced)", libav.n)
+	}
+}
+
+func TestJoinKeyframe(t *testing.T) {
+	// cli, no intra-refresh: nothing.
+	cli := &fakeCapsEnc{}
+	cm := newTestKeyMgr(cli, config.Default())
+	defer cm.kf.Stop()
+	cm.requestJoinKeyframe()
+	if cli.n != 0 {
+		t.Fatalf("cli join fired %d", cli.n)
+	}
+
+	// cheap keyframe: exactly one via the coalescer.
+	libav := &fakeCapsEnc{cheap: true}
+	cm = newTestKeyMgr(libav, config.Default())
+	defer cm.kf.Stop()
+	cm.requestJoinKeyframe()
+	if libav.n != 1 {
+		t.Fatalf("libav join fired %d, want 1", libav.n)
+	}
+
+	// cheap keyframe + intra-refresh: still one, not two.
+	cfg := config.Default()
+	cfg.Encoder.IntraRefresh = true
+	ir := &fakeCapsEnc{cheap: true}
+	cm = newTestKeyMgr(ir, cfg)
+	defer cm.kf.Stop()
+	cm.requestJoinKeyframe()
+	if ir.n != 1 {
+		t.Fatalf("libav+intra-refresh join fired %d, want 1 (no double fire)", ir.n)
+	}
+
+	// cli + intra-refresh keeps T2 behaviour: direct force.
+	cliIR := &fakeCapsEnc{}
+	cm = newTestKeyMgr(cliIR, cfg)
+	defer cm.kf.Stop()
+	cm.requestJoinKeyframe()
+	if cliIR.n != 1 {
+		t.Fatalf("cli+intra-refresh join fired %d, want 1", cliIR.n)
 	}
 }
 
