@@ -368,8 +368,44 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 # or: make docker-host-libav REGISTRY=ghcr.io/your-org/playgate
 ```
 
-Release tags also publish `playgate-host-libav-linux-{amd64,arm64}` (built on
-native `ubuntu-24.04` / `ubuntu-24.04-arm` runners) next to the pure-Go binaries.
+#### Fully static libav release (primary distributable, manual)
+
+The dynamic build above needs FFmpeg 6.1 runtime libs on the target, which
+Raspberry Pi OS / Debian bookworm (FFmpeg 5.1) do not have. For a
+self-contained binary, run the manually triggered **release-libav-static**
+workflow; it is separate from `ci.yml` / `release.yml`, which stay pure-Go:
+
+```bash
+gh workflow run release-libav-static.yml -f tag=v0.1.0   # tag must already have a release
+# optional: -f ffmpeg_version=6.1.1  -f ref=<git ref of source to build>
+```
+
+It builds on native amd64 and arm64 runners inside Alpine (musl): x264 and
+FFmpeg 6.1.x from source as static libs (cached per arch/version/script hash),
+then `CGO_ENABLED=1 go build -tags libav,netgo,osusergo` with
+`-linkmode external -extldflags "-static"`. It runs the libav tests, checks
+`file`/`ldd` report a static binary, smoke-runs it on `debian:bookworm-slim`, and
+uploads `playgate-host-libav-static-linux-<arch>`, a `.sha256`, and a
+`.BUILDINFO.txt` (exact FFmpeg/x264 versions, source SHA256s, configure lines)
+to the release. The same steps run locally via `scripts/build-ffmpeg-static.sh`
+and `scripts/build-host-libav-static.sh` in an `alpine:3.20` container.
+
+| Feature | Static build |
+|---------|--------------|
+| libx264 software encode | yes (statically linked, GPL) |
+| `h264_v4l2m2m` (Pi 4 hardware encoder) | compiled in (needs kernel V4L2 M2M device; untested on hardware) |
+| NVENC (`h264_nvenc`) | **not available** - NVENC `dlopen()`s the NVIDIA driver at runtime, which a static musl binary cannot do (and a glibc driver cannot be loaded into a musl process). Use the dynamic glibc libav build or the CLI backend for NVENC. |
+| VAAPI | **not available** - needs dynamic libva/driver. Use the dynamic build. |
+
+**GPL notice.** Statically linking x264 and building FFmpeg with `--enable-gpl`
+makes the distributed static binary a GPL work (not just a program that happens
+to call GPL libraries). Anyone you give the binary to must be offered the
+corresponding source: the playgate-host source at the release tag, the
+unmodified FFmpeg and x264 sources named in `.BUILDINFO.txt`, and the build
+scripts above. Keep that file attached to the release and link it from
+distribution pages. If GPL is unacceptable, build FFmpeg with OpenH264 (BSD,
+software H.264) plus NVENC (no `--enable-gpl`, no libx264) instead; that
+variant is not produced by the workflow today.
 
 ---
 
