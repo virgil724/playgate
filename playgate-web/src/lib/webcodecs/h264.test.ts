@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { KeyframeRequester } from "./pipeline";
+import { KeyframeRequester, keyFrameTimeoutMs, maxInflightFor } from "./pipeline";
 import { KEYREASON } from "./protocol";
 import { annexBToAvcc, buildAvcC, codecStringFromSps, splitNals } from "./h264";
 
@@ -60,6 +60,29 @@ describe("KeyframeRequester", () => {
     expect(sent).toHaveLength(2);
     r.keyArrived();
     r.tick(5000);
+    expect(sent).toHaveLength(2);
+  });
+});
+
+describe("key frame timing", () => {
+  it("waits at least 300ms or 3 RTTs for a KEY", () => {
+    expect(keyFrameTimeoutMs(10)).toBe(300);
+    expect(keyFrameTimeoutMs(200)).toBe(600);
+  });
+
+  it("sizes the in-flight window to the frames arriving during a KEY", () => {
+    expect(maxInflightFor(300, 1000 / 30)).toBe(13); // ceil(9) + 4
+    expect(maxInflightFor(300, 1000 / 60)).toBe(22); // ceil(18) + 4
+    expect(maxInflightFor(20, 1000 / 60)).toBe(8); // never below the old fixed 8
+  });
+
+  it("does not re-request while a KEY may still be arriving", () => {
+    const sent: number[] = [];
+    const r = new KeyframeRequester(() => sent.push(1), () => 10, 250, () => 300);
+    r.request(KEYREASON.frameLost, 1, 0);
+    r.tick(260); // past the 250ms rate limit but inside the 300ms key timeout
+    expect(sent).toHaveLength(1);
+    r.tick(300);
     expect(sent).toHaveLength(2);
   });
 });

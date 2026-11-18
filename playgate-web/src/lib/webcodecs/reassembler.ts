@@ -34,9 +34,16 @@ export interface LossInfo {
 }
 
 export interface ReassemblerOptions {
-  maxInflight?: number;
+  /** Max partial frames held; a function so it can follow the frame rate. */
+  maxInflight?: number | (() => number);
   reorderWaitMs?: () => number;
   frameTimeoutMs?: () => number;
+  /** Timeout for a KEY frame, and for deltas parked behind an in-flight KEY.
+   * A KEY is many fragments (paced by the host, then gated by SCTP's
+   * congestion window), so it needs far longer than a delta: with the delta
+   * timeout (2 frame intervals, 33ms at 60fps) every IDR timed out, the viewer
+   * re-requested one, and the stream never recovered. */
+  keyFrameTimeoutMs?: () => number;
   onFrame: (f: AssembledFrame) => void;
   /** A loss that requires a keyframe (a KEYFRAME_REQUEST should follow). */
   onLoss: (l: LossInfo) => void;
@@ -97,14 +104,26 @@ export class Reassembler {
     highestId: 0,
   };
   private haveHighest = false;
-  private readonly maxInflight: number;
+  private readonly maxInflightFn: () => number;
   private readonly reorderWaitMs: () => number;
   private readonly frameTimeoutMs: () => number;
+  private readonly keyFrameTimeoutMs: () => number;
 
   constructor(private readonly o: ReassemblerOptions) {
-    this.maxInflight = o.maxInflight ?? 8;
+    const mi = o.maxInflight ?? 8;
+    this.maxInflightFn = typeof mi === "function" ? mi : () => mi;
     this.reorderWaitMs = o.reorderWaitMs ?? (() => 5);
     this.frameTimeoutMs = o.frameTimeoutMs ?? (() => 20);
+    this.keyFrameTimeoutMs = o.keyFrameTimeoutMs ?? (() => 300);
+  }
+
+  private get maxInflight(): number {
+    return this.maxInflightFn();
+  }
+
+  /** Incomplete-frame timeout for slot s: long for a KEY, short for a delta. */
+  private timeoutFor(s: Slot): number {
+    return s.key ? this.keyFrameTimeoutMs() : this.frameTimeoutMs();
   }
 
   get waitingForKey(): boolean {
@@ -238,10 +257,10 @@ export class Reassembler {
     const next = this.nextId();
     for (const s of this.slots.values()) {
       let t: number;
-      if (s.completeMs === null) t = s.firstMs + this.frameTimeoutMs();
+      if (s.completeMs === null) t = s.firstMs + (this.needKey && !s.key ? this.keyFrameTimeoutMs() : this.timeoutFor(s));
       else if (this.needKey) {
         if (s.key) continue;
-        t = s.completeMs + this.frameTimeoutMs();
+        t = s.completeMs + this.keyFrameTimeoutMs();
       } else if (next !== null && s.frameId === next) continue;
       else t = s.completeMs + this.reorderWaitMs();
       if (best === null || t < best) best = t;
@@ -410,7 +429,7 @@ export class Reassembler {
       // 3. `next` is missing or incomplete: has a later frame been waiting
       //    longer than the reorder window, or has `next` itself timed out?
       let lose = false;
-      if (ns && now - ns.firstMs >= this.frameTimeoutMs()) lose = true;
+      if (ns && now - ns.firstMs >= this.timeoutFor(ns)) lose = true;
       if (!lose) {
         for (const s of sorted) {
           if (s.completeMs !== null && s.frameId !== next && now - s.completeMs >= this.reorderWaitMs()) {
@@ -427,12 +446,12 @@ export class Reassembler {
     }
 
     // 4. Any other incomplete frame past its timeout is lost.
-    const timeout = this.frameTimeoutMs();
     for (const s of this.sortedSlots()) {
       if (this.needKey && !s.key) {
-        // Deltas parked behind an in-flight KEY: silently expire.
-        if (now - (s.completeMs ?? s.firstMs) >= timeout) this.slots.delete(s.frameId);
-      } else if (s.completeMs === null && now - s.firstMs >= timeout) {
+        // Deltas parked behind an in-flight KEY: kept as long as the KEY may
+        // take (they are needed right after it), then silently expire.
+        if (now - (s.completeMs ?? s.firstMs) >= this.keyFrameTimeoutMs()) this.slots.delete(s.frameId);
+      } else if (s.completeMs === null && now - s.firstMs >= this.timeoutFor(s)) {
         this.slots.delete(s.frameId);
         this.lose(s.frameId);
       }

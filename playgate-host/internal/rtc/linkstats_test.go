@@ -22,8 +22,10 @@ func TestWebCodecsSample(t *testing.T) {
 			srtt: 12 * ms, base: 10 * ms, wantValid: true},
 		{name: "fragment loss", ls: videoLinkSample{Reports: 2, FramesComplete: 30, FragsRecv: 270, FragsExpected: 300},
 			srtt: 12 * ms, base: 10 * ms, wantValid: true, wantLoss: 0.1},
-		{name: "frame loss worse than fragment loss", ls: videoLinkSample{Reports: 2, FramesComplete: 24, FramesLost: 6, FragsRecv: 297, FragsExpected: 300},
-			srtt: 12 * ms, base: 10 * ms, wantValid: true, wantLoss: 0.2},
+		// Waiting for a keyframe: every delta is discarded and reported lost
+		// although the network delivered all fragments. Not network loss.
+		{name: "frame loss alone is not network loss", ls: videoLinkSample{Reports: 2, FramesComplete: 0, FramesLost: 30, FragsRecv: 300, FragsExpected: 300},
+			srtt: 9 * ms, base: 8 * ms, wantValid: true, wantLoss: 0},
 		{name: "jitter on a short path is not queueing", ls: videoLinkSample{Reports: 2, FramesComplete: 30},
 			srtt: 45 * ms, base: 10 * ms, wantValid: true},
 		{name: "queueing delay", ls: videoLinkSample{Reports: 2, FramesComplete: 30},

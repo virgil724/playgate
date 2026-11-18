@@ -121,13 +121,42 @@ describe("Reassembler", () => {
     expect(losses.map((l) => l.lostId)).toEqual([2]);
   });
 
-  it("a lost IDR is handled like any lost frame", () => {
+  it("gives an incomplete IDR the long key timeout, then declares it lost", () => {
     const { r, frames, losses, send, whole } = setup();
-    send(frag(1, 0, 30, { key: true }), 0); // fragment 1 and 2 lost
-    r.poll(25);
+    send(frag(1, 0, 30, { key: true }), 0); // fragments 1 and 2 never arrive
+    r.poll(25); // a delta would be lost by now; a KEY is still being drained
+    expect(losses).toHaveLength(0);
+    r.poll(301);
     expect(losses.map((l) => l.lostId)).toEqual([1]);
-    whole(2, 10, 30, { key: true });
+    whole(2, 10, 310, { key: true });
     expect(frames.map((f) => f.frameId)).toEqual([2]);
+  });
+
+  // 60fps: an IDR whose fragments trickle in over ~150ms while 9 deltas arrive
+  // behind it. Before the key timeout existed, the IDR (and the parked deltas)
+  // timed out after 2 frame intervals and the stream never recovered.
+  it("recovers from a slow IDR with deltas arriving behind it", () => {
+    const frames: AssembledFrame[] = [];
+    const losses: LossInfo[] = [];
+    const r = new Reassembler({
+      maxInflight: () => 24,
+      frameTimeoutMs: () => 33,
+      keyFrameTimeoutMs: () => 300,
+      onFrame: (f) => frames.push(f),
+      onLoss: (l) => losses.push(l),
+      onEpoch: () => {},
+    });
+    const K = 4; // IDR fragments, one every 40ms
+    for (let i = 0; i < K - 1; i++) r.push(frag(1, i, K * STRIDE, { key: true }), i * 40);
+    for (let id = 2; id <= 10; id++) {
+      r.push(frag(id, 0, 10), 17 * (id - 1)); // complete one-fragment deltas
+      r.poll(17 * (id - 1));
+    }
+    expect(frames).toHaveLength(0);
+    r.push(frag(1, K - 1, K * STRIDE, { key: true }), 160); // IDR completes
+    r.poll(160);
+    expect(losses).toHaveLength(0);
+    expect(frames.map((f) => f.frameId)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
   it("evicts the oldest partial frame beyond 8 in flight", () => {

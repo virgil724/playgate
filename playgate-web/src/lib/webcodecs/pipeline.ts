@@ -31,6 +31,17 @@ export const KEYFRAME_MIN_INTERVAL_MS = 250;
 export const NO_KEYFRAME_TIMEOUT_MS = 3000;
 const DEFAULT_RTT_MS = 250;
 
+/** How long a KEY frame may take to arrive: at least 300ms, or 3 RTTs. */
+export function keyFrameTimeoutMs(rttMs: number): number {
+  return Math.max(300, 3 * rttMs);
+}
+
+/** In-flight frame window: enough slots for every frame that arrives while a
+ * KEY is still completing, plus slack; never below the old fixed 8. */
+export function maxInflightFor(keyTimeoutMs: number, frameIntervalMs: number): number {
+  return Math.max(8, Math.ceil(keyTimeoutMs / frameIntervalMs) + 4);
+}
+
 /** Rate-limits KEYFRAME_REQUESTs and re-sends while no IDR has arrived. */
 export class KeyframeRequester {
   private awaiting = false;
@@ -44,6 +55,10 @@ export class KeyframeRequester {
     private readonly send: (reason: number, lostId: number) => void,
     private readonly getRttMs: () => number,
     private readonly minIntervalMs = KEYFRAME_MIN_INTERVAL_MS,
+    /** Never re-request sooner than this: an IDR may still be arriving (see
+     * the reassembler's key timeout); asking again only adds another IDR to
+     * a link that is already busy delivering one. */
+    private readonly retryFloorMs: () => number = () => 250,
   ) {}
 
   get isAwaiting(): boolean {
@@ -74,7 +89,7 @@ export class KeyframeRequester {
   tick(nowMs: number): void {
     if (!this.awaiting) return;
     const sinceLast = nowMs - this.lastSentMs;
-    const retryAfter = Math.max(250, 3 * this.getRttMs());
+    const retryAfter = Math.max(this.retryFloorMs(), 3 * this.getRttMs());
     if ((this.pending && sinceLast >= this.minIntervalMs) || sinceLast >= retryAfter) this.fire(nowMs);
   }
 
@@ -143,10 +158,21 @@ export class WebCodecsPipeline {
       const r = opts.getRttMs?.() ?? NaN;
       return r > 0 && Number.isFinite(r) ? r : DEFAULT_RTT_MS;
     };
-    this.requester = new KeyframeRequester((reason, lostId) => this.sendKeyRequest(reason, lostId), rtt);
+    // A KEY may take many RTTs to drain through SCTP; give it room, and size
+    // the in-flight window so the deltas arriving meanwhile are not evicted
+    // (evicting the KEY itself, as the oldest slot, restarted the wait).
+    const keyTimeout = () => keyFrameTimeoutMs(rtt());
+    this.requester = new KeyframeRequester(
+      (reason, lostId) => this.sendKeyRequest(reason, lostId),
+      rtt,
+      KEYFRAME_MIN_INTERVAL_MS,
+      keyTimeout,
+    );
     this.reassembler = new Reassembler({
+      maxInflight: () => maxInflightFor(keyTimeout(), this.frameIntervalMs()),
       reorderWaitMs: () => Math.min(5, this.frameIntervalMs()),
       frameTimeoutMs: () => Math.max(20, 2 * this.frameIntervalMs()),
+      keyFrameTimeoutMs: keyTimeout,
       onFrame: (f) => this.handleFrame(f),
       onLoss: (l) => {
         dlog("webcodecs", `frame ${l.lostId} lost (epoch ${l.epoch}); requesting keyframe`);

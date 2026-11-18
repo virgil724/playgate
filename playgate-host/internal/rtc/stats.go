@@ -102,20 +102,17 @@ func (s *videoSender) recordRTT(srtt time.Duration) time.Duration {
 }
 
 // webcodecsSample turns WebCodecs link counters into a StatsSample. Pure, for
-// testing. Loss is the worse of fragment loss (what the network dropped,
-// before FEC) and frame loss (what the viewer could not use); congestion is a
-// sustained RTT rise over the baseline, a send queue past half its limit, or
-// any frame the host had to drop for a full queue.
+// testing. Loss is fragment loss only: what the network actually dropped
+// (before FEC). Frame loss is NOT a network signal: while the viewer waits for
+// a keyframe it discards every arriving delta and reports it lost, so frame
+// loss reads 100% on a perfectly clean link and would drive the bitrate to the
+// floor. Congestion is a sustained RTT rise over the baseline, a send queue
+// past half its limit, or any frame the host had to drop for a full queue.
 func webcodecsSample(ls videoLinkSample, srtt, baseRTT time.Duration, bufferMax uint64) StatsSample {
 	out := StatsSample{Source: "webcodecs", RTT: srtt}
 	out.Valid = ls.Reports > 0 || ls.SenderDropped > 0
 	if ls.FragsExpected > 0 && ls.FragsRecv < ls.FragsExpected {
 		out.LossFraction = 1 - float64(ls.FragsRecv)/float64(ls.FragsExpected)
-	}
-	if n := ls.FramesComplete + ls.FramesLost; n > 0 {
-		if fl := float64(ls.FramesLost) / float64(n); fl > out.LossFraction {
-			out.LossFraction = fl
-		}
 	}
 	queueing := baseRTT > 0 && srtt > 2*baseRTT && srtt-baseRTT > queueDelayMin
 	overfull := bufferMax > 0 && ls.Buffered > bufferMax/2
