@@ -19,6 +19,32 @@ type Module interface {
 	Run(ctx context.Context) error
 }
 
+// EncoderCaps describes what a VideoEncoder backend can do cheaply, so callers
+// (ABR, keyframe-request handling) can adapt their behaviour.
+type EncoderCaps struct {
+	// LiveBitrate is true when SetBitrate takes effect on the next frame without
+	// restarting the encoder.
+	LiveBitrate bool
+	// CheapKeyframe is true when ForceKeyframe is cheap enough to honour on every
+	// viewer keyframe request (PLI/FIR) without a visible stall.
+	CheapKeyframe bool
+}
+
+// VideoEncoder is a pluggable H.264 encoder backend (ffmpeg CLI subprocess,
+// in-process libav, ...). It consumes raw frames supplied at construction and
+// emits Annex-B packets.
+type VideoEncoder interface {
+	Module
+	// Packets returns the encoded-packet output; the encoder owns and closes it.
+	Packets() <-chan EncodedPacket
+	// SetBitrate requests a new target bitrate in bits per second.
+	SetBitrate(bps int)
+	// ForceKeyframe requests an IDR frame as soon as possible.
+	ForceKeyframe()
+	// Caps reports the backend's capabilities.
+	Caps() EncoderCaps
+}
+
 // CaptureSource is a pluggable producer of raw video frames (e.g. a v4l2 capture
 // card, a test pattern generator, or in future an HDMI grabber). It is the head
 // of the media pipeline.

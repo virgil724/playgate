@@ -12,6 +12,7 @@ import (
 	"github.com/playgate/playgate-host/internal/capture/v4l2"
 	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/core"
+	"github.com/playgate/playgate-host/internal/encoder"
 	"github.com/playgate/playgate-host/internal/encoder/ffmpeg"
 	"github.com/playgate/playgate-host/internal/input/logtarget"
 	"github.com/playgate/playgate-host/internal/input/nxbt"
@@ -54,7 +55,7 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	// actionable error (no silent downgrade) if the chosen codec is missing.
 	detectCodec(log, cfg.Encoder.FFmpegPath, cfg.EncoderCodecKind())
 
-	enc, err := ffmpeg.New(log, encOpts, tap.out())
+	enc, err := encoder.New(cfg.EncoderBackendKind(), log, encOpts, tap.out())
 	if err != nil {
 		return Deps{}, fmt.Errorf("host: build encoder: %w", err)
 	}
@@ -242,12 +243,12 @@ type encoderWrapper struct {
 	metrics *metrics.Collector
 	capture core.CaptureSource
 	tap     *latencyTap
-	enc     *ffmpeg.Encoder
+	enc     core.VideoEncoder
 
 	outCh chan core.EncodedPacket
 }
 
-func newEncoderWrapper(log *slog.Logger, mc *metrics.Collector, capture core.CaptureSource, tap *latencyTap, enc *ffmpeg.Encoder) *encoderWrapper {
+func newEncoderWrapper(log *slog.Logger, mc *metrics.Collector, capture core.CaptureSource, tap *latencyTap, enc core.VideoEncoder) *encoderWrapper {
 	return &encoderWrapper{
 		log:     log,
 		metrics: mc,
@@ -263,6 +264,9 @@ func (w *encoderWrapper) Name() string { return "encoder" }
 
 // Packets returns the instrumented encoded-packet output.
 func (w *encoderWrapper) Packets() <-chan core.EncodedPacket { return w.outCh }
+
+// Caps reports the underlying encoder backend's capabilities.
+func (w *encoderWrapper) Caps() core.EncoderCaps { return w.enc.Caps() }
 
 // SetBitrate forwards an ABR bitrate decision to the underlying ffmpeg encoder,
 // which restarts the subprocess to apply it (T14).

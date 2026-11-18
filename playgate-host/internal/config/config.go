@@ -74,7 +74,16 @@ type EncoderConfig struct {
 	// VAAPIDevice is the DRM render node for the h264_vaapi codec, e.g.
 	// /dev/dri/renderD128. Ignored by other codecs; empty uses the default node.
 	VAAPIDevice string `yaml:"vaapi_device"`
+	// Backend selects the encoder implementation: "cli" (ffmpeg subprocess,
+	// default) or "libav" (in-process libav; requires a -tags libav cgo build).
+	Backend string `yaml:"backend"`
 }
+
+// Encoder backend kinds.
+const (
+	BackendCLI   = "cli"
+	BackendLibav = "libav"
+)
 
 // Encoder codec kinds (T13). These mirror ffmpeg encoder names.
 const (
@@ -222,6 +231,7 @@ func Default() Config {
 			KeyframeInterval: 60,
 			FFmpegPath:       "ffmpeg",
 			Codec:            CodecLibX264,
+			Backend:          BackendCLI,
 		},
 		Audio: AudioConfig{
 			Enabled:    false,
@@ -310,6 +320,12 @@ func (c Config) Validate() error {
 		return fmt.Errorf("encoder codec must be one of %q/%q/%q/%q, got %q",
 			CodecLibX264, CodecV4L2M2M, CodecVAAPI, CodecNVENC, c.Encoder.Codec)
 	}
+	switch c.Encoder.Backend {
+	case "", BackendCLI, BackendLibav:
+	default:
+		return fmt.Errorf("encoder backend must be %q or %q, got %q",
+			BackendCLI, BackendLibav, c.Encoder.Backend)
+	}
 	if c.Audio.Enabled {
 		if c.Audio.Device == "" {
 			return fmt.Errorf("audio.enabled requires a device")
@@ -371,4 +387,12 @@ func (c Config) EncoderCodecKind() string {
 		return CodecLibX264
 	}
 	return c.Encoder.Codec
+}
+
+// EncoderBackendKind returns the effective encoder backend, defaulting to cli.
+func (c Config) EncoderBackendKind() string {
+	if c.Encoder.Backend == "" {
+		return BackendCLI
+	}
+	return c.Encoder.Backend
 }

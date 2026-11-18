@@ -92,3 +92,30 @@ func TestBuildDepsSyntheticLog(t *testing.T) {
 		t.Error("session should be nil when gating disabled")
 	}
 }
+
+func TestBuildDepsLibavBackendErrorsInDefaultBuild(t *testing.T) {
+	cfg := config.Default()
+	cfg.Capture.Source = config.CaptureSynthetic
+	cfg.Input.Target = config.InputLog
+	cfg.Encoder.Backend = config.BackendLibav
+	if _, err := buildDeps(discardLogger(), cfg, metrics.NewCollector()); err == nil {
+		t.Skip("libav backend available in this build")
+	}
+}
+
+func TestEncoderWrapperCaps(t *testing.T) {
+	cfg := config.Default()
+	cfg.Capture.Source = config.CaptureSynthetic
+	cfg.Input.Target = config.InputLog
+	deps, err := buildDeps(discardLogger(), cfg, metrics.NewCollector())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ew, ok := deps.Encoder.(*encoderWrapper)
+	if !ok {
+		t.Fatalf("encoder is %T", deps.Encoder)
+	}
+	if c := ew.Caps(); c.LiveBitrate || c.CheapKeyframe {
+		t.Errorf("cli caps = %+v", c)
+	}
+}

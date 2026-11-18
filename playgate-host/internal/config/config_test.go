@@ -104,3 +104,21 @@ func TestValidateABR(t *testing.T) {
 		t.Errorf("disabled ABR should skip validation: %v", err)
 	}
 }
+
+func TestValidateEncoderBackend(t *testing.T) {
+	cfg := Default()
+	for _, b := range []string{"", BackendCLI, BackendLibav} {
+		cfg.Encoder.Backend = b
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("backend %q: %v", b, err)
+		}
+	}
+	cfg.Encoder.Backend = "gstreamer"
+	if err := cfg.Validate(); err == nil {
+		t.Error("bogus backend should fail validation")
+	}
+	cfg.Encoder.Backend = ""
+	if cfg.EncoderBackendKind() != BackendCLI {
+		t.Errorf("empty backend should default to cli")
+	}
+}
