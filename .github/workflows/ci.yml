@@ -156,6 +156,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -f docker/server.Dockerfile .
       - run: docker build -f docker/host.Dockerfile .
+      # The default build stops at the last stage (runtime); build the cgo
+      # libav image explicitly so its stages are exercised too.
+      - run: docker build -f docker/host.Dockerfile --target host-libav .
       - run: docker build -f docker/twitch-bot.Dockerfile .
 
   # cgo + FFmpeg (libav encoder). Native runners per arch: cgo cannot
