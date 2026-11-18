@@ -8,6 +8,7 @@ import {
   type TokenInfo,
 } from "../lib/api";
 import { buildHostConfig } from "../lib/config-template";
+import { maskApiKey } from "../lib/mask";
 
 const LS_KEY = "playgate.host.apiKey";
 
@@ -28,6 +29,9 @@ export function HostPage() {
   const [registerName, setRegisterName] = useState("");
   const [hostConfigYaml, setHostConfigYaml] = useState("");
   const [configLoading, setConfigLoading] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
+  const [justRegistered, setJustRegistered] = useState(false);
 
   const selectedRoom = rooms.find((r) => r.id === selected) ?? null;
 
@@ -88,6 +92,8 @@ export function HostPage() {
   const logout = () => {
     localStorage.removeItem(LS_KEY);
     setApiKey("");
+    setShowKey(false);
+    setJustRegistered(false);
     setAuthed(false);
     setRooms([]);
     setSelected(null);
@@ -99,6 +105,8 @@ export function HostPage() {
       const { api_key } = await apiRef.current.registerHost(registerName.trim());
       localStorage.setItem(LS_KEY, api_key);
       setApiKey(api_key);
+      setJustRegistered(true);
+      setShowKey(true);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Register failed");
@@ -230,6 +238,36 @@ export function HostPage() {
         <button onClick={logout}>Sign out</button>
       </div>
       {error && <div className="error">{error}</div>}
+
+      <div className="panel">
+        <strong>API key</strong>
+        {justRegistered && (
+          <div className="error" style={{ marginTop: 8 }}>
+            New host registered. Save this key somewhere safe now: it is the only way to sign in
+            again from another browser, and the host's config.yaml needs it (server.api_key).
+          </div>
+        )}
+        <div className="row" style={{ marginTop: 8 }}>
+          <code className="mono" style={{ flex: 1, wordBreak: "break-all" }}>
+            {showKey ? apiKey : maskApiKey(apiKey)}
+          </code>
+          <button onClick={() => setShowKey((v) => !v)}>{showKey ? "Hide" : "Show"}</button>
+          <button
+            onClick={() => {
+              void navigator.clipboard.writeText(apiKey).then(() => {
+                setKeyCopied(true);
+                setTimeout(() => setKeyCopied(false), 1500);
+              });
+            }}
+          >
+            {keyCopied ? "Copied" : "Copy"}
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          Signs you in to this console and authenticates your host (server.api_key in config.yaml).
+          Treat it like a password.
+        </div>
+      </div>
 
       <div className="panel">
         <strong>Rooms</strong>
