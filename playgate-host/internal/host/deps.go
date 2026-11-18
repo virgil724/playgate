@@ -9,6 +9,7 @@ import (
 
 	"github.com/playgate/playgate-host/internal/audio/opus"
 	"github.com/playgate/playgate-host/internal/capture/synthetic"
+	"github.com/playgate/playgate-host/internal/capture/testsrc"
 	"github.com/playgate/playgate-host/internal/capture/v4l2"
 	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/core"
@@ -16,6 +17,7 @@ import (
 	"github.com/playgate/playgate-host/internal/encoder/ffmpeg"
 	"github.com/playgate/playgate-host/internal/input/logtarget"
 	"github.com/playgate/playgate-host/internal/input/nxbt"
+	"github.com/playgate/playgate-host/internal/input/overlay"
 	"github.com/playgate/playgate-host/internal/metrics"
 	"github.com/playgate/playgate-host/internal/session"
 )
@@ -140,6 +142,15 @@ func buildCapture(log *slog.Logger, cfg config.Config) (core.CaptureSource, erro
 			Height: cfg.Capture.Height,
 			FPS:    cfg.Capture.FPS,
 		})
+	case config.CaptureTestSrc:
+		return testsrc.New(log, testsrc.Config{
+			FFmpegPath: cfg.Encoder.FFmpegPath,
+			Width:      cfg.Capture.Width,
+			Height:     cfg.Capture.Height,
+			FPS:        cfg.Capture.FPS,
+			FontFile:   cfg.Capture.TestSrc.FontFile,
+			TextFile:   cfg.Overlay.TextFile,
+		})
 	case config.CaptureV4L2:
 		pixfmt, err := v4l2.ParsePixelFormat(cfg.Capture.Format)
 		if err != nil {
@@ -163,6 +174,8 @@ func buildInput(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (cor
 	case config.InputLog:
 		// Sample ~one log line per second at 60 Hz.
 		return logtarget.New(log, 60), nil
+	case config.InputOverlay:
+		return overlay.New(log, cfg.Overlay.TextFile)
 	case config.InputNXBT:
 		return nxbt.New(log, cfg.Input.SocketPath,
 			nxbt.WithRateHz(cfg.Input.RateHz),
