@@ -5,7 +5,10 @@
  *
  *   { kind, viewer_id, remaining_seconds, queue_position, ts }
  *
- * kinds: granted | expired | idle_kicked | queued | tick
+ * kinds: granted | expired | idle_kicked | queued | tick | open
+ *
+ * "open" means the host does not gate input (session disabled): any connected
+ * viewer may send controller input without a token.
  */
 
 export type ControlEventKind =
@@ -13,7 +16,8 @@ export type ControlEventKind =
   | "expired"
   | "idle_kicked"
   | "queued"
-  | "tick";
+  | "tick"
+  | "open";
 
 export interface ControlEvent {
   kind: ControlEventKind;
@@ -29,6 +33,7 @@ const KNOWN_KINDS: ReadonlySet<string> = new Set([
   "idle_kicked",
   "queued",
   "tick",
+  "open",
 ]);
 
 /**
@@ -88,5 +93,7 @@ export function describeEvent(event: ControlEvent): string {
       return "Your turn has ended";
     case "idle_kicked":
       return "Removed for inactivity";
+    case "open":
+      return "Open room — no token needed";
   }
 }

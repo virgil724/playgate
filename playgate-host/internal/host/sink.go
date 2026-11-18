@@ -45,6 +45,11 @@ func (h *Host) newInputSink() *inputSink {
 	}
 }
 
+// openRoomEvent tells a viewer that this host does not gate input (session
+// disabled), so it may send controller input without redeeming a token
+// (docs/protocols.md §4, kind "open").
+var openRoomEvent = []byte(`{"kind":"open"}`)
+
 // SessionEnabled reports whether JWT gating is active.
 func (s *inputSink) SessionEnabled() bool { return s.manager != nil }
 

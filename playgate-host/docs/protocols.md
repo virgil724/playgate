@@ -252,6 +252,12 @@ Each event is a UTF-8 JSON object sent as a text message.
 | `idle_kicked` | Viewer removed for inactivity                             | `0`                 | `0`              |
 | `queued`      | Viewer accepted but must wait for current session to end  | `0`                 | ≥ 1              |
 | `tick`        | Periodic countdown (every `TickInterval`, default 1 s)   | Counting down       | `0`              |
+| `open`        | Once per connection when the host has `session.enabled: false` (no input gating) | absent | absent |
+
+`open` is sent as just `{"kind":"open"}` as soon as the control channel opens.
+It is addressed to whoever receives it: the viewer may send controller input
+without redeeming a token for the life of that connection. No other session
+events follow on an ungated host.
 
 ### Frontend recommended behaviour
 
@@ -260,6 +266,7 @@ Each event is a UTF-8 JSON object sent as a text message.
 - On `tick`: update the countdown display.
 - On `expired` / `idle_kicked`: disable controller input; show a message.
 - On `queued`: show "You are #N in queue" using `queue_position`.
+- On `open`: activate controller input and hide the token prompt.
 
 **Important:** the T6 module SHOULD send each event only to the viewer
 identified by `viewer_id`. Events for other viewers may be safely forwarded

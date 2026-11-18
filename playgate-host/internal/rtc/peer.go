@@ -136,6 +136,11 @@ type Peer struct {
 	// Guarded by mu.
 	onControl func([]byte)
 
+	// onControlOpen, if set, runs once the control channel opens (or right away
+	// when it is already open). controlOpen records that it has. Guarded by mu.
+	onControlOpen func()
+	controlOpen   bool
+
 	closeOnce sync.Once
 }
 
@@ -360,7 +365,16 @@ func (p *Peer) attachControlChannel(dc *webrtc.DataChannel) {
 	p.mu.Lock()
 	p.control = dc
 	p.mu.Unlock()
-	dc.OnOpen(func() { p.log.Info("control channel open") })
+	dc.OnOpen(func() {
+		p.log.Info("control channel open")
+		p.mu.Lock()
+		p.controlOpen = true
+		cb := p.onControlOpen
+		p.mu.Unlock()
+		if cb != nil {
+			cb()
+		}
+	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if !msg.IsString {
 			return
@@ -413,6 +427,18 @@ func (p *Peer) OnControlMessage(cb func([]byte)) {
 	p.mu.Lock()
 	p.onControl = cb
 	p.mu.Unlock()
+}
+
+// OnControlOpen registers cb to run when the control channel opens. If it is
+// already open, cb runs immediately on a new goroutine.
+func (p *Peer) OnControlOpen(cb func()) {
+	p.mu.Lock()
+	p.onControlOpen = cb
+	open := p.controlOpen
+	p.mu.Unlock()
+	if open && cb != nil {
+		go cb()
+	}
 }
 
 // attachInputChannel registers the message handler that decodes controller frames.
