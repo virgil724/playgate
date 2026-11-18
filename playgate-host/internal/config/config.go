@@ -190,7 +190,34 @@ type WebRTCConfig struct {
 	// GCC enables Pion's Google Congestion Control bandwidth estimator (TWCC).
 	// Off by default.
 	GCC bool `yaml:"gcc"`
+
+	// VideoTransport selects how video reaches viewers: "track" (default, RTP
+	// H.264 track only), "webcodecs" (Annex-B fragments over an unreliable
+	// DataChannel, RTP track kept as fallback) or "auto" (viewer chooses).
+	// See docs/webcodecs-transport.md. Unrelated to the twitch bot's token
+	// delivery mode.
+	VideoTransport string `yaml:"video_transport"`
+	// VideoFragmentBytes is the total DataChannel message size (header +
+	// payload) in WebCodecs mode. Range 600-1400, default 1200.
+	VideoFragmentBytes int `yaml:"video_fragment_bytes"`
+	// VideoBufferMaxBytes: drop a whole frame when the video DataChannel's
+	// BufferedAmount exceeds this. Default 262144.
+	VideoBufferMaxBytes int `yaml:"video_buffer_max_bytes"`
+	// VideoIDRPaceMS spreads frames larger than 8 fragments (IDRs) over this
+	// many ms to avoid self-induced burst loss. Default 8; 0 uses the default,
+	// negative disables pacing.
+	VideoIDRPaceMS int `yaml:"video_idr_pace_ms"`
+	// VideoKeyframeMinIntervalMS coalesces viewer keyframe requests to at most
+	// one encoder ForceKeyframe per interval. Default 250.
+	VideoKeyframeMinIntervalMS int `yaml:"video_keyframe_min_interval_ms"`
 }
+
+// Video transport values for WebRTCConfig.VideoTransport.
+const (
+	VideoTransportTrack     = "track"
+	VideoTransportWebCodecs = "webcodecs"
+	VideoTransportAuto      = "auto"
+)
 
 // InputConfig configures the controller input target (T5: NXBT bridge / log).
 type InputConfig struct {
@@ -304,7 +331,12 @@ func Default() Config {
 			CooldownSeconds:  10,
 		},
 		WebRTC: WebRTCConfig{
-			ICEServers: []string{"stun:stun.l.google.com:19302"},
+			ICEServers:                 []string{"stun:stun.l.google.com:19302"},
+			VideoTransport:             VideoTransportTrack,
+			VideoFragmentBytes:         1200,
+			VideoBufferMaxBytes:        262144,
+			VideoIDRPaceMS:             8,
+			VideoKeyframeMinIntervalMS: 250,
 		},
 		Overlay: OverlayConfig{TextFile: "playgate-overlay.txt"},
 		Input: InputConfig{
@@ -387,6 +419,18 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("encoder backend must be %q or %q, got %q",
 			BackendCLI, BackendLibav, c.Encoder.Backend)
+	}
+	switch c.WebRTC.VideoTransport {
+	case "", VideoTransportTrack, VideoTransportWebCodecs, VideoTransportAuto:
+	default:
+		return fmt.Errorf("webrtc video_transport must be %q, %q or %q, got %q",
+			VideoTransportTrack, VideoTransportWebCodecs, VideoTransportAuto, c.WebRTC.VideoTransport)
+	}
+	if fb := c.WebRTC.VideoFragmentBytes; fb != 0 && (fb < 600 || fb > 1400) {
+		return fmt.Errorf("webrtc video_fragment_bytes must be within 600-1400, got %d", fb)
+	}
+	if c.WebRTC.VideoBufferMaxBytes < 0 || c.WebRTC.VideoKeyframeMinIntervalMS < 0 {
+		return fmt.Errorf("webrtc video_buffer_max_bytes and video_keyframe_min_interval_ms must be >= 0")
 	}
 	if c.Audio.Enabled {
 		if c.Audio.Device == "" {

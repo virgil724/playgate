@@ -165,6 +165,10 @@ So the 1172 above is only the default stride.
 - Pace: write fragments of one frame with no deliberate delay for frames <= 8 fragments;
   for larger frames (IDR) spread over up to `idr_pace_ms` (default 8 ms) in equal bursts to
   avoid self-induced burst loss. Pace is a tuning knob, not wire-visible.
+- **Epoch bump timing (as implemented in T11).** The host increments `epoch` on the first IDR sent
+  after a change (transport switch, encoder restart detected as a PTS regression, or a changed
+  SPS/PPS), never on a delta frame, so every frame carrying a new epoch is a `KEY` frame. A frame
+  dropped by the BufferedAmount rule does not consume a `frame_id`.
 - `ForceKeyframe` rate limit: at most one per `keyframe_min_interval_ms` (default 250,
   matching moonlight-web's `IDR_REQUEST_INTERVAL`; see T6 for the encoder-side debounce).
   Requests inside the window are coalesced, not dropped: the pending request fires at window end.
@@ -326,6 +330,8 @@ webrtc:
   video_transport: track      # track | webcodecs | auto
   video_fragment_bytes: 1200
   video_buffer_max_bytes: 262144
+  video_idr_pace_ms: 8                  # section 3.4 pacing (0 = default 8, <0 = off)
+  video_keyframe_min_interval_ms: 250   # section 3.4 ForceKeyframe coalescing
 ```
 
 - `track` (default): current behaviour, no extra channels.

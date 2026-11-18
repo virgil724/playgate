@@ -79,6 +79,17 @@ abr:
 webrtc:
   ice_servers:
     - stun:stun.l.google.com:19302
+  # Video transport (docs/webcodecs-transport.md). NOT the twitch bot's token
+  # delivery mode.
+  #   track:     RTP H.264 track only (default)
+  #   webcodecs: Annex-B fragments over an unreliable DataChannel; the RTP
+  #              track stays negotiated as a fallback
+  #   auto:      like webcodecs, but each viewer chooses (starts on the track)
+  video_transport: track
+  video_fragment_bytes: 1200        # DataChannel message size, 600-1400
+  video_buffer_max_bytes: 262144    # drop a whole frame above this BufferedAmount
+  video_idr_pace_ms: 8              # spread large IDRs over this many ms
+  video_keyframe_min_interval_ms: 250  # coalesce viewer keyframe requests
 
 # Controller input target (T5).
 input:

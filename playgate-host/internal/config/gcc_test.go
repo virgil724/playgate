@@ -22,3 +22,23 @@ func TestWebRTCGCCConfig(t *testing.T) {
 		t.Error("webrtc.gcc: true not applied")
 	}
 }
+
+func TestVideoTransportValidate(t *testing.T) {
+	c := Default()
+	if c.WebRTC.VideoTransport != VideoTransportTrack || c.WebRTC.VideoFragmentBytes != 1200 {
+		t.Fatalf("defaults wrong: %+v", c.WebRTC)
+	}
+	c.WebRTC.VideoTransport = "bogus"
+	if c.Validate() == nil {
+		t.Fatal("bogus transport must be rejected")
+	}
+	c.WebRTC.VideoTransport = VideoTransportAuto
+	c.WebRTC.VideoFragmentBytes = 100
+	if c.Validate() == nil {
+		t.Fatal("fragment size out of range must be rejected")
+	}
+	c.WebRTC.VideoFragmentBytes = 1200
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

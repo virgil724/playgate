@@ -39,7 +39,20 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			poll = 500 * time.Millisecond
 		}
 
+		// Viewer keyframe requests (WebCodecs transport) share one coalescer since
+		// every viewer shares the single encoder.
+		var kf *keyframeCoalescer
+		if k, ok := enc.(interface{ ForceKeyframe() }); ok {
+			interval := time.Duration(cfg.WebRTC.VideoKeyframeMinIntervalMS) * time.Millisecond
+			if interval <= 0 {
+				interval = 250 * time.Millisecond
+			}
+			kf = newKeyframeCoalescer(interval, k.ForceKeyframe)
+			defer kf.Stop()
+		}
+
 		cm := &connManager{
+			kf:      kf,
 			log:    log.With("module", "conn-manager"),
 			cfg:    cfg,
 			mc:     mc,
@@ -92,6 +105,7 @@ type connManager struct {
 	cfg     config.Config
 	mc      *metrics.Collector
 	enc     BitrateController // ABR target; unused in multi-viewer (see runViewer)
+	kf      *keyframeCoalescer // coalesced ForceKeyframe; nil if the encoder cannot
 	client  *signaling.Client
 	router  *VideoRouter
 	arouter *AudioRouter // nil when audio is disabled
@@ -286,7 +300,19 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		c.mu.Unlock()
 	}()
 
-	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: log, EnableAudio: c.arouter != nil})
+	rcfg := rtc.Config{
+		ICEServers:          c.ice,
+		Logger:              log,
+		EnableAudio:         c.arouter != nil,
+		VideoTransport:      c.cfg.WebRTC.VideoTransport,
+		VideoFragmentBytes:  c.cfg.WebRTC.VideoFragmentBytes,
+		VideoBufferMaxBytes: c.cfg.WebRTC.VideoBufferMaxBytes,
+		VideoIDRPaceMS:      c.cfg.WebRTC.VideoIDRPaceMS,
+	}
+	if c.kf != nil {
+		rcfg.OnVideoKeyframeRequest = c.kf.Request
+	}
+	peer, err := rtc.NewPeer(rcfg)
 	if err != nil {
 		log.Warn("create peer failed", "err", err)
 		return
