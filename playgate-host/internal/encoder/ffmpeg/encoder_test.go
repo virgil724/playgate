@@ -236,11 +236,13 @@ func TestRunClosesChannelsOnExit(t *testing.T) {
 
 func TestEmitPacketIntraRefreshNoWaitKey(t *testing.T) {
 	for _, ir := range []bool{false, true} {
-		e := &Encoder{log: quietLogger(), opts: Options{IntraRefresh: ir}, packets: make(chan core.EncodedPacket, 1)}
-		e.packets <- core.EncodedPacket{} // full: the next inter frame is dropped
-		e.emitPacket(context.Background(), accessUnit{data: []byte{1}})
-		if e.waitKey == ir {
-			t.Errorf("intra_refresh=%v: waitKey=%v", ir, e.waitKey)
+		p := NewPacketEmitter(quietLogger(), 30)
+		p.IntraRefresh = ir
+		out := make(chan core.EncodedPacket, 1)
+		out <- core.EncodedPacket{} // full: the next inter frame is dropped
+		p.Emit(context.Background(), out, []byte{1}, false, time.Time{}, time.Time{})
+		if p.waitKey == ir {
+			t.Errorf("intra_refresh=%v: waitKey=%v", ir, p.waitKey)
 		}
 	}
 }
