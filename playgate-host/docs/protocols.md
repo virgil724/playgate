@@ -347,3 +347,16 @@ function decodeSDP(b64) {
   return new RTCSessionDescription(JSON.parse(atob(b64.trim())));
 }
 ```
+
+---
+
+## 7. WebCodecs video transport (optional)
+
+Source: `internal/rtc/videofrag.go`, `videofb.go`, `videosend.go`, `videochan.go`
+
+When `webrtc.video_transport` is `webcodecs` or `auto`, the host also opens an
+unreliable `"video"` DataChannel (28-byte-header Annex-B fragments) and a reliable
+`"videofb"` channel (viewer feedback), and the viewer selects the sink with
+`{"kind":"video_transport","use":"webcodecs|track"}` on the `control` channel.
+The full wire format, feedback messages and fallback rules are specified in
+[`webcodecs-transport.md`](webcodecs-transport.md).
