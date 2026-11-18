@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -78,6 +80,16 @@ type Config struct {
 	// (the SDP carries no audio m-line), preserving the prior behaviour for
 	// deployments that do not capture audio.
 	EnableAudio bool
+
+	// EnableGCC registers Pion's Google Congestion Control sender-side bandwidth
+	// estimator (TWCC feedback driven). When true, Peer.TargetBitrate reports the
+	// estimate. Off by default.
+	EnableGCC bool
+	// GCCInitialBitrate / GCCMinBitrate / GCCMaxBitrate bound the estimator in
+	// bits per second. Zero values fall back to 3 Mbps / 500 kbps / 12 Mbps.
+	GCCInitialBitrate int
+	GCCMinBitrate     int
+	GCCMaxBitrate     int
 }
 
 // DefaultConfig returns a Config with a public Google STUN server and sensible
@@ -139,7 +151,25 @@ type Peer struct {
 	// Guarded by mu.
 	onControl func([]byte)
 
+	// bwe is the GCC estimator captured from the cc interceptor; nil when GCC is
+	// disabled or the estimator has not been created yet. Guarded by bweMu.
+	bweMu sync.Mutex
+	bwe   cc.BandwidthEstimator
+
 	closeOnce sync.Once
+}
+
+// TargetBitrate returns the congestion controller's current target send bitrate
+// in bits per second. ok is false when GCC is disabled or the estimator is not
+// yet available.
+func (p *Peer) TargetBitrate() (bps int, ok bool) {
+	p.bweMu.Lock()
+	e := p.bwe
+	p.bweMu.Unlock()
+	if e == nil {
+		return 0, false
+	}
+	return e.GetTargetBitrate(), true
 }
 
 // NewPeer creates a PeerConnection, registers the H.264 video track, and opens
@@ -224,6 +254,40 @@ func NewPeer(cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("rtc: register interceptors: %w", err)
 	}
 
+	p := &Peer{}
+	if cfg.EnableGCC {
+		initial, lo, hi := cfg.GCCInitialBitrate, cfg.GCCMinBitrate, cfg.GCCMaxBitrate
+		if initial <= 0 {
+			initial = 3_000_000
+		}
+		if lo <= 0 {
+			lo = 500_000
+		}
+		if hi <= 0 {
+			hi = 12_000_000
+		}
+		ccf, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			return gcc.NewSendSideBWE(
+				gcc.SendSideBWEInitialBitrate(initial),
+				gcc.SendSideBWEMinBitrate(lo),
+				gcc.SendSideBWEMaxBitrate(hi),
+				gcc.SendSideBWEPacer(gcc.NewNoOpPacer()),
+			)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("rtc: create gcc interceptor: %w", err)
+		}
+		ccf.OnNewPeerConnection(func(_ string, e cc.BandwidthEstimator) {
+			p.bweMu.Lock()
+			p.bwe = e
+			p.bweMu.Unlock()
+		})
+		ir.Add(ccf)
+		if err := webrtc.ConfigureTWCCHeaderExtensionSender(m, ir); err != nil {
+			return nil, fmt.Errorf("rtc: configure twcc header ext: %w", err)
+		}
+	}
+
 	s := webrtc.SettingEngine{}
 	s.SetIncludeLoopbackCandidate(true)
 	api := webrtc.NewAPI(
@@ -236,14 +300,12 @@ func NewPeer(cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("rtc: create peer connection: %w", err)
 	}
 
-	p := &Peer{
-		cfg:       cfg,
-		log:       log,
-		now:       now,
-		pc:        pc,
-		commands:  make(chan core.InputCommand, cfg.CommandBuffer),
-		connState: make(chan webrtc.PeerConnectionState, 8),
-	}
+	p.cfg = cfg
+	p.log = log
+	p.now = now
+	p.pc = pc
+	p.commands = make(chan core.InputCommand, cfg.CommandBuffer)
+	p.connState = make(chan webrtc.PeerConnectionState, 8)
 
 	if err := p.setupVideoTrack(); err != nil {
 		_ = pc.Close()

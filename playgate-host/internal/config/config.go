@@ -163,6 +163,9 @@ type ABRConfig struct {
 type WebRTCConfig struct {
 	// ICEServers is the list of STUN/TURN server URLs.
 	ICEServers []string `yaml:"ice_servers"`
+	// GCC enables Pion's Google Congestion Control bandwidth estimator (TWCC).
+	// Off by default.
+	GCC bool `yaml:"gcc"`
 }
 
 // InputConfig configures the controller input target (T5: NXBT bridge / log).
