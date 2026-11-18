@@ -173,6 +173,10 @@ type Peer struct {
 	// so a freshly-attached decoder starts on an IDR. Guarded by vmu.
 	vmu          sync.Mutex
 	seenKeyframe bool
+	// mediaUp is true while the peer connection is connected. Before that (and
+	// after a disconnect) samples written to the track go nowhere, so they must
+	// not count as the viewer's first keyframe. Guarded by vmu.
+	mediaUp bool
 
 	// vs is the WebCodecs DataChannel sender; nil when VideoTransport is "track".
 	vs *videoSender
@@ -604,6 +608,12 @@ func (p *Peer) attachInputChannel(dc *webrtc.DataChannel) {
 func (p *Peer) wireConnState() {
 	p.pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		p.log.Info("connection state", "state", s.String())
+		p.vmu.Lock()
+		p.mediaUp = s == webrtc.PeerConnectionStateConnected
+		if !p.mediaUp {
+			p.seenKeyframe = false // start again on an IDR after reconnecting
+		}
+		p.vmu.Unlock()
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.closed {
@@ -686,6 +696,12 @@ func (p *Peer) WriteSample(pkt core.EncodedPacket, duration time.Duration) error
 		return p.vs.writeFrame(pkt)
 	}
 	p.vmu.Lock()
+	if !p.mediaUp {
+		// Not connected: the sample would be dropped by the transport, and an
+		// IDR lost here would leave the viewer waiting for the next one.
+		p.vmu.Unlock()
+		return nil
+	}
 	if !p.seenKeyframe {
 		if !pkt.IsKeyframe {
 			p.vmu.Unlock()

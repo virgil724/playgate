@@ -111,7 +111,7 @@ func TestAwaitPeerEndDisconnectGrace(t *testing.T) {
 		}
 		start := time.Now()
 		done := make(chan struct{})
-		go func() { awaitPeerEnd(context.Background(), ch, 100*time.Millisecond); close(done) }()
+		go func() { awaitPeerEnd(context.Background(), ch, 100*time.Millisecond, nil); close(done) }()
 		select {
 		case <-done:
 			return time.Since(start), ch
@@ -244,5 +244,23 @@ func TestApplyAnswerGuards(t *testing.T) {
 	cm.applyAnswer(sess, viewerEnvelope{Type: "candidate"})
 	if sess.answered {
 		t.Fatal("answered set for a non-answer envelope")
+	}
+}
+
+// TestAwaitPeerEndOnConnected checks the callback fires on every transition to
+// connected (first connect and each recovery), which is when the join keyframe
+// is requested.
+func TestAwaitPeerEndOnConnected(t *testing.T) {
+	ch := make(chan webrtc.PeerConnectionState, 4)
+	ch <- webrtc.PeerConnectionStateConnecting
+	ch <- webrtc.PeerConnectionStateConnected
+	ch <- webrtc.PeerConnectionStateDisconnected
+	ch <- webrtc.PeerConnectionStateConnected
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	n := 0
+	awaitPeerEnd(ctx, ch, time.Second, func() { n++ })
+	if n != 2 {
+		t.Errorf("onConnected ran %d times, want 2", n)
 	}
 }

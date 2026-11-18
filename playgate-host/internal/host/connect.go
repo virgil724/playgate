@@ -426,8 +426,6 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		defer c.arouter.RemoveSink(peer)
 	}
 
-	c.requestJoinKeyframe()
-
 	c.wireInput(sctx, peer)
 
 	offer, err := peer.CreateOffer(sctx)
@@ -445,7 +443,10 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 	}
 	log.Info("offer posted to viewer; awaiting answer")
 
-	c.awaitDisconnect(sctx, peer)
+	// Ask for the join IDR only once media can flow: one produced while ICE/DTLS
+	// is still connecting is dropped, and with intra-refresh (cli) nothing else
+	// would ever give this viewer a keyframe.
+	awaitPeerEnd(sctx, peer.ConnState(), disconnectGrace, c.requestJoinKeyframe)
 	log.Info("viewer disconnected")
 }
 
@@ -508,16 +509,10 @@ const longPollWait = 25 * time.Second
 // checks missed, e.g. while the viewer's tab is backgrounded) and often heals.
 const disconnectGrace = 5 * time.Second
 
-// awaitDisconnect blocks until the peer reaches a terminal connection state
-// (failed/closed, or disconnected for longer than disconnectGrace) or ctx is
-// cancelled.
-func (c *connManager) awaitDisconnect(ctx context.Context, peer *rtc.Peer) {
-	awaitPeerEnd(ctx, peer.ConnState(), disconnectGrace)
-}
-
-// awaitPeerEnd implements awaitDisconnect over a state channel; split out so
-// the grace logic is testable without a real peer.
-func awaitPeerEnd(ctx context.Context, states <-chan webrtc.PeerConnectionState, grace time.Duration) {
+// awaitPeerEnd blocks until the peer reaches a terminal connection state
+// (failed/closed, or disconnected for longer than grace) or ctx is cancelled.
+// onConnected (may be nil) runs each time the state becomes connected.
+func awaitPeerEnd(ctx context.Context, states <-chan webrtc.PeerConnectionState, grace time.Duration, onConnected func()) {
 	var graceC <-chan time.Time
 	for {
 		select {
@@ -538,6 +533,9 @@ func awaitPeerEnd(ctx context.Context, states <-chan webrtc.PeerConnectionState,
 				}
 			case webrtc.PeerConnectionStateConnected:
 				graceC = nil // recovered
+				if onConnected != nil {
+					onConnected()
+				}
 			}
 		}
 	}

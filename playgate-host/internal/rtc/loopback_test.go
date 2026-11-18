@@ -290,6 +290,9 @@ func TestKeyframeGating(t *testing.T) {
 		t.Fatalf("NewPeer: %v", err)
 	}
 	defer p.Close()
+	p.vmu.Lock()
+	p.mediaUp = true // as if connected; gating only applies to a live peer
+	p.vmu.Unlock()
 
 	// Delta before any keyframe: dropped, no error, seenKeyframe stays false.
 	if err := p.WriteSample(core.EncodedPacket{Data: []byte{0}, IsKeyframe: false}, DefaultSampleDuration); err != nil {
