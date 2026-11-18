@@ -7,6 +7,7 @@ import (
 
 	"github.com/playgate/playgate-host/internal/abr"
 	"github.com/playgate/playgate-host/internal/config"
+	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/rtc"
 )
 
@@ -31,6 +32,8 @@ type abrRunner struct {
 	enc      BitrateController
 	ctrl     *abr.Controller
 	interval time.Duration
+	// signal, when non-nil, replaces stats as the loop input (see SignalSource).
+	signal SignalSource
 }
 
 // newABRRunner builds an abrRunner from config. It returns nil when ABR is
@@ -39,16 +42,13 @@ func newABRRunner(log *slog.Logger, cfg config.Config, stats StatsSource, enc Bi
 	if !cfg.ABR.Enabled {
 		return nil
 	}
+	cooldown, interval := abrTimings(cfg, core.EncoderCaps{})
 	acfg := abr.Config{
 		Min:           cfg.ABR.MinBitrate,
 		Max:           cfg.ABR.MaxBitrate,
 		Start:         cfg.Encoder.Bitrate, // start from the configured fixed bitrate
 		LossThreshold: cfg.ABR.LossThreshold,
-		Cooldown:      time.Duration(cfg.ABR.CooldownSeconds) * time.Second,
-	}
-	interval := time.Duration(cfg.ABR.SampleIntervalMS) * time.Millisecond
-	if interval <= 0 {
-		interval = 2 * time.Second
+		Cooldown:      cooldown,
 	}
 	return newABRRunnerWith(log, stats, enc, abr.New(acfg, nil), interval)
 }
@@ -94,7 +94,13 @@ func (a *abrRunner) run(ctx context.Context) {
 // tick performs one sample→decide→apply step. Split out so it is unit-testable
 // without a ticker.
 func (a *abrRunner) tick() {
-	s := a.stats.Stats()
+	var s rtc.StatsSample
+	if a.signal != nil {
+		// TargetBps (GCC, T9) is intentionally not consumed yet.
+		s = a.signal.Signal().Stats
+	} else {
+		s = a.stats.Stats()
+	}
 	if !s.Valid {
 		return
 	}
