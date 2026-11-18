@@ -57,6 +57,32 @@ export function RoomPage() {
   const [remaining, setRemaining] = useState<number | null>(null);
   const [queuePos, setQueuePos] = useState<number | null>(null);
   const [statusMsg, setStatusMsg] = useState("");
+  // Fullscreen covers the whole room (video + virtual gamepad), not just the
+  // video, so the controls stay usable; on Android it also locks landscape.
+  const roomRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const fullscreenSupported = typeof document !== "undefined" && document.fullscreenEnabled === true;
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement != null);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+      await roomRef.current?.requestFullscreen({ navigationUI: "hide" });
+      // Only allowed while fullscreen, and only on some platforms (Android).
+      const orientation = screen.orientation as ScreenOrientation & {
+        lock?: (o: string) => Promise<void>;
+      };
+      await orientation.lock?.("landscape").catch(() => undefined);
+    } catch (err) {
+      dlog("page", `fullscreen failed: ${String(err)}`);
+    }
+  };
   // The <video> starts muted so the browser allows autoplay; the host now sends
   // an Opus audio track, so expose a toggle to unmute after a user gesture.
   const [audioMuted, setAudioMuted] = useState(true);
@@ -490,7 +516,7 @@ export function RoomPage() {
     conn === "connected" ? "ok" : conn === "failed" ? "bad" : "warn";
 
   return (
-    <div className="room">
+    <div className="room" ref={roomRef}>
       <div className="topbar">
         <span className={`dot ${connClass}`} />
         <span>{CONN_LABEL[conn]}</span>
@@ -604,6 +630,15 @@ export function RoomPage() {
             }}
           >
             {audioMuted ? "🔇 開啟聲音" : "🔊 靜音"}
+          </button>
+        )}
+        {fullscreenSupported && (
+          <button
+            className="btn-primary"
+            style={{ position: "absolute", left: 12, bottom: 12, zIndex: 2 }}
+            onClick={() => void toggleFullscreen()}
+          >
+            {isFullscreen ? "⛶ 離開全螢幕" : "⛶ 全螢幕"}
           </button>
         )}
       </div>

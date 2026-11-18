@@ -371,6 +371,13 @@ textarea {
   font-size: 13px;
 }
 
+/* Fullscreen (the whole room, see RoomPage): fill the screen with the page
+ * background and keep the panels below the video reachable by scrolling. */
+.room:fullscreen {
+  background: var(--bg);
+  overflow-y: auto;
+}
+
 /* ---------- Phone layouts ----------
  * .room is a full-height flex column and .video-wrap takes what is left. On a
  * phone the virtual gamepad is taller than that, so the video used to collapse
@@ -410,26 +417,52 @@ textarea {
   }
 }
 
-/* Landscape phone: the gamepad overlays the video like a mobile game, left
- * cluster on the left edge, right cluster on the right edge. Only the
- * clusters take touches, so the video stays visible between them. */
+/* Landscape phone: like a handheld, the first screen is
+ *   [left cluster] [video] [right cluster]
+ * and everything else (status, stats, token box, logs) follows below it. The
+ * .gamepad wrapper uses display: contents so its two clusters become items of
+ * the .room grid and can sit in the video's row; nothing overlaps. */
 @media (orientation: landscape) and (max-height: 600px) {
+  .room {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    height: auto;
+    min-height: 100%;
+  }
+  .room > * {
+    grid-column: 1 / -1;
+  }
+  .room > .video-wrap {
+    grid-column: 2;
+    grid-row: 1;
+    height: 100dvh;
+  }
   .gamepad {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 5;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    background: transparent;
-    border-top: none;
-    pointer-events: none;
+    display: contents;
   }
   .gamepad .pad-cluster {
-    pointer-events: auto;
-    opacity: 0.75;
+    grid-row: 1;
+    align-self: center;
+    padding: 4px 8px;
+    gap: 4px;
+  }
+  .gamepad .pad-cluster:first-child {
+    grid-column: 1;
+  }
+  .gamepad .pad-cluster:nth-child(2) {
+    grid-column: 3;
+  }
+  /* Sized so a whole cluster fits a phone's landscape height (~380px). */
+  .gamepad .stick {
+    width: 80px;
+    height: 80px;
+  }
+  .gamepad .gp-btn:not(.gp-small) {
+    width: 42px;
+    height: 42px;
+  }
+  .gamepad .gp-small {
+    height: 30px;
   }
   .gamepad .legend {
     display: none;
