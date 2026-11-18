@@ -31,11 +31,25 @@ func TestFormatText(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomic(t *testing.T) {
+func TestPadTextFixedSize(t *testing.T) {
+	recv := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	idle := PadText(FormatText(core.InputCommand{}, recv))
+	busy := PadText(FormatText(core.InputCommand{Seq: 123456, Buttons: ^uint32(0), LX: -1, LY: 1}, recv))
+	if len(idle) != len(busy) {
+		t.Fatalf("padded sizes differ: %d vs %d", len(idle), len(busy))
+	}
+	for _, l := range strings.Split(busy, "\n") {
+		if len(l) != lineWidth {
+			t.Errorf("line %q has width %d, want %d", l, len(l), lineWidth)
+		}
+	}
+}
+
+func TestWriteFileInPlace(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "o.txt")
 	for _, content := range []string{"one", "two longer", "3"} {
-		if err := WriteFileAtomic(p, []byte(content)); err != nil {
+		if err := WriteFileInPlace(p, []byte(content)); err != nil {
 			t.Fatal(err)
 		}
 		b, err := os.ReadFile(p)
@@ -45,7 +59,56 @@ func TestWriteFileAtomic(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
-		t.Errorf("temp files left behind: %v", entries)
+		t.Errorf("unexpected extra files: %v", entries)
+	}
+}
+
+// TestWriteFileInPlaceConcurrentReader mimics ffmpeg drawtext reload=1, which
+// opens and reads the file on every frame and dies on an open error or an
+// empty read. One reader also holds the file open across writes, as ffmpeg can.
+func TestWriteFileInPlaceConcurrentReader(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.txt")
+	recv := time.Now()
+	if err := WriteFileInPlace(p, []byte(PadText(FormatText(core.InputCommand{}, recv)))); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	stop := make(chan struct{})
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				readErr <- nil
+				return
+			default:
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				readErr <- err
+				return
+			}
+			if len(b) == 0 {
+				readErr <- io.ErrUnexpectedEOF
+				return
+			}
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		data := PadText(FormatText(core.InputCommand{Seq: uint32(i), Buttons: uint32(i)}, recv))
+		if err := WriteFileInPlace(p, []byte(data)); err != nil {
+			close(stop)
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	close(stop)
+	if err := <-readErr; err != nil {
+		t.Fatalf("reader saw a failed or empty read: %v", err)
 	}
 }
 

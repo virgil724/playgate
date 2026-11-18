@@ -68,43 +68,53 @@ func FormatText(cmd core.InputCommand, recv time.Time) string {
 	return b.String()
 }
 
-// WriteFileAtomic replaces path with data by writing a temp file in the same
-// directory and renaming it over the target, so a concurrent reader (ffmpeg
-// drawtext reload) never sees a half-written file.
+// lineWidth is the fixed width every overlay line is padded (or cut) to, so
+// the file always has the same size; see WriteFileInPlace.
+const lineWidth = 48
+
+// PadText pads (or truncates) every line of text to lineWidth so successive
+// overlay states have identical byte lengths.
+func PadText(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, l := range lines {
+		if len(l) > lineWidth {
+			l = l[:lineWidth]
+		}
+		lines[i] = l + strings.Repeat(" ", lineWidth-len(l))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// WriteFileInPlace overwrites path with data without ever replacing, deleting
+// or emptying it, because ffmpeg's drawtext (reload=1) re-opens the file on
+// every frame and exits on the first failed or empty read:
 //
-// On Windows, renaming over a file that another process holds open without
-// FILE_SHARE_DELETE fails with a sharing violation. ffmpeg only keeps the
-// file open briefly while reloading, so the rename is retried a few times; if
-// it still fails, we fall back to a direct (non-atomic) overwrite so the
-// overlay keeps updating rather than going stale.
-func WriteFileAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
+//   - renaming a temp file over it (the usual atomic write) briefly makes the
+//     path unopenable on Windows, which ffmpeg reports as "Permission denied";
+//   - truncating and rewriting lets ffmpeg read an empty file in between.
+//
+// Writing fixed-size content (PadText) in place keeps the file present and
+// non-empty at all times. A reader racing a write may see one frame mixing old
+// and new characters, which the next frame corrects. The file is opened with
+// read/write sharing, so this works while ffmpeg has it open.
+func WriteFileInPlace(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+	if _, err := f.WriteAt(data, 0); err != nil {
+		f.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	var rerr error
-	for i := 0; i < 5; i++ {
-		if rerr = os.Rename(tmpName, path); rerr == nil {
-			return nil
+	// Drop any longer leftover tail (e.g. an older, bigger file); this only
+	// ever shrinks to len(data) > 0, never to empty.
+	if fi, err := f.Stat(); err == nil && fi.Size() > int64(len(data)) {
+		if err := f.Truncate(int64(len(data))); err != nil {
+			f.Close()
+			return err
 		}
-		time.Sleep(2 * time.Millisecond)
 	}
-	os.Remove(tmpName)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("rename failed (%v) and direct write failed: %w", rerr, err)
-	}
-	return nil
+	return f.Close()
 }
 
 // Target is a core.InputTarget that writes controller state to a text file.
@@ -149,7 +159,7 @@ func (t *Target) Start(_ context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(t.path), 0o755); err != nil {
 		return fmt.Errorf("overlay input: %w", err)
 	}
-	return WriteFileAtomic(t.path, []byte(FormatText(core.InputCommand{}, time.Now())))
+	return WriteFileInPlace(t.path, []byte(PadText(FormatText(core.InputCommand{}, time.Now()))))
 }
 
 // Send implements core.InputTarget. It records the latest command; it never
@@ -170,7 +180,7 @@ func (t *Target) flush() {
 	cmd, recv := t.last, t.recv
 	t.dirty = false
 	t.mu.Unlock()
-	if err := WriteFileAtomic(t.path, []byte(FormatText(cmd, recv))); err != nil {
+	if err := WriteFileInPlace(t.path, []byte(PadText(FormatText(cmd, recv)))); err != nil {
 		t.log.Warn("overlay write failed", "err", err)
 	}
 }
