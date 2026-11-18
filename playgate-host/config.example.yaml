@@ -28,6 +28,9 @@ encoder:
   # libx264 (it never silently downgrades).
   codec: libx264
   vaapi_device: /dev/dri/renderD128   # DRM render node (h264_vaapi only)
+  # Encoder implementation: cli (ffmpeg subprocess, default) | libav (in-process
+  # libav; only in binaries built with CGO_ENABLED=1 -tags libav).
+  backend: cli
 
 # Audio capture (ALSA -> Opus). Sent on its own WebRTC track alongside the video;
 # the browser resynchronises A/V from each track's RTP timestamps. Disabled by

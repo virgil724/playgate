@@ -162,6 +162,11 @@ func (e *Encoder) Name() string { return "encoder" }
 // Encoder owns and closes it on exit.
 func (e *Encoder) Packets() <-chan core.EncodedPacket { return e.packets }
 
+// Caps implements core.VideoEncoder. The CLI backend applies both bitrate
+// changes and keyframe requests by restarting the ffmpeg subprocess, so neither
+// is cheap.
+func (e *Encoder) Caps() core.EncoderCaps { return core.EncoderCaps{} }
+
 // Errors returns the receive-only channel of non-fatal encoder errors (e.g. the
 // ffmpeg subprocess died). The upstream supervisor may decide to restart the
 // module on receipt. The Encoder owns and closes it on exit.
