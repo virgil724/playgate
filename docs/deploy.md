@@ -336,6 +336,41 @@ sudo /usr/bin/python3 /opt/playgate/nxbt-daemon/nxbtd.py &
 sudo playgate-host -config /etc/playgate/config.yaml
 ```
 
+### libav build (optional, in-process encoder)
+
+The default host binary is pure Go (`CGO_ENABLED=0`) and shells out to the
+`ffmpeg` CLI. The optional **libav** build (`-tags libav`, cgo + go-astiav)
+encodes in-process, enabling live bitrate changes and cheap keyframes. Select it
+at runtime with `encoder.backend: libav` (default is `cli`); a non-libav binary
+rejects `libav` with an explicit error.
+
+Because it uses cgo it **cannot be cross-compiled**: build each arch natively
+(amd64 on an amd64 Linux host, arm64 on an arm64 host such as a Pi), or let Docker
+buildx do it per platform (QEMU for the foreign arch).
+
+FFmpeg version: CI and the Docker image both use **Ubuntu 24.04 = FFmpeg 6.1**
+(libavcodec60 / libavformat60 / libavutil58 / libswscale7). go-astiav must be the
+release built for FFmpeg 6.1. (Debian bookworm is 5.1 and trixie is 7.1, so the
+libav image deliberately uses `ubuntu:24.04` rather than Debian.) The binary links
+FFmpeg dynamically, so the target machine needs the matching runtime libs.
+
+```bash
+# Native build (Ubuntu 24.04 / Debian-family); dev packages needed once:
+sudo apt-get install -y gcc pkg-config libavcodec-dev libavformat-dev \
+  libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev libswresample-dev
+make build-libav-amd64      # on amd64  -> dist/playgate-host-libav-linux-amd64
+make build-libav-arm64      # on arm64  -> dist/playgate-host-libav-linux-arm64
+
+# Docker (multi-arch, each platform built natively under buildx/QEMU):
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --target host-libav -f docker/host.Dockerfile \
+  -t ghcr.io/playgate/playgate-host:libav --push .
+# or: make docker-host-libav REGISTRY=ghcr.io/your-org/playgate
+```
+
+Release tags also publish `playgate-host-libav-linux-{amd64,arm64}` (built on
+native `ubuntu-24.04` / `ubuntu-24.04-arm` runners) next to the pure-Go binaries.
+
 ---
 
 ## 4. playgate-web — Static hosting
