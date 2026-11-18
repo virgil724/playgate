@@ -98,3 +98,24 @@
 ### avcC fallback
 
 在手機頁面載入前，用 CDP 注入腳本，讓 `VideoDecoder.configure` 拒絕沒有 `description` 的設定（模擬不支援 Annex-B 的瀏覽器）。網頁記錄到 `annex-b rejected; switching to avcC mode`，改用 `mode=avcc` 後正常解碼（45 fps、lost 0）。
+
+## RTP 在 60fps 的解碼瓶頸（2026-11-19 01:30，4G LTE，Android Chrome）
+
+libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP 還慢。從 Chrome 接收端的統計（`inbound-rtp`）看，網路這段沒有問題：沒有 NACK、沒有 PLI、沒有掉包，jitter buffer 約 20ms。差別在解碼時間：
+
+| 編碼 | fps | 每張解碼（`totalDecodeTime / framesDecoded`） |
+|---|---|---|
+| CLI | 30 | 17.5 ms |
+| libav | 30 | 16.7 ms |
+| CLI | 60 | 156 ms |
+| libav | 60 | 132 ms |
+
+這支手機的 Chrome 在 RTP 路徑上解一張約 17ms，看起來是軟體解碼器，一秒最多只能解約 58 張。60fps 時解碼器跟不上，畫面在佇列裡越排越長。WebCodecs 用的是硬體解碼器（約 17ms 是硬體的固定管線延遲，不會隨 fps 累積），所以 60fps 沒有這個問題。
+
+| 路徑 | p50 | p90 | 範圍 |
+|---|---|---|---|
+| libav、30fps、RTP | **126** | 157 | 106–190 |
+| libav、60fps、RTP | 241～257 | 290 | — |
+| libav、60fps、WebCodecs | 91 | 112 | — |
+
+**結論**：RTP 路徑要搭 30fps，不要用 60fps。
