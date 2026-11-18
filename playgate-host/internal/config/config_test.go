@@ -141,8 +141,8 @@ func TestGOPFrames(t *testing.T) {
 	if got := e.GOPFrames(60); got != 45 {
 		t.Errorf("keyframe_interval should take precedence, got %d", got)
 	}
-	if got := Default().Encoder.GOPFrames(30); got != 30 {
-		t.Errorf("default GOP = %d, want 30 (1s)", got)
+	if got := Default().Encoder.GOPFrames(30); got != 60 {
+		t.Errorf("default GOP = %d, want 60 (2s)", got)
 	}
 }
 
