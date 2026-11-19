@@ -44,7 +44,8 @@
 
   let prev = grab(); const noise = [];
   for (let i = 0; i < 60; i++) { await raf(); const m = grab(); noise.push(diff(prev, m)); prev = m; }
-  const noiseMax = Math.max(...noise);
+  // p90, not max: one transient (page still settling) must not inflate the threshold.
+  const noiseMax = [...noise].sort((a, b) => a - b)[Math.floor(noise.length * 0.9)];
   const threshold = Math.max(20, noiseMax * 3);
   const settle = async () => { let a = grab(), still = 0, n = 0; while (still < 3 && n++ < 120) { await raf(); const b = grab(); still = diff(a, b) <= threshold / 2 ? still + 1 : 0; a = b; } return a; };
   const waitChange = async (base, t0) => { for (;;) { await raf(); const now = performance.now(); if (now - t0 > 3000) return { ms: null }; const d = diff(base, grab()); if (d > threshold) return { ms: now - t0, d }; } };
