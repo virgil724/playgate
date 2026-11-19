@@ -147,7 +147,7 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 
 ## 改版前（`main`）vs 改版後，同一個區網（2026-11-19 10:30–11:00）
 
-- **改版前**：`main`（5121287）加上量測需要的 testsrc、overlay 和直通模式，其他不動。分支 `measure/main-baseline`，只在本機。CLI 編碼器、30fps、RTP。
+- **改版前**：`main`（5121287）加上量測需要的 testsrc、overlay 和直通模式，其他不動。分支 `measure/main-baseline`（已推到 GitHub，不打算合併）。CLI 編碼器、30fps、RTP。
 - **改版後**：`feat/stream-resilience`（1a24379）。libav、60fps、WebCodecs + FEC + FRAG_NACK，ABR 上限 3 Mbps，跟 `main` 固定的 3 Mbps 相同。
 - **觀眾**：這台電腦上的 Chrome（分頁在前景）和 Pixel 手機，手機透過家用 Wi-Fi 連到同一個區網。
 - **量測方式**：新舊版交替各量 3 輪（舊、新、舊、新、舊、新），每輪 50 次按鍵。用 `scripts/latency/measure-btn.js`，雜訊校正改取第 90 百分位；25ms 以下視為雜訊誤觸發，予以排除。
