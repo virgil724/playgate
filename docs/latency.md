@@ -281,3 +281,45 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 
 
 
+
+## Linux V4L2 + ALSA（2026-11-19 21:54–22:07，桌機 Chromium，同一台機器）
+
+設定：
+- 主機：CachyOS（kernel 7.3.4），Ryzen 5 2500U，FFmpeg 9.0。
+- 擷取：GC553 透過 `capture.source: v4l2`（`/dev/video4`，720p60 NV12），在 host 行程內直接讀，不經 ffmpeg。
+- 聲音：`audio.format: alsa`（`hw:CARD=UltraVideo,DEV=0`，48kHz stereo，10ms Opus）。
+- 編碼：libav libx264，60fps，ABR 上限 8Mbps。傳輸用 WebCodecs + FEC + FRAG_NACK。
+- 輸入：ESP32-C6 gateway（`/dev/ttyACM0`，`rate_hz: 150`）。
+- 觀眾：同一台機器上的 Chromium 157（本機 `vite --mode production`，連 production signaling）。
+
+量法同上：`scripts/latency/measure-switch-av.js`，每輪 30 次。host 只在第一輪前啟動一次，之後不重啟。
+
+| 輪次 | host 已跑 | 影像 p50（clean） | 影像 p90 / max（clean） | 聲音 p50（解碼端） | 聲音 p90 / max | 音畫差 clean p50 |
+|---|---|---|---|---|---|---|
+| 剛啟動 | 0.5 分 | 140（**142**，n=26） | 154 / 214 | **190** | 208 / 209 | +49 |
+| 1 | 5.7 分 | —（無效，見下） | — | 188 | 201 / — | — |
+| 2 | 11.6 分 | 142（**142**，n=30） | 151 / 159 | **201** | 218 / 225 | +65 |
+| 3 | 12.0 分 | 138（**140**，n=27） | 148 / 149 | **204** | 218 / 223 | +69 |
+
+clean 排除了 <100ms 的提早觸發（主選單背景動畫）。
+
+host metrics（12 分鐘時）：擷取 p50 17.7ms（60fps），編碼 p50 3.3ms／p95 4.4ms，送出 p50 0.09ms，input p50 0.06ms，gateway 裝置內 p50 0.66ms，觀眾解碼約 1.5ms。`host-libav` 約占 130% CPU。
+
+與 Windows 比較：
+
+| 項目 | Windows `dshow`（修正後 `8c4e115`） | Linux V4L2 + ALSA |
+|---|---|---|
+| 影像 p50，剛啟動 | 126（clean 133） | 140（clean 142） |
+| 影像 p50，約 12 分鐘 | 舊版 `16M` 漂到 258；修正後長跑封頂在 193 | **138（clean 140），沒有漂移** |
+| 聲音 p50，剛啟動 | 194 | 190 |
+| 聲音 p50，約 12 分鐘 | 194（99 分鐘長跑也沒漂移） | 201–204（+11～14） |
+
+- 剛啟動時差不多。影像慢約 9ms，在不同機器、不同瀏覽器的誤差範圍內。V4L2 沒有讓 cold-start 變快：大部分延遲在 Switch 主選單、HDMI 和 GC553 本身，串流管線只占約 25ms。
+- 影像在 12 分鐘內**沒有漂移**（142 → 140）。V4L2 在行程內讀取，只用 4 個 mmap buffer，沒有 `dshow` 的 `rtbufsize` 可以累積。
+- 聲音在 12 分鐘內多了約 12ms。可能是 ALSA 擷音時鐘跟 Opus 送出節奏之間的小落差，或 Chrome NetEQ 調大了緩衝。只量到 12 分鐘，還不能確定會不會繼續漲，需要跑 30 分鐘以上再確認。
+- 這次只量到 12 分鐘。原本要跑 30 分鐘，提前結束。
+
+量測陷阱：
+- 第 1 輪中段有 13 次影像逾時，同時段聲音正常，host 那邊擷取、編碼、送出也都穩定在 60fps。原因是 Chromium 視窗被蓋住或切到別的工作區：niri 不會送 frame callback 給看不到的視窗，`requestAnimationFrame` 就停了。量測時觀看視窗必須保持可見。
+- CachyOS 預設不會把使用者加進 serial 群組（`uucp`，不是 `dialout`）。GC553 剛接上時如果 `VIDIOC_STREAMON` 失敗（`uvcvideo: Failed to submit URB 0 (-2)`），kernel log 又出現 `xhci_hcd: Timeout while waiting for configure endpoint command`，代表 xHCI 控制器狀態壞了，拔插沒用，要重開機。
+- 系統 FFmpeg 9.0 需要 go-astiav v0.43.0 以上（v0.39.0 會因 `AVFMT_FLAG_SHORTEST` 已被移除而編譯失敗）。
