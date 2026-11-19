@@ -217,3 +217,45 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 - 選取框的發光邊框會持續變色，不能拿來偵測，要改看遊戲名稱那一行。
 - 同時開著第二個觀看頁、又把它切到背景時，背景分頁停止讀取資料，ABR 會依「最差的觀眾」把所有人的位元率一起拉低（降到 1Mbps），量到的數字不可信。
 
+### 實測：Switch 2 主選單影像＋聲音（2026-11-19 17:32–17:43，桌機 Chrome & Pixel 10 Pro Wi-Fi）
+
+設定與 17:21 相同：GC553（`dshow` 720p60 NV12 + `dshow` 48kHz Opus）、libav 60fps、WebCodecs、ESP32-C6 gateway（`COM4`，`sdkconfig.usb_only` 事件驅動韌體）。
+
+量法：`scripts/latency/measure-switch-av.js` 同時偵測：
+- **影像**：遊戲名稱那一行像素變化（rAF）。
+- **聲音**：透過 Web Audio `AnalyserNode`（2ms 輪詢）量選單移動音效 RMS 超過門檻的時間。此為**瀏覽器解碼端**延遲；到實際喇叭出聲還要加上 `AudioContext.outputLatency`（Windows WASAPI 約 40ms、Pixel Android 約 24ms）。
+- 每組 30 次按鍵（`KeyH` / `KeyF` 交替）。部分試次因主選單背景動畫提早觸發（桌機 `<100ms`、手機 `<100ms`），下表同時列出全部樣本與排除提早觸發後的 clean p50。
+
+#### 結果總表（單位 ms）
+
+| 觀眾 | `host-libav` 狀態 | 影像 p50（clean） | 影像 p90 | 聲音 p50（解碼端） | 聲音 p90 | 音畫差（音 − 影） | 喇叭額外延遲 |
+|---|---|---|---|---|---|---|---|
+| 桌機 Chrome | **剛重啟（fresh）** | **156**（157） | 174 | **250** | 263 | **+93** | +40（base 10） |
+| 桌機 Chrome | 運行 ~12 分鐘後 | **258**（262） | 276 | **247** | 259 | −15 | +40（base 10） |
+| Pixel 10 Pro（Wi-Fi） | **剛重啟（fresh）** | **195**（201） | 241 | **350**\* | 370 | **+156** | +24（base 5） |
+| Pixel 10 Pro（Wi-Fi） | 運行 ~16 分鐘後 | **295**（305） | 332 | **302** | 333 | +9 | +24（base 5） |
+
+\* Pixel 10 Pro（fresh）的聲音樣本在前 5 次為 239–265ms（p50 **263ms**，僅比桌機多 ~13ms），第 7 次起因 Wi-Fi 抖動跳升至 ~325ms，第 12 次逾時後再升至 ~355ms 並維持到結束（見下方原因 3）。
+
+#### 與模擬畫面（`testsrc` + `overlay`）比較
+
+| 觀眾 | `testsrc` + `overlay`（60fps WebCodecs） | 實機 Switch 2 + GC553（fresh 影像） | 差值 |
+|---|---|---|---|
+| 桌機 Chrome | p50 **48 ms**（扣 overlay ~35ms ≈ 13–20ms） | p50 **156 ms** | **+108 ms**（相較純串流約 +135ms） |
+| Pixel 10 Pro（Wi-Fi） | p50 **92 ms** | p50 **195 ms**（clean 201） | **+103 ms** |
+
+- 桌機 → 手機 Wi-Fi 的增量在模擬與實機完全一致（`testsrc` +44ms，實機 fresh +39～44ms）。
+- 實機 fresh 多出的 ~135ms 主要來自 Switch 2 主選單 UI 反應、HDMI 輸出與 GC553 擷取卡硬體管線，而非串流或 ESP32-C6 輸入路徑（輸入路徑本身僅 ~5–10ms）。
+
+#### 排查出的三個延遲問題
+
+1. **`dshow` 影像管線隨時間漂移累積約 +100ms（已由 A/B 重啟證實）**
+   - `host-libav` 跑 12–16 分鐘後，桌機影像從 156 → 258ms（+102ms）、手機影像從 195 → 295ms（+100ms），重啟 `host-libav` 立刻回到 156ms / 195ms；同期桌機聲音完全沒變（247 vs 250ms），鎖定問題只在影像擷取管線。
+   - 原因：`playgate-host/internal/capture/testsrc/source.go` 啟動 ffmpeg `dshow` 時設了 `-rtbufsize 16M`（720p NV12 單張 1.38MB，約可囤 11.5 張 ≈ 190ms），卻未加 `-fflags nobuffer -flags low_delay`。當擷取卡實際更新率（如 59.94Hz）與 Go 讀取節奏稍有落差或短暫停頓，buffer 會逐漸填滿並永久增加 ~100ms+ 延遲。
+2. **聲音在剛啟動時就比影像慢 ~93ms（到 Windows 喇叭約慢 ~133ms）**
+   - 剛重啟時桌機影像 156ms，但聲音解碼端已是 250ms（+93ms）。
+   - 原因：`playgate-host/internal/audio/opus/source.go` 啟動 ffmpeg `dshow` 擷音時缺少 `-fflags nobuffer -probesize 32 -analyzeduration 0`，且 `-audio_buffer_size 20`、`-frame_duration 20`、`-page_duration 20000` 各帶 20ms 緩衝，加上 Chrome WebRTC 音訊 jitter buffer（~20–40ms）。
+3. **手機 Wi-Fi 音訊 jitter buffer（NetEQ）遇抖動後拉高且回落慢**
+   - Pixel fresh 實測中，聲音延遲從 263ms 階梯式升至 325ms → 355ms，而 WebCodecs 影像沒有 NetEQ 緩衝仍維持 ~200ms，導致手機端音畫不同步擴大至 +156ms（喇叭端約 +180ms）。
+
+

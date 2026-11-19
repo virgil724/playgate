@@ -22,7 +22,7 @@ ws.onopen = () =>
     JSON.stringify({
       id: 1,
       method: "Runtime.evaluate",
-      params: { expression, awaitPromise: true, returnByValue: true },
+      params: { expression, awaitPromise: true, returnByValue: true, userGesture: true },
     }),
   );
 ws.onmessage = (ev) => {
