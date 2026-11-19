@@ -55,6 +55,10 @@ export interface TransportOptions {
 export class VideoTransportController {
   private mode: TransportMode = "pending";
   private fellBack = false;
+  // Permanent fallback (unsupported decoder / repeated decoder errors) persists
+  // across peer reconnects; transient fallback (channel/keyframe timeout during
+  // a host restart) resets on peerReset() so WebCodecs is retried cleanly.
+  private permanentFallback = false;
   private videoCh: RTCDataChannel | null = null;
   private fbCh: RTCDataChannel | null = null;
   private pipeline: WebCodecsPipeline | null = null;
@@ -96,6 +100,7 @@ export class VideoTransportController {
   /** A fresh RTCPeerConnection was created (initial or host recycle). */
   peerReset(): void {
     this.teardown();
+    this.fellBack = this.permanentFallback;
     this.mode = this.wantWebCodecs() ? "pending" : "track";
     this.o.onMode(this.mode);
   }
@@ -181,7 +186,10 @@ export class VideoTransportController {
       },
       getRttMs: () => this.rttMs,
       onFallback: (reason) => {
-        if (gen === this.generation) this.fallback(reason);
+        if (gen === this.generation) {
+          const permanent = /does not support|decoder/i.test(reason);
+          this.fallback(reason, permanent);
+        }
       },
       onFirstKey: () => {
         if (gen === this.generation) this.setMode("webcodecs");
@@ -213,9 +221,10 @@ export class VideoTransportController {
     this.rttTimer = setInterval(() => void poll(), 1000);
   }
 
-  private fallback(reason: string): void {
+  private fallback(reason: string, permanent = false): void {
     if (this.fellBack) return;
-    this.fellBack = true; // not automatic to return within a session
+    this.fellBack = true;
+    if (permanent) this.permanentFallback = true;
     dlog("webcodecs", `falling back to RTP track: ${reason}`);
     this.o.sendControl(JSON.stringify({ kind: "video_transport", use: "track" }));
     this.teardown();

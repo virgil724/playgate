@@ -173,6 +173,12 @@ type Peer struct {
 	// so a freshly-attached decoder starts on an IDR. Guarded by vmu.
 	vmu          sync.Mutex
 	seenKeyframe bool
+
+	// Latest RTCP ReceiverReport from the video sender (Pion v4 GetStats does
+	// not populate RemoteInboundRTPStreamStats, so RTP-mode ABR reads RR here).
+	rtpMu   sync.Mutex
+	rtpLoss float64
+	rtpRRAt time.Time
 	// mediaUp is true while the peer connection is connected. Before that (and
 	// after a disconnect) samples written to the track go nowhere, so they must
 	// not count as the viewer's first keyframe. Guarded by vmu.
@@ -392,7 +398,7 @@ func (p *Peer) setupVideoTrack() error {
 		return fmt.Errorf("rtc: add video track: %w", err)
 	}
 	p.video = track
-	go p.readSenderRTCP(sender)
+	go p.readSenderRTCP(sender, true)
 	return nil
 }
 
@@ -412,33 +418,37 @@ func (p *Peer) setupAudioTrack() error {
 		return fmt.Errorf("rtc: add audio track: %w", err)
 	}
 	p.audio = track
-	go p.readSenderRTCP(sender)
+	go p.readSenderRTCP(sender, false)
 	return nil
 }
 
-// readSenderRTCP drains the video sender's RTCP stream so Pion's interceptors run
-// (they consume inbound RTCP, e.g. NACK responder), and forwards viewer keyframe
-// requests to OnKeyframeRequest. A PLI (Picture Loss Indication) or FIR (Full
-// Intra Request) means the decoder lost an IDR and needs a fresh keyframe to
-// recover. The loop exits when the sender is closed (pc.Close), which makes Read
-// return an error.
-func (p *Peer) readSenderRTCP(sender *webrtc.RTPSender) {
+// readSenderRTCP drains a sender's RTCP stream so Pion's interceptors run
+// (they consume inbound RTCP, e.g. NACK responder). For the video sender it
+// also forwards PLI/FIR keyframe requests to OnKeyframeRequest and records
+// ReceiverReport loss for RTP-mode ABR. The loop exits when the sender is
+// closed (pc.Close), which makes Read return an error.
+func (p *Peer) readSenderRTCP(sender *webrtc.RTPSender, isVideo bool) {
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := sender.Read(buf)
 		if err != nil {
 			return // sender closed
 		}
+		if !isVideo {
+			continue
+		}
 		pkts, err := rtcp.Unmarshal(buf[:n])
 		if err != nil {
 			continue
 		}
 		for _, pkt := range pkts {
-			switch pkt.(type) {
+			switch v := pkt.(type) {
 			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
 				if p.cfg.OnKeyframeRequest != nil {
 					p.cfg.OnKeyframeRequest()
 				}
+			case *rtcp.ReceiverReport:
+				p.recordReceiverReport(v)
 			}
 		}
 	}

@@ -77,4 +77,30 @@ describe("VideoTransportController browser policy", () => {
     expect(requested(UA.chromeWin)).toBe("webcodecs");
     expect(requested(UA.firefoxWin)).toBe("webcodecs");
   });
+
+  it("retries WebCodecs after a transient fallback on peerReset", () => {
+    vi.useFakeTimers();
+    try {
+      const sent: string[] = [];
+      const c = new VideoTransportController({
+        getCanvas: () => null,
+        sendControl: (m) => sent.push(m),
+        getPeer: () => null,
+        onMode: () => {},
+        userAgent: UA.chromeWin,
+      });
+      c.onControlOpen();
+      expect(JSON.parse(sent[sent.length - 1]).use).toBe("webcodecs");
+      // Host offered no video channel -> transient fallback to track.
+      vi.advanceTimersByTime(3500);
+      expect(c.currentMode).toBe("track");
+      // New host / reconnect resets transient fallback and retries WebCodecs.
+      c.peerReset();
+      c.onControlOpen();
+      expect(JSON.parse(sent[sent.length - 1]).use).toBe("webcodecs");
+      c.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

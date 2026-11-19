@@ -111,6 +111,7 @@ func BuildArgs(c Config, textFile string) []string {
 			"-f", "dshow", "-rtbufsize", fmt.Sprintf("%dM", rtbufMB),
 			"-video_size", size, "-framerate", strconv.Itoa(c.FPS), "-pixel_format", "nv12",
 			"-i", "video=" + c.DShowDevice,
+			"-fps_mode", "passthrough",
 			"-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1",
 		}
 	}

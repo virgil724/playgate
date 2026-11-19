@@ -277,5 +277,7 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 | Pixel 10 Pro（Wi-Fi） | 聲音 p90 / max | 370 / 375ms | **338 / 348ms** | −32 / −27ms |
 | Pixel 10 Pro（Wi-Fi） | 音畫差（音 − 影，p50） | +156ms | **+109ms（clean ~+92ms）** | **−47ms** |
 
+99 分鐘連續長跑（17:59–19:39，桌機 Chrome，n=30）：聲音維持 **p50 194ms**（零漂移）；影像在 `rtbufsize 4M` 下封頂於 **p50 193ms（clean 195ms）**（相較舊版 `16M` 12 分鐘就漂到 258ms 大幅收斂；後續再補上 `-fps_mode passthrough` 避免 ffmpeg CFR 配速囤積）。
+
 
 

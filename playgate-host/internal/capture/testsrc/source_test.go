@@ -68,6 +68,7 @@ func TestBuildArgs(t *testing.T) {
 		"-probesize 32 -analyzeduration 0",
 		"-f dshow -rtbufsize 4M",
 		"-i video=Live Gamer Ultra-Video",
+		"-fps_mode passthrough",
 	} {
 		if !strings.Contains(dshowArgs, want) {
 			t.Errorf("dshow args missing %q:\n%s", want, dshowArgs)

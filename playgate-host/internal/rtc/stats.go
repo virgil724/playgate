@@ -3,6 +3,7 @@ package rtc
 import (
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -46,8 +47,70 @@ func (p *Peer) Stats() StatsSample {
 		return p.vs.linkStats(sctpSRTT(report))
 	}
 	out := sampleFromReport(report)
+	if !out.Valid {
+		out = p.rtpRRStats(report)
+	}
 	out.Source = "rtp"
 	return out
+}
+
+const rtpRRMaxAge = 10 * time.Second
+
+// recordReceiverReport stores the worst fraction-lost from an inbound video
+// RTCP ReceiverReport. Pion v4 does not populate RemoteInboundRTPStreamStats
+// in GetStats(), so RTP-mode ABR reads loss from here instead.
+func (p *Peer) recordReceiverReport(rr *rtcp.ReceiverReport) {
+	if rr == nil || len(rr.Reports) == 0 {
+		return
+	}
+	var worst float64
+	for _, rep := range rr.Reports {
+		loss := float64(rep.FractionLost) / 256.0
+		if loss > worst {
+			worst = loss
+		}
+	}
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	p.rtpMu.Lock()
+	p.rtpLoss = worst
+	p.rtpRRAt = now()
+	p.rtpMu.Unlock()
+}
+
+// rtpRRStats builds a StatsSample from the most recent RTCP ReceiverReport
+// (when fresh) plus the nominated ICE candidate pair's RTT.
+func (p *Peer) rtpRRStats(report webrtc.StatsReport) StatsSample {
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	p.rtpMu.Lock()
+	loss := p.rtpLoss
+	at := p.rtpRRAt
+	p.rtpMu.Unlock()
+	if at.IsZero() || now().Sub(at) > rtpRRMaxAge {
+		return StatsSample{}
+	}
+	return StatsSample{
+		LossFraction: loss,
+		RTT:          iceRTT(report),
+		Valid:        true,
+		Source:       "rtp",
+	}
+}
+
+// iceRTT extracts the nominated ICE candidate pair's current RTT from a stats
+// report, or 0 when unavailable.
+func iceRTT(report webrtc.StatsReport) time.Duration {
+	for _, s := range report {
+		if cp, ok := s.(webrtc.ICECandidatePairStats); ok && cp.Nominated && cp.CurrentRoundTripTime > 0 {
+			return time.Duration(cp.CurrentRoundTripTime * float64(time.Second))
+		}
+	}
+	return 0
 }
 
 // sctpSRTT returns the SCTP association's smoothed RTT from a stats report, or
