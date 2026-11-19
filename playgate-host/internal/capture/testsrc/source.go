@@ -82,8 +82,8 @@ func BuildArgs(c Config, textFile string) []string {
 		fontOpt = "fontfile='" + EscapeFilterPath(c.FontFile) + "':"
 	}
 	fs := max(14, c.Height/24)
-	counter := fmt.Sprintf(`drawtext=%stext='frame %%{n}  pts %%{pts\:hms}':x=16:y=16:fontsize=%d:fontcolor=white:box=1:boxcolor=black@0.6`, fontOpt, fs)
-	input := fmt.Sprintf(`drawtext=%stextfile='%s':reload=1:x=16:y=%d:fontsize=%d:fontcolor=yellow:box=1:boxcolor=black@0.6`,
+	counter := fmt.Sprintf(`drawtext=%stext='frame %%{n}  pts %%{pts\:hms}':x=16:y=16:fontsize=%d:fontcolor=white:box=1:boxcolor=black`, fontOpt, fs)
+	input := fmt.Sprintf(`drawtext=%stextfile='%s':reload=1:x=16:y=%d:fontsize=%d:fontcolor=yellow:box=1:boxcolor=black`,
 		fontOpt, EscapeFilterPath(textFile), 16+fs*2, fs)
 	return []string{
 		"-hide_banner", "-nostdin", "-loglevel", "warning",
