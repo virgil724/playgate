@@ -129,8 +129,8 @@ input:
   # docs/switch2-gateway.md). Pair it with the console first, then plug it in.
   gateway:
     port: auto                    # auto = the single ESP32 USB Serial/JTAG port; or COM5, /dev/ttyACM0
-    rate_hz: 90                   # spaces button edges past the gateway's 100 Hz report tick
-    keepalive_ms: 40              # re-send a held state; the gateway neutralises after 100 ms of silence
+    rate_hz: 150                  # spaces button edges past the gateway's 5-6 ms report throttle (90 for fixed-100Hz firmware)
+    keepalive_ms: 40              # re-send a held state (neutral is sent once); the gateway neutralises after 100 ms of silence
   # disabled_buttons drops specific buttons so they are never sent to the Switch.
   # disabled_buttons:
   #   - home

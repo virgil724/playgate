@@ -69,7 +69,7 @@ func TestValidateGatewayInput(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("gateway defaults should validate: %v", err)
 	}
-	if cfg.Input.Gateway.Port != "auto" || cfg.Input.Gateway.RateHz != 90 || cfg.Input.Gateway.KeepaliveMS != 40 {
+	if cfg.Input.Gateway.Port != "auto" || cfg.Input.Gateway.RateHz != 150 || cfg.Input.Gateway.KeepaliveMS != 40 {
 		t.Errorf("gateway defaults = %+v", cfg.Input.Gateway)
 	}
 	cfg.Input.Gateway.KeepaliveMS = 100

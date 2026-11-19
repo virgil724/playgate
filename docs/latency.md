@@ -172,8 +172,8 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 
 拆成兩段來看：
 
-- **host 內部**：metrics 的 `input` 段，從 DataChannel 解出指令到寫進 serial。主要是限速的等待，`rate_hz: 90` 最多約 11ms。
-- **gateway 裝置內**：metrics 的 `daemon` 段，取自 gateway status 回報的 `last_receive_to_submit_us`。README 實測 5–7ms，不含 BLE 空中傳輸。
+- **host 內部**：metrics 的 `input` 段，從 DataChannel 解出指令到寫進 serial。主要是限速的等待，`rate_hz: 150` 最多約 6.7ms。
+- **gateway 裝置內**：metrics 的 `daemon` 段，取自 gateway status 回報的 `last_receive_to_submit_us`。事件驅動韌體在 5ms 節流內就會送出 report，不含 BLE 空中傳輸。韌體修正後，每個輸入只記第一次送出的時間。
 
 端到端量法：
 - 擷取卡拍 Switch 2 畫面，挑一個按下就有明顯變化的畫面，例如主選單游標移動。

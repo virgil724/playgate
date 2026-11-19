@@ -305,8 +305,10 @@ type GatewayConfig struct {
 	// Port is the serial port, e.g. "COM5" or "/dev/ttyACM0". "auto" (the
 	// default) picks the single Espressif USB Serial/JTAG port present.
 	Port string `yaml:"port"`
-	// RateHz spaces queued button edges; the default 90 keeps two edges out of
-	// one 100 Hz gateway report. 0 disables limiting.
+	// RateHz spaces queued button edges so two never land in one gateway
+	// report. The default 150 suits the event-driven firmware (a report at
+	// most every 5-6 ms); use 90 with firmware that reports at a fixed 100 Hz.
+	// 0 disables limiting.
 	RateHz int `yaml:"rate_hz"`
 	// KeepaliveMS is how often a held state is re-sent; it must stay well
 	// below the gateway's 100 ms input timeout.
@@ -422,7 +424,7 @@ func Default() Config {
 			Target:     InputNXBT,
 			SocketPath: "/run/nxbt/nxbt.sock",
 			RateHz:     120,
-			Gateway:    GatewayConfig{Port: "auto", RateHz: 90, KeepaliveMS: 40},
+			Gateway:    GatewayConfig{Port: "auto", RateHz: 150, KeepaliveMS: 40},
 		},
 		Session: SessionConfig{
 			Enabled:            false,

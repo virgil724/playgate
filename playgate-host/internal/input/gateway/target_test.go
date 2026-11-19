@@ -108,7 +108,7 @@ func startTarget(t *testing.T, open OpenFunc, opts ...Option) (*Target, context.
 }
 
 // A held button is re-sent every keepalive with a growing sequence, and a
-// release falls back to the slow idle keepalive.
+// release is sent once and never repeated (the old idle keepalive was 1 s).
 func TestHeldStateKeepaliveAndSequence(t *testing.T) {
 	port := newFakePort()
 	tg, _, _ := startTarget(t, func(context.Context) (io.ReadWriteCloser, error) { return port, nil },
@@ -117,7 +117,7 @@ func TestHeldStateKeepaliveAndSequence(t *testing.T) {
 	_ = tg.Send(core.InputCommand{Buttons: core.ButtonA, LY: -1, Timestamp: time.Now()})
 	time.Sleep(150 * time.Millisecond)
 	_ = tg.Send(core.InputCommand{})
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond)
 
 	frames := port.sent()
 	var held, after int
@@ -143,7 +143,7 @@ func TestHeldStateKeepaliveAndSequence(t *testing.T) {
 		t.Errorf("held state written %d times in 150ms with a 20ms keepalive, want >= 5", held)
 	}
 	if !released || after > 0 {
-		t.Errorf("release: seen %v, extra neutral frames %d (idle keepalive is 1s)", released, after)
+		t.Errorf("release: seen %v, extra neutral frames %d, want none", released, after)
 	}
 }
 

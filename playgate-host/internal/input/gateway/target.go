@@ -4,9 +4,10 @@
 // host only streams controller state.
 //
 // The gateway neutralises the controller when its input source has been quiet
-// for 100 ms, so a held state is re-sent every keepalive interval. Every frame
-// carries a fresh sequence number, since the gateway drops frames whose
-// sequence is not newer than the last one it accepted.
+// for 100 ms, so a held state is re-sent every keepalive interval; a neutral
+// state is sent once. Every frame carries a fresh sequence number, since the
+// gateway drops frames whose sequence is not newer than the last one it
+// accepted.
 //
 // Ownership: Target owns the Status channel; Run is the sole writer and closes
 // it on exit, per the core channel contract.
@@ -27,15 +28,16 @@ import (
 )
 
 const (
-	// DefaultRateHz spaces queued button edges about 11 ms apart, just over
+	// DefaultRateHz spaces queued button edges about 6.7 ms apart. The
+	// firmware reports a new input at most every 5 ms (rounded up to its 1 ms
+	// tick, so 5-6 ms), so two edges never merge into one report. With older
+	// firmware that reports at a fixed 100 Hz, use 90.
 	// the gateway's 10 ms (100 Hz) report period, so two edges do not land in
 	// one report and merge.
-	DefaultRateHz = 90
+	DefaultRateHz = 150
 	// DefaultKeepalive re-sends a held (non-neutral) state well inside the
 	// gateway's 100 ms input timeout.
 	DefaultKeepalive = 40 * time.Millisecond
-	// idleKeepalive re-sends a neutral state; it only keeps the link warm.
-	idleKeepalive = time.Second
 
 	reconnectBase = 250 * time.Millisecond
 	reconnectMax  = 5 * time.Second
@@ -202,7 +204,14 @@ func (t *Target) runSession(ctx context.Context, port io.ReadWriteCloser, last c
 			t.latency.Observe(time.Since(cmd.Timestamp))
 		}
 		last = cmd
-		resetTimer(keep, t.keepaliveFor(cmd))
+		// Only a held state needs refreshing. A neutral one is sent once:
+		// the gateway neutralises on its own after its input timeout, and
+		// re-sending it would only flip timeout_neutral and status reports.
+		if isNeutral(cmd) {
+			stopTimer(keep)
+		} else {
+			resetTimer(keep, t.keepalive)
+		}
 		return nil
 	}
 	drain := func() error {
@@ -245,11 +254,8 @@ func (t *Target) runSession(ctx context.Context, port io.ReadWriteCloser, last c
 	}
 }
 
-func (t *Target) keepaliveFor(cmd core.InputCommand) time.Duration {
-	if cmd.Buttons == 0 && cmd.LX == 0 && cmd.LY == 0 && cmd.RX == 0 && cmd.RY == 0 {
-		return idleKeepalive
-	}
-	return t.keepalive
+func isNeutral(cmd core.InputCommand) bool {
+	return cmd.Buttons == 0 && cmd.LX == 0 && cmd.LY == 0 && cmd.RX == 0 && cmd.RY == 0
 }
 
 // readLoop splits the byte stream on 0x00 delimiters and handles each frame
@@ -381,13 +387,18 @@ func (t *Target) emitStatus(s core.TargetStatus) {
 }
 
 func resetTimer(tm *time.Timer, d time.Duration) {
+	stopTimer(tm)
+	tm.Reset(d)
+}
+
+// stopTimer stops tm and drains a fire that already happened.
+func stopTimer(tm *time.Timer) {
 	if !tm.Stop() {
 		select {
 		case <-tm.C:
 		default:
 		}
 	}
-	tm.Reset(d)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
