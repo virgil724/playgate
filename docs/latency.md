@@ -277,7 +277,22 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 | Pixel 10 Pro（Wi-Fi） | 聲音 p90 / max | 370 / 375ms | **338 / 348ms** | −32 / −27ms |
 | Pixel 10 Pro（Wi-Fi） | 音畫差（音 − 影，p50） | +156ms | **+109ms（clean ~+92ms）** | **−47ms** |
 
-99 分鐘連續長跑（17:59–19:39，桌機 Chrome，n=30）：聲音維持 **p50 194ms**（零漂移）；影像在 `rtbufsize 4M` 下封頂於 **p50 193ms（clean 195ms）**（相較舊版 `16M` 12 分鐘就漂到 258ms 大幅收斂；後續再補上 `-fps_mode passthrough` 避免 ffmpeg CFR 配速囤積）。
+99 分鐘連續長跑（17:59–19:39，桌機 Chrome，n=30）：聲音維持 **p50 194ms**（零漂移）；影像在 `rtbufsize 4M` 下封頂於 **p50 193ms（clean 195ms）**（相較舊版 `16M` 12 分鐘就漂到 258ms 大幅收斂）。
+
+#### `desynchronized: true` 即時繪製＋跨手機對比（2026-11-19 20:39–20:56，桌機 & Xperia 1 II）
+
+前端套用 `CanvasRenderer` 解碼即畫＋`desynchronized: true`（PR #11），`host-libav` 含 `-fps_mode passthrough`：
+
+| 裝置 | `host-libav` 狀態 | 影像 p50（clean） | 影像 p90 / max | 聲音 p50（解碼端） | 聲音 p90 / max | 音畫差（音 − 影） | Wi-Fi / ABR |
+|---|---|---:|---:|---:|---:|---:|---|
+| 桌機 Chrome | 運行 ~40 分鐘 | 269ms | 276 / 284ms | 203ms | 214 / 215ms | −63ms | 8.0 Mbps、RTT 0.3ms |
+| 桌機 Chrome | **剛重啟（fresh）** | **132ms**（132ms） | **145 / 145ms** | **194ms** | **206 / 207ms** | +61ms | 8.0 Mbps、RTT 0.3ms |
+| **Xperia 1 II（SD865，Wi-Fi）** | 運行 ~8 分鐘 | **181ms**（184ms） | **198 / 203ms** | **178ms**（min 162） | **191 / 194ms** | **−4ms** | **8.0 Mbps、0% 掉包、RTT 2.8ms** |
+
+觀察：
+- `measure-switch-av.js` 以 `requestAnimationFrame` 輪詢像素，因此腳本數字受 60Hz VSync 對齊限制看不到 `desynchronized: true` 省下的 ~8ms（實際顯示提前需以慢動作相機驗證）；但長尾更收斂（桌機 max 145ms）。
+- `-fps_mode passthrough` 未能消除 Windows `dshow` 的長時間漂移（40 分鐘仍漂至 269ms，重啟立即回 132ms），漂移源頭在 Windows DirectShow / GC553 輸入端；後續將改移至 Linux（V4L2 + ALSA）對比驗證。
+- Xperia 1 II（Qualcomm Wi-Fi + Adreno 650）在相同家用 Wi-Fi 下穩跑 8.0 Mbps / 0% 掉包 / RTT 2.8ms，聲音 p50 **178ms**（比 Pixel 10 Pro 快 101ms、甚至比本機 Windows Chrome 快 16ms），影像 max **203ms**（Pixel 為 311ms），音畫幾乎零誤差（−4ms）。
 
 
 
