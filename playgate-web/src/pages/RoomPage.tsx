@@ -88,9 +88,15 @@ export function RoomPage() {
       dlog("page", `fullscreen failed: ${String(err)}`);
     }
   };
-  // The <video> starts muted so the browser allows autoplay; the host now sends
+  // The <audio> starts muted so the browser allows autoplay; the host sends
   // an Opus audio track, so expose a toggle to unmute after a user gesture.
   const [audioMuted, setAudioMuted] = useState(true);
+  const audioMutedRef = useRef(true);
+  audioMutedRef.current = audioMuted;
+  useEffect(() => {
+    const a = audioRef.current;
+    if (a) a.muted = audioMuted;
+  }, [audioMuted]);
   const [code, setCode] = useState("");
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
@@ -305,9 +311,10 @@ export function RoomPage() {
             if (!same) {
               a.srcObject = tracks.length > 0 ? new MediaStream(tracks) : null;
             }
+            a.muted = audioMutedRef.current;
             // Once the viewer unmuted (a user gesture), a reconnect's new
             // stream may start playing right away.
-            if (!a.muted) void a.play().catch(() => {});
+            if (!audioMutedRef.current) void a.play().catch(() => {});
           }
         },
         onControlEvent: handleControlEvent,
@@ -660,13 +667,16 @@ export function RoomPage() {
           <button
             className="btn-primary"
             style={{ position: "absolute", right: 12, bottom: 12, zIndex: 2 }}
-            onClick={() => {
+            onClick={(e) => {
+              e.currentTarget.blur();
+              const nextMuted = !audioMuted;
+              audioMutedRef.current = nextMuted;
+              setAudioMuted(nextMuted);
               const a = audioRef.current;
               if (!a) return;
-              a.muted = !a.muted;
-              setAudioMuted(a.muted);
+              a.muted = nextMuted;
               // Inside the click, so autoplay policy allows it.
-              if (!a.muted) void a.play().catch((err) => dlog("page", `audio play failed: ${String(err)}`));
+              if (!nextMuted) void a.play().catch((err) => dlog("page", `audio play failed: ${String(err)}`));
             }}
           >
             {audioMuted ? "🔇 開啟聲音" : "🔊 靜音"}
@@ -676,7 +686,10 @@ export function RoomPage() {
           <button
             className="btn-primary"
             style={{ position: "absolute", left: 12, bottom: 12, zIndex: 2 }}
-            onClick={() => void toggleFullscreen()}
+            onClick={(e) => {
+              e.currentTarget.blur();
+              void toggleFullscreen();
+            }}
           >
             {isFullscreen ? "⛶ 離開全螢幕" : "⛶ 全螢幕"}
           </button>

@@ -98,12 +98,17 @@ func EscapeFilterPath(p string) string {
 func BuildArgs(c Config, textFile string) []string {
 	size := fmt.Sprintf("%dx%d", c.Width, c.Height)
 	if c.DShowDevice != "" {
-		// Ask the device for NV12 directly so ffmpeg only copies frames; a
-		// small real-time buffer keeps a stalled reader from queueing seconds
-		// of old video.
+		// Ask the device for NV12 directly so ffmpeg only copies frames.
+		// Keep the real-time input buffer tight (~3 frames, min 4M) and
+		// disable demux/mux buffering so slight capture-clock drift (e.g.
+		// 59.94 vs 60 Hz) cannot accumulate >100 ms of queued video over time.
+		frameBytes := c.Width * c.Height * 3 / 2
+		rtbufMB := max(4, (frameBytes*3+1<<20-1)/(1<<20))
 		return []string{
 			"-hide_banner", "-nostdin", "-loglevel", "warning",
-			"-f", "dshow", "-rtbufsize", "16M",
+			"-fflags", "nobuffer", "-flags", "low_delay",
+			"-probesize", "32", "-analyzeduration", "0",
+			"-f", "dshow", "-rtbufsize", fmt.Sprintf("%dM", rtbufMB),
 			"-video_size", size, "-framerate", strconv.Itoa(c.FPS), "-pixel_format", "nv12",
 			"-i", "video=" + c.DShowDevice,
 			"-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1",

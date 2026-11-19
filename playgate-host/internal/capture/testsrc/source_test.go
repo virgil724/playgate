@@ -60,4 +60,17 @@ func TestBuildArgs(t *testing.T) {
 	if strings.Contains(strings.Join(BuildArgs(Config{Width: 64, Height: 64, FPS: 30}, "o.txt"), " "), "fontfile") {
 		t.Error("fontfile should be omitted when unset")
 	}
+
+	// DirectShow capture uses low-latency flags and a tight ~3-frame rtbufsize.
+	dshowArgs := strings.Join(BuildArgs(Config{Width: 1280, Height: 720, FPS: 60, DShowDevice: "Live Gamer Ultra-Video"}, ""), " ")
+	for _, want := range []string{
+		"-fflags nobuffer -flags low_delay",
+		"-probesize 32 -analyzeduration 0",
+		"-f dshow -rtbufsize 4M",
+		"-i video=Live Gamer Ultra-Video",
+	} {
+		if !strings.Contains(dshowArgs, want) {
+			t.Errorf("dshow args missing %q:\n%s", want, dshowArgs)
+		}
+	}
 }

@@ -258,4 +258,19 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 3. **手機 Wi-Fi 音訊 jitter buffer（NetEQ）遇抖動後拉高且回落慢**
    - Pixel fresh 實測中，聲音延遲從 263ms 階梯式升至 325ms → 355ms，而 WebCodecs 影像沒有 NetEQ 緩衝仍維持 ~200ms，導致手機端音畫不同步擴大至 +156ms（喇叭端約 +180ms）。
 
+#### 修正後 A/B 實測（2026-11-19 17:50，桌機 Chrome）
+
+修正內容：
+- 影像 `dshow`（`internal/capture/testsrc/source.go`）：加上 `-fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0`，`-rtbufsize` 依解析度縮為約 3 張（720p 為 `4M`）。
+- 音訊 `dshow`/Opus/Ogg（`internal/audio/opus/source.go`）：加上同樣的低延遲參數，並將 `audio_buffer_size`、`frame_duration`、`page_duration` 從 20ms 降至 **10ms**。
+
+| 項目（桌機 Chrome，剛重啟，n=30） | 修正前 | 修正後 | 改善 |
+|---|---|---|---|
+| 影像 p50（clean p50） | 156ms（157ms） | **126ms（133ms）** | **−24～30ms** |
+| 影像 p90 / max | 174 / 181ms | **137 / 148ms** | −37 / −33ms |
+| 聲音 p50（解碼端） | 250ms | **194ms** | **−56ms** |
+| 聲音 p90 / max | 263 / 274ms | **203 / 211ms** | −60 / −63ms |
+| 音畫差（音 − 影，clean p50） | +93ms | **+60ms** | **−33ms** |
+
+
 
