@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/playgate/playgate-host/internal/core"
@@ -209,14 +210,49 @@ func (s *Source) Start(_ context.Context) error {
 	return nil
 }
 
+const (
+	dshowStallTimeout   = 5 * time.Second
+	dshowRestartBackoff = 2 * time.Second
+)
+
 // Run implements core.Module: it runs ffmpeg and forwards frames until the
 // context is cancelled or ffmpeg exits, owning and closing both channels.
+// For DirectShow capture (DShowDevice != ""), Run supervises ffmpeg with a
+// stall watchdog so a wedged capture card or transient USB/HDMI hiccup is
+// logged and retried instead of silently hanging forever.
 func (s *Source) Run(ctx context.Context) error {
 	defer close(s.frames)
 	defer close(s.errs)
 	defer s.log.Info("capture stopped")
 
-	cmd := exec.CommandContext(ctx, s.cfg.FFmpegPath, BuildArgs(s.cfg, s.text)...)
+	if s.cfg.DShowDevice == "" {
+		return s.runOnce(ctx)
+	}
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := s.runOnce(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("dshow capture ended; will restart", "err", err)
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		t := time.NewTimer(dshowRestartBackoff)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Source) runOnce(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, s.cfg.FFmpegPath, BuildArgs(s.cfg, s.text)...)
 	var stderr tailBuffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -227,6 +263,30 @@ func (s *Source) Run(ctx context.Context) error {
 		return fmt.Errorf("%s capture: start ffmpeg: %w", s.cfg.kind(), err)
 	}
 
+	var lastFrameUnixNano atomic.Int64
+	lastFrameUnixNano.Store(time.Now().UnixNano())
+	var stalled atomic.Bool
+	if s.cfg.DShowDevice != "" {
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case now := <-ticker.C:
+					last := time.Unix(0, lastFrameUnixNano.Load())
+					if now.Sub(last) > dshowStallTimeout {
+						stalled.Store(true)
+						s.log.Warn("dshow capture stalled; restarting ffmpeg", "silent_for", now.Sub(last).Round(time.Millisecond))
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	frameSize := s.cfg.Width * s.cfg.Height * 3 / 2
 	var readErr error
 	for {
@@ -234,7 +294,8 @@ func (s *Source) Run(ctx context.Context) error {
 		if _, readErr = io.ReadFull(stdout, buf); readErr != nil {
 			break
 		}
-		s.forward(ctx, core.VideoFrame{
+		lastFrameUnixNano.Store(time.Now().UnixNano())
+		s.forward(runCtx, core.VideoFrame{
 			Data:        buf,
 			PixelFormat: core.PixelFormatNV12,
 			Width:       s.cfg.Width,
@@ -242,14 +303,20 @@ func (s *Source) Run(ctx context.Context) error {
 			Timestamp:   time.Now(),
 		})
 	}
+	cancel()
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return nil
 	}
+	if stalled.Load() {
+		return fmt.Errorf("dshow capture: stalled for >%s", dshowStallTimeout)
+	}
 	err = fmt.Errorf("%s capture: ffmpeg exited (read: %v, wait: %v): %s", s.cfg.kind(), readErr, waitErr, strings.TrimSpace(stderr.String()))
-	select {
-	case s.errs <- err:
-	default:
+	if s.cfg.DShowDevice == "" {
+		select {
+		case s.errs <- err:
+		default:
+		}
 	}
 	return err
 }
