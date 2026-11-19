@@ -3,6 +3,7 @@ package rtc
 import (
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -19,6 +20,13 @@ type StatsSample struct {
 	// Valid is false when no remote-inbound video stats were present yet (e.g.
 	// before the first RTCP receiver report arrives).
 	Valid bool
+	// Congested is a delay/queue congestion signal independent of loss: the
+	// path's RTT has grown well past its recent minimum, or the host's own send
+	// queue overflowed. Set only for the WebCodecs (DataChannel) path, where
+	// SCTP queues instead of dropping, so loss alone reacts far too late.
+	Congested bool
+	// Source names where the sample came from: "rtp" or "webcodecs".
+	Source string
 }
 
 // Stats queries the underlying PeerConnection and extracts an ABR StatsSample.
@@ -32,7 +40,150 @@ type StatsSample struct {
 // coarser granularity (we poll on a timer instead of reacting to each RR), which
 // is exactly what the ABR cooldown wants anyway.
 func (p *Peer) Stats() StatsSample {
-	return sampleFromReport(p.pc.GetStats())
+	report := p.pc.GetStats()
+	if p.vs != nil && p.vs.Active() == VideoTransportWebCodecs {
+		// No RTP flows on this path, so there are no receiver reports: use the
+		// viewer's FRAME_REPORTs, our send queue and the SCTP RTT instead.
+		return p.vs.linkStats(sctpSRTT(report))
+	}
+	out := sampleFromReport(report)
+	if !out.Valid {
+		out = p.rtpRRStats(report)
+	}
+	out.Source = "rtp"
+	return out
+}
+
+const rtpRRMaxAge = 10 * time.Second
+
+// recordReceiverReport stores the worst fraction-lost from an inbound video
+// RTCP ReceiverReport. Pion v4 does not populate RemoteInboundRTPStreamStats
+// in GetStats(), so RTP-mode ABR reads loss from here instead.
+func (p *Peer) recordReceiverReport(rr *rtcp.ReceiverReport) {
+	if rr == nil || len(rr.Reports) == 0 {
+		return
+	}
+	var worst float64
+	for _, rep := range rr.Reports {
+		loss := float64(rep.FractionLost) / 256.0
+		if loss > worst {
+			worst = loss
+		}
+	}
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	p.rtpMu.Lock()
+	p.rtpLoss = worst
+	p.rtpRRAt = now()
+	p.rtpMu.Unlock()
+}
+
+// rtpRRStats builds a StatsSample from the most recent RTCP ReceiverReport
+// (when fresh) plus the nominated ICE candidate pair's RTT.
+func (p *Peer) rtpRRStats(report webrtc.StatsReport) StatsSample {
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	p.rtpMu.Lock()
+	loss := p.rtpLoss
+	at := p.rtpRRAt
+	p.rtpMu.Unlock()
+	if at.IsZero() || now().Sub(at) > rtpRRMaxAge {
+		return StatsSample{}
+	}
+	return StatsSample{
+		LossFraction: loss,
+		RTT:          iceRTT(report),
+		Valid:        true,
+		Source:       "rtp",
+	}
+}
+
+// iceRTT extracts the nominated ICE candidate pair's current RTT from a stats
+// report, or 0 when unavailable.
+func iceRTT(report webrtc.StatsReport) time.Duration {
+	for _, s := range report {
+		if cp, ok := s.(webrtc.ICECandidatePairStats); ok && cp.Nominated && cp.CurrentRoundTripTime > 0 {
+			return time.Duration(cp.CurrentRoundTripTime * float64(time.Second))
+		}
+	}
+	return 0
+}
+
+// sctpSRTT returns the SCTP association's smoothed RTT from a stats report, or
+// 0 when unavailable.
+func sctpSRTT(report webrtc.StatsReport) time.Duration {
+	for _, s := range report {
+		if st, ok := s.(webrtc.SCTPTransportStats); ok && st.SmoothedRoundTripTime > 0 {
+			return time.Duration(st.SmoothedRoundTripTime * float64(time.Second))
+		}
+	}
+	return 0
+}
+
+// Congestion thresholds for the WebCodecs path.
+const (
+	// rttWindow is how many recent SRTT samples define the "uncongested" RTT
+	// baseline (at the ABR's 0.5-2s sampling, about 30-120s). A window rather
+	// than an all-time minimum lets the baseline follow a network change.
+	rttWindow = 60
+	// queueDelayMin is the RTT growth over the baseline treated as queueing;
+	// together with the 2x factor it ignores normal jitter on short paths.
+	queueDelayMin = 60 * time.Millisecond
+)
+
+// linkStats folds the viewer's reports since the previous call and the SCTP
+// RTT into an ABR sample for this viewer.
+func (s *videoSender) linkStats(srtt time.Duration) StatsSample {
+	ls := s.takeLinkSample()
+	s.mu.Lock()
+	base := s.recordRTT(srtt)
+	bufMax := s.cfg.BufferMax
+	s.mu.Unlock()
+	return webcodecsSample(ls, srtt, base, bufMax)
+}
+
+// recordRTT adds srtt to the window and returns the window minimum (0 if
+// none). Caller holds s.mu.
+func (s *videoSender) recordRTT(srtt time.Duration) time.Duration {
+	if srtt > 0 {
+		s.rttWin = append(s.rttWin, srtt)
+		if len(s.rttWin) > rttWindow {
+			s.rttWin = s.rttWin[len(s.rttWin)-rttWindow:]
+		}
+	}
+	var min time.Duration
+	for _, r := range s.rttWin {
+		if min == 0 || r < min {
+			min = r
+		}
+	}
+	return min
+}
+
+// webcodecsSample turns WebCodecs link counters into a StatsSample. Pure, for
+// testing. Loss is fragment loss only: what the network actually dropped
+// (before FEC). Frame loss is NOT a network signal: while the viewer waits for
+// a keyframe it discards every arriving delta and reports it lost, so frame
+// loss reads 100% on a perfectly clean link and would drive the bitrate to the
+// floor. Congestion is a sustained RTT rise over the baseline, a send queue
+// past half its limit, or any frame the host had to drop for a full queue.
+func webcodecsSample(ls videoLinkSample, srtt, baseRTT time.Duration, bufferMax uint64) StatsSample {
+	out := StatsSample{Source: "webcodecs", RTT: srtt}
+	out.Valid = ls.Reports > 0 || ls.SenderDropped > 0
+	if ls.FragsExpected > 0 && ls.FragsRecv < ls.FragsExpected {
+		out.LossFraction = 1 - float64(ls.FragsRecv)/float64(ls.FragsExpected)
+	}
+	queueing := baseRTT > 0 && srtt > 2*baseRTT && srtt-baseRTT > queueDelayMin
+	overfull := bufferMax > 0 && ls.Buffered > bufferMax/2
+	out.Congested = queueing || overfull || ls.SenderDropped > 0
+	if out.Congested {
+		out.Valid = true
+	}
+	return out
 }
 
 // sampleFromReport extracts the loss fraction and RTT from the remote-inbound

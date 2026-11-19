@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,5 +106,27 @@ func TestOpusPacketDuration(t *testing.T) {
 				t.Errorf("opusPacketDuration = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestArgsDShow(t *testing.T) {
+	s := New(nil, Config{Device: "HDMI (Live Gamer Ultra-Audio)", Format: FormatDShow})
+	got := strings.Join(s.args(), " ")
+	for _, want := range []string{
+		"-fflags nobuffer -flags low_delay",
+		"-probesize 32 -analyzeduration 0",
+		"-f dshow",
+		"-audio_buffer_size 10",
+		"-i audio=HDMI (Live Gamer Ultra-Audio)",
+		"-c:a libopus",
+		"-frame_duration 10",
+		"-page_duration 10000",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("args %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "alsa") {
+		t.Errorf("dshow args mention alsa: %q", got)
 	}
 }

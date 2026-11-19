@@ -35,7 +35,7 @@ func TestEndToEndLoopback(t *testing.T) {
 	connectErr := make(chan error, 1)
 
 	connect := func(ctx context.Context, router *VideoRouter, arouter *AudioRouter, sink InputSink) error {
-		peer, err := rtc.NewPeer(rtc.Config{ICEServers: nil, Logger: discardLogger()})
+		peer, err := rtc.NewPeer(rtc.Config{LoopbackOnly: true, ICEServers: nil, Logger: discardLogger()})
 		if err != nil {
 			connectErr <- err
 			return err
@@ -49,7 +49,7 @@ func TestEndToEndLoopback(t *testing.T) {
 		go sink.HandleCommands(ctx, peer.Commands(), func(b []byte) error { return peer.SendControl(b) })
 
 		// --- browser side ---
-		browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+		browser, err := rtc.NewLoopbackPeerConnection()
 		if err != nil {
 			connectErr <- err
 			return err

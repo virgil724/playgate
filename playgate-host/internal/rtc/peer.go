@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -43,6 +45,9 @@ const (
 	videoTrackID  = "video"
 	videoStreamID = "playgate"
 	audioTrackID  = "audio"
+	// Audio gets its own stream so the browser does not lip-sync the two tracks:
+	// that would hold video back to the audio path's (larger) playout delay.
+	audioStreamID = "playgate-audio"
 )
 
 // Config configures a Peer. The zero value is not valid; use DefaultConfig and
@@ -64,6 +69,10 @@ type Config struct {
 	// time.Now.
 	now func() time.Time
 
+	// LoopbackOnly restricts ICE gathering to loopback (udp4, no mDNS). Test-only:
+	// avoids Windows firewall prompts. Production leaves it false.
+	LoopbackOnly bool
+
 	// OnKeyframeRequest, if set, is invoked when the viewer's RTCP receiver asks
 	// for a keyframe (Picture Loss Indication / Full Intra Request). The host wires
 	// this to the encoder's ForceKeyframe so a decoder that lost an IDR recovers
@@ -75,6 +84,39 @@ type Config struct {
 	// (the SDP carries no audio m-line), preserving the prior behaviour for
 	// deployments that do not capture audio.
 	EnableAudio bool
+
+	// EnableGCC registers Pion's Google Congestion Control sender-side bandwidth
+	// estimator (TWCC feedback driven). When true, Peer.TargetBitrate reports the
+	// estimate. Off by default.
+	EnableGCC bool
+	// GCCInitialBitrate / GCCMinBitrate / GCCMaxBitrate bound the estimator in
+	// bits per second. Zero values fall back to 3 Mbps / 500 kbps / 12 Mbps.
+	GCCInitialBitrate int
+	GCCMinBitrate     int
+	GCCMaxBitrate     int
+
+	// VideoTransport selects the video transport: "track" (default, RTP only),
+	// "webcodecs" or "auto" (RTP track still negotiated, plus the "video" and
+	// "videofb" DataChannels; see docs/webcodecs-transport.md).
+	VideoTransport string
+	// VideoFragmentBytes is the total DataChannel message size (header +
+	// payload). 0 means DefaultVideoFragmentBytes; range 600-1400.
+	VideoFragmentBytes int
+	// VideoBufferMaxBytes drops a whole frame when the video channel's
+	// BufferedAmount exceeds it. 0 means DefaultVideoBufferMaxBytes.
+	VideoBufferMaxBytes int
+	// VideoIDRPaceMS spreads frames of more than 8 fragments over this many
+	// milliseconds. 0 means DefaultVideoIDRPaceMS; negative disables pacing.
+	VideoIDRPaceMS int
+	// VideoFEC is the parity scheme: "off" (default), "xor" or "rs". Parity is
+	// only sent to viewers whose HELLO advertises it.
+	VideoFEC string
+	// VideoFECRatio is parity fragments per data fragment (m = ceil(k*ratio)).
+	VideoFECRatio float64
+	// OnVideoKeyframeRequest is invoked when the WebCodecs sender needs an IDR
+	// (viewer KEYFRAME_REQUEST, HELLO, dropped frame, transport switch). The
+	// callee is responsible for rate limiting (the host coalesces to 250 ms).
+	OnVideoKeyframeRequest func()
 }
 
 // DefaultConfig returns a Config with a public Google STUN server and sensible
@@ -128,15 +170,57 @@ type Peer struct {
 	haveInputSeq bool
 
 	// keyframe gating: WriteSample drops packets until the first keyframe is seen
-	// so a freshly-attached decoder starts on an IDR.
+	// so a freshly-attached decoder starts on an IDR. Guarded by vmu.
+	vmu          sync.Mutex
 	seenKeyframe bool
+
+	// Latest RTCP ReceiverReport from the video sender (Pion v4 GetStats does
+	// not populate RemoteInboundRTPStreamStats, so RTP-mode ABR reads RR here).
+	rtpMu   sync.Mutex
+	rtpLoss float64
+	rtpRRAt time.Time
+	// mediaUp is true while the peer connection is connected. Before that (and
+	// after a disconnect) samples written to the track go nowhere, so they must
+	// not count as the viewer's first keyframe. Guarded by vmu.
+	mediaUp bool
+
+	// vs is the WebCodecs DataChannel sender; nil when VideoTransport is "track".
+	vs *videoSender
 
 	// onControl, if set, is invoked for inbound control-channel text frames that
 	// are not the built-in latency ping (e.g. a viewer auth/token message).
 	// Guarded by mu.
 	onControl func([]byte)
 
+	// onControlOpen, if set, runs once the control channel opens (or right away
+	// when it is already open). controlOpen records that it has. Guarded by mu.
+	onControlOpen func()
+	controlOpen   bool
+
+	// bwe is the GCC estimator captured from the cc interceptor; nil when GCC is
+	// disabled or the estimator has not been created yet. Guarded by bweMu.
+	bweMu sync.Mutex
+	bwe   cc.BandwidthEstimator
+
 	closeOnce sync.Once
+}
+
+// TargetBitrate returns the congestion controller's current target send bitrate
+// in bits per second. ok is false when GCC is disabled or the estimator is not
+// yet available. It is also false while the WebCodecs DataChannel transport is
+// the active video path: that video carries no RTP/TWCC, so the estimator has no
+// feedback and its value would be meaningless.
+func (p *Peer) TargetBitrate() (bps int, ok bool) {
+	if p.vs != nil && p.vs.isWebCodecs() {
+		return 0, false
+	}
+	p.bweMu.Lock()
+	e := p.bwe
+	p.bweMu.Unlock()
+	if e == nil {
+		return 0, false
+	}
+	return e.GetTargetBitrate(), true
 }
 
 // NewPeer creates a PeerConnection, registers the H.264 video track, and opens
@@ -221,8 +305,45 @@ func NewPeer(cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("rtc: register interceptors: %w", err)
 	}
 
+	p := &Peer{}
+	if cfg.EnableGCC {
+		initial, lo, hi := cfg.GCCInitialBitrate, cfg.GCCMinBitrate, cfg.GCCMaxBitrate
+		if initial <= 0 {
+			initial = 3_000_000
+		}
+		if lo <= 0 {
+			lo = 500_000
+		}
+		if hi <= 0 {
+			hi = 12_000_000
+		}
+		ccf, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			return gcc.NewSendSideBWE(
+				gcc.SendSideBWEInitialBitrate(initial),
+				gcc.SendSideBWEMinBitrate(lo),
+				gcc.SendSideBWEMaxBitrate(hi),
+				gcc.SendSideBWEPacer(gcc.NewNoOpPacer()),
+			)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("rtc: create gcc interceptor: %w", err)
+		}
+		ccf.OnNewPeerConnection(func(_ string, e cc.BandwidthEstimator) {
+			p.bweMu.Lock()
+			p.bwe = e
+			p.bweMu.Unlock()
+		})
+		ir.Add(ccf)
+		if err := webrtc.ConfigureTWCCHeaderExtensionSender(m, ir); err != nil {
+			return nil, fmt.Errorf("rtc: configure twcc header ext: %w", err)
+		}
+	}
+
 	s := webrtc.SettingEngine{}
 	s.SetIncludeLoopbackCandidate(true)
+	if cfg.LoopbackOnly {
+		applyLoopbackOnly(&s)
+	}
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(m),
 		webrtc.WithInterceptorRegistry(ir),
@@ -233,14 +354,12 @@ func NewPeer(cfg Config) (*Peer, error) {
 		return nil, fmt.Errorf("rtc: create peer connection: %w", err)
 	}
 
-	p := &Peer{
-		cfg:       cfg,
-		log:       log,
-		now:       now,
-		pc:        pc,
-		commands:  make(chan core.InputCommand, cfg.CommandBuffer),
-		connState: make(chan webrtc.PeerConnectionState, 8),
-	}
+	p.cfg = cfg
+	p.log = log
+	p.now = now
+	p.pc = pc
+	p.commands = make(chan core.InputCommand, cfg.CommandBuffer)
+	p.connState = make(chan webrtc.PeerConnectionState, 8)
 
 	if err := p.setupVideoTrack(); err != nil {
 		_ = pc.Close()
@@ -253,6 +372,10 @@ func NewPeer(cfg Config) (*Peer, error) {
 		}
 	}
 	if err := p.setupDataChannels(); err != nil {
+		_ = pc.Close()
+		return nil, err
+	}
+	if err := p.setupVideoChannels(); err != nil {
 		_ = pc.Close()
 		return nil, err
 	}
@@ -275,7 +398,7 @@ func (p *Peer) setupVideoTrack() error {
 		return fmt.Errorf("rtc: add video track: %w", err)
 	}
 	p.video = track
-	go p.readSenderRTCP(sender)
+	go p.readSenderRTCP(sender, true)
 	return nil
 }
 
@@ -285,7 +408,7 @@ func (p *Peer) setupVideoTrack() error {
 func (p *Peer) setupAudioTrack() error {
 	track, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
-		audioTrackID, videoStreamID,
+		audioTrackID, audioStreamID,
 	)
 	if err != nil {
 		return fmt.Errorf("rtc: create audio track: %w", err)
@@ -295,33 +418,37 @@ func (p *Peer) setupAudioTrack() error {
 		return fmt.Errorf("rtc: add audio track: %w", err)
 	}
 	p.audio = track
-	go p.readSenderRTCP(sender)
+	go p.readSenderRTCP(sender, false)
 	return nil
 }
 
-// readSenderRTCP drains the video sender's RTCP stream so Pion's interceptors run
-// (they consume inbound RTCP, e.g. NACK responder), and forwards viewer keyframe
-// requests to OnKeyframeRequest. A PLI (Picture Loss Indication) or FIR (Full
-// Intra Request) means the decoder lost an IDR and needs a fresh keyframe to
-// recover. The loop exits when the sender is closed (pc.Close), which makes Read
-// return an error.
-func (p *Peer) readSenderRTCP(sender *webrtc.RTPSender) {
+// readSenderRTCP drains a sender's RTCP stream so Pion's interceptors run
+// (they consume inbound RTCP, e.g. NACK responder). For the video sender it
+// also forwards PLI/FIR keyframe requests to OnKeyframeRequest and records
+// ReceiverReport loss for RTP-mode ABR. The loop exits when the sender is
+// closed (pc.Close), which makes Read return an error.
+func (p *Peer) readSenderRTCP(sender *webrtc.RTPSender, isVideo bool) {
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := sender.Read(buf)
 		if err != nil {
 			return // sender closed
 		}
+		if !isVideo {
+			continue
+		}
 		pkts, err := rtcp.Unmarshal(buf[:n])
 		if err != nil {
 			continue
 		}
 		for _, pkt := range pkts {
-			switch pkt.(type) {
+			switch v := pkt.(type) {
 			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
 				if p.cfg.OnKeyframeRequest != nil {
 					p.cfg.OnKeyframeRequest()
 				}
+			case *rtcp.ReceiverReport:
+				p.recordReceiverReport(v)
 			}
 		}
 	}
@@ -360,7 +487,16 @@ func (p *Peer) attachControlChannel(dc *webrtc.DataChannel) {
 	p.mu.Lock()
 	p.control = dc
 	p.mu.Unlock()
-	dc.OnOpen(func() { p.log.Info("control channel open") })
+	dc.OnOpen(func() {
+		p.log.Info("control channel open")
+		p.mu.Lock()
+		p.controlOpen = true
+		cb := p.onControlOpen
+		p.mu.Unlock()
+		if cb != nil {
+			cb()
+		}
+	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if !msg.IsString {
 			return
@@ -379,6 +515,10 @@ func (p *Peer) handleControlMessage(data []byte) {
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		p.log.Debug("ignoring non-JSON control message", "len", len(data))
+		return
+	}
+	if probe.Kind == "video_transport" {
+		p.handleVideoTransport(data)
 		return
 	}
 	if probe.Kind == "ping" {
@@ -413,6 +553,18 @@ func (p *Peer) OnControlMessage(cb func([]byte)) {
 	p.mu.Lock()
 	p.onControl = cb
 	p.mu.Unlock()
+}
+
+// OnControlOpen registers cb to run when the control channel opens. If it is
+// already open, cb runs immediately on a new goroutine.
+func (p *Peer) OnControlOpen(cb func()) {
+	p.mu.Lock()
+	p.onControlOpen = cb
+	open := p.controlOpen
+	p.mu.Unlock()
+	if open && cb != nil {
+		go cb()
+	}
 }
 
 // attachInputChannel registers the message handler that decodes controller frames.
@@ -466,6 +618,16 @@ func (p *Peer) attachInputChannel(dc *webrtc.DataChannel) {
 func (p *Peer) wireConnState() {
 	p.pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		p.log.Info("connection state", "state", s.String())
+		p.vmu.Lock()
+		p.mediaUp = s == webrtc.PeerConnectionStateConnected
+		if !p.mediaUp {
+			p.seenKeyframe = false // start again on an IDR after reconnecting
+		}
+		up := p.mediaUp
+		p.vmu.Unlock()
+		if p.vs != nil {
+			p.vs.setLinkUp(up)
+		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.closed {
@@ -542,12 +704,26 @@ func (p *Peer) SendControl(data []byte) error {
 // keyframe (Picture Loss Indication) we should reset seenKeyframe and ask the
 // encoder for an IDR. The encoder PLI hook lands with T3 integration.
 func (p *Peer) WriteSample(pkt core.EncodedPacket, duration time.Duration) error {
+	if p.vs != nil && p.vs.isWebCodecs() {
+		// WebCodecs viewers get each frame on exactly one sink; the RTP track
+		// stays negotiated but idle.
+		return p.vs.writeFrame(pkt)
+	}
+	p.vmu.Lock()
+	if !p.mediaUp {
+		// Not connected: the sample would be dropped by the transport, and an
+		// IDR lost here would leave the viewer waiting for the next one.
+		p.vmu.Unlock()
+		return nil
+	}
 	if !p.seenKeyframe {
 		if !pkt.IsKeyframe {
+			p.vmu.Unlock()
 			return nil // wait for the first IDR
 		}
 		p.seenKeyframe = true
 	}
+	p.vmu.Unlock()
 	return p.video.WriteSample(media.Sample{
 		Data:     pkt.Data,
 		Duration: duration,

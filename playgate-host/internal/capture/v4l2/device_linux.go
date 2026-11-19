@@ -138,10 +138,11 @@ func (d *device) setFormat(width, height, pixfmt uint32) (v4l2PixFormat, error) 
 }
 
 // setFrameRate best-effort sets the capture frame interval via VIDIOC_S_PARM.
-// Drivers that don't support it return an error we tolerate.
-func (d *device) setFrameRate(fps uint32) error {
+// Drivers that don't support it return an error we tolerate. On success it
+// returns the interval the driver actually applied, which may differ.
+func (d *device) setFrameRate(fps uint32) (actual v4l2Fract, err error) {
 	if fps == 0 {
-		return nil
+		return actual, nil
 	}
 	var p v4l2StreamParm
 	p.Type = v4l2BufTypeVideoCapture
@@ -149,9 +150,9 @@ func (d *device) setFrameRate(fps uint32) error {
 	cp.Capability = v4l2CapTimePerFrame
 	cp.TimePerFrame = v4l2Fract{Numerator: 1, Denominator: fps}
 	if err := ioctl(uintptr(d.fd), vidiocSParm, unsafe.Pointer(&p)); err != nil {
-		return fmtError("S_PARM", err)
+		return actual, fmtError("S_PARM", err)
 	}
-	return nil
+	return cp.TimePerFrame, nil
 }
 
 // initBuffers requests `count` mmap buffers, queries each, mmaps it, and queues

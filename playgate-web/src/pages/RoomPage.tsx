@@ -13,6 +13,12 @@ import {
   describeEvent,
 } from "../lib/control-events";
 import { VirtualGamepad } from "../components/VirtualGamepad";
+import {
+  VideoTransportController,
+  parseTransportOverride,
+  type TransportMode,
+} from "../lib/webcodecs/transport";
+import type { PipelineStats } from "../lib/webcodecs/pipeline";
 import { dlog, subscribeLog, logHistory, type LogEntry } from "../lib/log";
 
 const CONN_LABEL: Record<ConnectionState, string> = {
@@ -28,11 +34,22 @@ const CONN_LABEL: Record<ConnectionState, string> = {
 const INPUT_BACKPRESSURE_BYTES = 2048;
 const ACTIVE_INPUT_REFRESH_MS = 1000 / 30;
 const NEUTRAL_RESEND_COUNT = 4;
+const GAMEPAD_POLL_MS = 4;
 
 export function RoomPage() {
   const { roomId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Audio plays from its own element. The <video> is hidden in WebCodecs mode,
+  // and Chrome pauses a hidden muted video, which silenced the audio with it.
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // `?transport=track|webcodecs` testing override, read once (the code-redeem
+  // flow below clears the query string).
+  const transportOverrideRef = useRef(parseTransportOverride(searchParams.get("transport")));
+  const [transportMode, setTransportMode] = useState<TransportMode>("pending");
+  const transportModeRef = useRef<TransportMode>("pending");
+  const [wcStats, setWcStats] = useState<PipelineStats | null>(null);
   const connRef = useRef<ViewerConnection | null>(null);
   const gamepadRef = useRef(new GamepadState());
   const grantedRef = useRef(false);
@@ -40,12 +57,46 @@ export function RoomPage() {
   const [conn, setConn] = useState<ConnectionState>("idle");
   const [connDetail, setConnDetail] = useState("");
   const [granted, setGranted] = useState(false);
+  // The host does not gate input (session disabled): no token needed.
+  const [openRoom, setOpenRoom] = useState(false);
   const [remaining, setRemaining] = useState<number | null>(null);
   const [queuePos, setQueuePos] = useState<number | null>(null);
   const [statusMsg, setStatusMsg] = useState("");
-  // The <video> starts muted so the browser allows autoplay; the host now sends
+  // Fullscreen covers the whole room (video + virtual gamepad), not just the
+  // video, so the controls stay usable; on Android it also locks landscape.
+  const roomRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const fullscreenSupported = typeof document !== "undefined" && document.fullscreenEnabled === true;
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement != null);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+      await roomRef.current?.requestFullscreen({ navigationUI: "hide" });
+      // Only allowed while fullscreen, and only on some platforms (Android).
+      const orientation = screen.orientation as ScreenOrientation & {
+        lock?: (o: string) => Promise<void>;
+      };
+      await orientation.lock?.("landscape").catch(() => undefined);
+    } catch (err) {
+      dlog("page", `fullscreen failed: ${String(err)}`);
+    }
+  };
+  // The <audio> starts muted so the browser allows autoplay; the host sends
   // an Opus audio track, so expose a toggle to unmute after a user gesture.
   const [audioMuted, setAudioMuted] = useState(true);
+  const audioMutedRef = useRef(true);
+  audioMutedRef.current = audioMuted;
+  useEffect(() => {
+    const a = audioRef.current;
+    if (a) a.muted = audioMuted;
+  }, [audioMuted]);
   const [code, setCode] = useState("");
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState("");
@@ -156,6 +207,16 @@ export function RoomPage() {
   const onChange = useCallback(() => forceRender((n) => n + 1), []);
 
   const handleControlEvent = useCallback((ev: ControlEvent) => {
+    if (ev.kind === "open") {
+      // Ungated host: control without a token, for as long as we're connected.
+      setOpenRoom(true);
+      setStatusMsg(describeEvent(ev));
+      grantedRef.current = true;
+      setGranted(true);
+      setRemaining(null);
+      setQueuePos(null);
+      return;
+    }
     const viewerId = sessionRef.current?.viewerId ?? "";
     // Events are broadcast to every viewer on the control channel; only react to
     // the ones addressed to our own session. Without this, all clients would
@@ -184,7 +245,9 @@ export function RoomPage() {
       setQueuePos(null);
       // The session is over and the JWT is spent — drop it so the redeem
       // panel reappears and the viewer can enter a fresh code without
-      // reloading the page. The connection itself stays up (view-only).
+      // reloading the page. The connection itself stays up (view-only), and
+      // must not present the spent token again when it reconnects.
+      connRef.current?.clearAuth();
       setSession(null);
     }
   }, []);
@@ -195,6 +258,11 @@ export function RoomPage() {
   // the connection we just closed.
   useEffect(() => {
     if (!roomId) return;
+    // A new room starts with no control; the host re-sends "open" or
+    // "granted" if this one has it.
+    setOpenRoom(false);
+    grantedRef.current = false;
+    setGranted(false);
     const sess = sessionRef.current;
     dlog("page", `starting connection room=${roomId} ${sess ? "with session token" : "view-only (no token)"}`);
     const signaling = new SignalingClient({
@@ -203,7 +271,18 @@ export function RoomPage() {
       peer: "viewer",
       token: sess?.token,
     });
-    const connection = new ViewerConnection({
+    const transport = new VideoTransportController({
+      getCanvas: () => canvasRef.current,
+      sendControl: (m) => connection.sendControl(m),
+      getPeer: () => connection.peerConnection,
+      override: transportOverrideRef.current,
+      onMode: (m) => {
+        transportModeRef.current = m;
+        setTransportMode(m);
+        if (m !== "webcodecs") setWcStats(null);
+      },
+    });
+    const connection: ViewerConnection = new ViewerConnection({
       signaling,
       authPayload: sess ? { token: sess.token } : undefined,
       callbacks: {
@@ -214,13 +293,33 @@ export function RoomPage() {
             setRtt("-");
             setVideoStats("-");
             setAudioStats("-");
+            setWcStats(null);
           }
         },
+        onPeerCreated: () => transport.peerReset(),
+        onControlOpen: () => transport.onControlOpen(),
+        onVideoChannel: (ch) => transport.onVideoChannel(ch),
+        onVideoFbChannel: (ch) => transport.onVideoFbChannel(ch),
         onTrack: (stream) => {
           if (videoRef.current) videoRef.current.srcObject = stream;
+          const a = audioRef.current;
+          if (a) {
+            const tracks = stream.getAudioTracks();
+            const cur = a.srcObject instanceof MediaStream ? a.srcObject.getAudioTracks() : [];
+            const same =
+              cur.length === tracks.length && cur.every((t, i) => t.id === tracks[i].id);
+            if (!same) {
+              a.srcObject = tracks.length > 0 ? new MediaStream(tracks) : null;
+            }
+            a.muted = audioMutedRef.current;
+            // Once the viewer unmuted (a user gesture), a reconnect's new
+            // stream may start playing right away.
+            if (!audioMutedRef.current) void a.play().catch(() => {});
+          }
         },
         onControlEvent: handleControlEvent,
         onControlMessage: (data) => {
+          transport.onControlMessage(data);
           try {
             const m = JSON.parse(data);
             if (m.kind === "pong" && typeof m.ts === "number") {
@@ -250,6 +349,15 @@ export function RoomPage() {
       inputFramesSentRef.current = 0;
       inputFramesDroppedRef.current = 0;
 
+      const wc = transportModeRef.current === "webcodecs" ? transport.getStats() : null;
+      if (wc) {
+        setWcStats(wc);
+        setVideoStats(
+          `WebCodecs ${wc.codec} ${wc.mode}${wc.hardware ? " hw" : ""} | ${wc.fps.toFixed(0)} fps | ` +
+            `lost ${wc.framesLost} | decode ${wc.decodeMs.toFixed(1)}ms`,
+        );
+      }
+
       const conn = connRef.current;
       if (!conn) return;
       const pc = conn.peerConnection;
@@ -262,7 +370,7 @@ export function RoomPage() {
           if (s.type === "inbound-rtp" && s.kind === "audio") ainb = s;
         });
         if (inb && inb.codecId) codec = stats.get(inb.codecId);
-        if (inb) {
+        if (inb && !wc) {
           const fmt = codec?.sdpFmtpLine?.match(/profile-level-id=([0-9a-fA-F]{6})/)?.[1];
           // Browser-side latency: average jitter-buffer delay and decode time
           // (cumulative counters → per-frame average). These are the streaming-
@@ -304,8 +412,11 @@ export function RoomPage() {
     return () => {
       clearInterval(pingInterval);
       clearInterval(statsInterval);
+      transport.close();
       connection.close();
       connRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      if (audioRef.current) audioRef.current.srcObject = null;
     };
   }, [roomId, handleControlEvent]);
 
@@ -356,6 +467,19 @@ export function RoomPage() {
 
   // Physical gamepad connect/disconnect indicator.
   const [padName, setPadName] = useState<string | null>(null);
+
+  // A physical pad has no change event, and the RAF loop above only samples it
+  // once per display frame. While one is connected, sample it faster so a press
+  // is sent within a few ms instead of waiting for the next frame.
+  useEffect(() => {
+    if (!padName) return;
+    const id = setInterval(() => {
+      if (!grantedRef.current) return;
+      const lastSent = lastSentInputRef.current;
+      if (!lastSent || !sameInputState(lastSent, currentInputState())) sendNowRef.current();
+    }, GAMEPAD_POLL_MS);
+    return () => clearInterval(id);
+  }, [padName, currentInputState]);
   useEffect(() => {
     const refresh = () => {
       const pads = navigator.getGamepads?.() ?? [];
@@ -436,7 +560,7 @@ export function RoomPage() {
     conn === "connected" ? "ok" : conn === "failed" ? "bad" : "warn";
 
   return (
-    <div className="room">
+    <div className="room" ref={roomRef}>
       <div className="topbar">
         <span className={`dot ${connClass}`} />
         <span>{CONN_LABEL[conn]}</span>
@@ -492,7 +616,47 @@ export function RoomPage() {
       </div>
 
       <div className="video-wrap">
-        <video ref={videoRef} playsInline autoPlay muted />
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          muted
+          style={transportMode === "webcodecs" ? { display: "none" } : undefined}
+        />
+        <audio ref={audioRef} autoPlay muted />
+        <canvas ref={canvasRef} style={transportMode === "webcodecs" ? undefined : { display: "none" }} />
+        {showLogs && wcStats && (
+          <div
+            className="mono"
+            style={{
+              position: "absolute",
+              left: 8,
+              top: 8,
+              zIndex: 2,
+              padding: "4px 8px",
+              fontSize: 11,
+              lineHeight: 1.4,
+              background: "rgba(0,0,0,.55)",
+              borderRadius: 4,
+              pointerEvents: "none",
+            }}
+          >
+            <div>
+              {wcStats.fps.toFixed(0)} fps | {wcStats.codec} {wcStats.mode}
+              {wcStats.hardware ? " hw" : ""}
+            </div>
+            <div>
+              complete {wcStats.framesComplete} | lost {wcStats.framesLost} | dropped {wcStats.framesDropped}
+            </div>
+            <div>
+              decode {wcStats.decodeMs.toFixed(1)}ms | jitter {wcStats.jitterMs.toFixed(1)}ms | queue{" "}
+              {wcStats.queue} | inflight {wcStats.inflight}
+            </div>
+            <div>
+              key requests {wcStats.keyRequests} | decoder errors {wcStats.decoderErrors}
+            </div>
+          </div>
+        )}
         {conn !== "connected" && (
           <div className="overlay-status">
             <div className="status-pill">{CONN_LABEL[conn]}</div>
@@ -503,19 +667,36 @@ export function RoomPage() {
           <button
             className="btn-primary"
             style={{ position: "absolute", right: 12, bottom: 12, zIndex: 2 }}
-            onClick={() => {
-              const v = videoRef.current;
-              if (!v) return;
-              v.muted = !v.muted;
-              setAudioMuted(v.muted);
+            onClick={(e) => {
+              e.currentTarget.blur();
+              const nextMuted = !audioMuted;
+              audioMutedRef.current = nextMuted;
+              setAudioMuted(nextMuted);
+              const a = audioRef.current;
+              if (!a) return;
+              a.muted = nextMuted;
+              // Inside the click, so autoplay policy allows it.
+              if (!nextMuted) void a.play().catch((err) => dlog("page", `audio play failed: ${String(err)}`));
             }}
           >
             {audioMuted ? "🔇 開啟聲音" : "🔊 靜音"}
           </button>
         )}
+        {fullscreenSupported && (
+          <button
+            className="btn-primary"
+            style={{ position: "absolute", left: 12, bottom: 12, zIndex: 2 }}
+            onClick={(e) => {
+              e.currentTarget.blur();
+              void toggleFullscreen();
+            }}
+          >
+            {isFullscreen ? "⛶ 離開全螢幕" : "⛶ 全螢幕"}
+          </button>
+        )}
       </div>
 
-      {!session && (
+      {!session && !openRoom && (
         <div className="panel" style={{ margin: 12 }}>
           <strong>Have a token code?</strong>
           <div className="row" style={{ marginTop: 8 }}>

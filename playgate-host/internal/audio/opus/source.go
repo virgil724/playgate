@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/playgate/playgate-host/internal/core"
@@ -57,7 +58,21 @@ type Config struct {
 	Channels   int
 	// Bitrate is the target Opus bitrate in bits per second.
 	Bitrate int
+	// Format is the ffmpeg input: "alsa" (Linux) or "dshow" (Windows, where
+	// Device is a DirectShow audio device name such as
+	// "HDMI (Live Gamer Ultra-Audio)"). Empty picks by OS.
+	Format string
 }
+
+// Input formats.
+const (
+	FormatALSA  = "alsa"
+	FormatDShow = "dshow"
+)
+
+// dshowBufferMS replaces DirectShow's default 500 ms audio buffer, which would
+// put audio half a second behind the picture.
+const dshowBufferMS = 10
 
 // DefaultConfig returns a Config with sensible defaults for an HDMI capture
 // card's ALSA endpoint.
@@ -86,6 +101,12 @@ func (c Config) normalise() Config {
 	}
 	if c.Bitrate <= 0 {
 		c.Bitrate = 128000
+	}
+	if c.Format == "" {
+		c.Format = FormatALSA
+		if runtime.GOOS == "windows" {
+			c.Format = FormatDShow
+		}
 	}
 	return c
 }
@@ -130,26 +151,40 @@ func (s *Source) Packets() <-chan Packet { return s.packets }
 // an Ogg stream on stdout. -application lowdelay + a short frame_duration favour
 // latency over compression efficiency, which suits interactive game audio.
 func (s *Source) args() []string {
-	return []string{
-		"-hide_banner", "-nostats",
+	in := []string{
 		"-f", "alsa",
 		"-ac", itoa(s.opts.Channels),
 		"-ar", itoa(s.opts.SampleRate),
 		"-i", s.opts.Device,
+	}
+	if s.opts.Format == FormatDShow {
+		in = []string{
+			"-f", "dshow",
+			"-audio_buffer_size", itoa(dshowBufferMS),
+			"-sample_rate", itoa(s.opts.SampleRate),
+			"-channels", itoa(s.opts.Channels),
+			"-i", "audio=" + s.opts.Device,
+		}
+	}
+	return append(append([]string{
+		"-hide_banner", "-nostats",
+		"-fflags", "nobuffer", "-flags", "low_delay",
+		"-probesize", "32", "-analyzeduration", "0",
+	}, in...),
 		"-c:a", "libopus",
 		"-b:a", itoa(s.opts.Bitrate),
 		"-ar", itoa(opusClockRate),
 		"-ac", "2",
 		"-application", "lowdelay",
-		"-frame_duration", "20",
+		"-frame_duration", "10",
 		// Without this the Ogg muxer buffers ~1s of audio per page (default
 		// page_duration), adding ~1s of latency and bursting packets. Flush small
 		// pages and disable output buffering so packets stream out promptly.
-		"-page_duration", "20000",
+		"-page_duration", "10000",
 		"-flush_packets", "1",
 		"-f", "ogg",
 		"pipe:1",
-	}
+	)
 }
 
 // Run implements core.Module. It supervises the ffmpeg subprocess, relaunching it

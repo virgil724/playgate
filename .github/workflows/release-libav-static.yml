@@ -1,0 +1,119 @@
+# Manually triggered: build the fully static (musl, FFmpeg + x264 linked in)
+# `-tags libav` playgate-host and attach it to an EXISTING release tag.
+# Independent of ci.yml / release.yml (those are unaffected).
+#
+# Run: GitHub -> Actions -> release-libav-static -> Run workflow (tag = v0.1.0)
+#   or: gh workflow run release-libav-static.yml -f tag=v0.1.0
+#
+# Assets uploaded to the release (per arch):
+#   playgate-host-libav-static-linux-<arch>
+#   playgate-host-libav-static-linux-<arch>.sha256
+#   playgate-host-libav-static-linux-<arch>.BUILDINFO.txt   (versions + configure lines; GPL source offer)
+#
+# The binary is GPL (static x264 / --enable-gpl). See docs/deploy.md.
+
+name: release-libav-static
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the binaries to (e.g. v0.1.0)"
+        required: true
+        type: string
+      ffmpeg_version:
+        description: "FFmpeg release to build (must be 7.1.x to match go-astiav)"
+        required: false
+        default: "7.1.5"
+        type: string
+      ref:
+        description: "Git ref of playgate source to build (default: the ref this workflow runs on)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  ALPINE_IMAGE: alpine:3.20
+
+jobs:
+  static:
+    name: Static libav build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      PREFIX_DIR: ${{ github.workspace }}/.ffstatic
+      DIST_DIR: ${{ github.workspace }}/dist-static
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check release tag exists
+        run: gh release view "${{ inputs.tag }}" --repo "${{ github.repository }}" >/dev/null
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Key covers: FFmpeg version, arch, and the script that holds the x264
+      # ref + all configure flags (hashFiles).
+      - name: Cache FFmpeg + x264 static prefix
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PREFIX_DIR }}
+          key: ffstatic-${{ matrix.arch }}-ff${{ inputs.ffmpeg_version }}-${{ hashFiles('scripts/build-ffmpeg-static.sh') }}
+
+      # Build inside Alpine via `docker run` (not `container:`) because the
+      # Actions node runtime is glibc and does not run in musl containers.
+      - name: Build FFmpeg + x264 (static, musl)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$PREFIX_DIR"
+          docker run --rm \
+            -e FFMPEG_VERSION="${{ inputs.ffmpeg_version }}" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/src" -v "$PREFIX_DIR:/opt/ffstatic" -w /src \
+            "$ALPINE_IMAGE" sh -ec '
+              apk add --no-cache bash >/dev/null
+              scripts/build-ffmpeg-static.sh deps
+              scripts/build-ffmpeg-static.sh build /opt/ffstatic'
+
+      - name: Build playgate-host (static, -tags libav) + test + verify
+        run: |
+          mkdir -p "$DIST_DIR"
+          docker run --rm \
+            -e GITHUB_SHA="${{ github.sha }}" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/src" -v "$PREFIX_DIR:/opt/ffstatic" \
+            -v "$DIST_DIR:/out" -w /src \
+            "$ALPINE_IMAGE" sh -ec '
+              apk add --no-cache bash >/dev/null
+              scripts/build-ffmpeg-static.sh deps
+              scripts/build-host-libav-static.sh /opt/ffstatic /out "${{ inputs.tag }}"'
+          ls -l "$DIST_DIR"
+
+      # Portability check on a glibc distro that ships FFmpeg 5.1 (Raspberry Pi
+      # OS / Debian bookworm base): the binary must run with no FFmpeg installed.
+      - name: Smoke test on Debian bookworm (glibc, no FFmpeg)
+        run: |
+          docker run --rm -v "$DIST_DIR:/out:ro" debian:bookworm-slim sh -c \
+            '/out/playgate-host-libav-static-linux-${{ matrix.arch }} -h 2>&1 | head -n 5; test -x /out/playgate-host-libav-static-linux-${{ matrix.arch }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playgate-host-libav-static-linux-${{ matrix.arch }}
+          path: ${{ env.DIST_DIR }}
+          if-no-files-found: error
+
+      - name: Upload to release
+        run: |
+          gh release upload "${{ inputs.tag }}" --repo "${{ github.repository }}" --clobber \
+            "$DIST_DIR/playgate-host-libav-static-linux-${{ matrix.arch }}" \
+            "$DIST_DIR/playgate-host-libav-static-linux-${{ matrix.arch }}.sha256" \
+            "$DIST_DIR/playgate-host-libav-static-linux-${{ matrix.arch }}.BUILDINFO.txt"

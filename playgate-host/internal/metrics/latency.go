@@ -11,8 +11,9 @@
 //	rtc      — wall time from a packet leaving the encoder to being written to
 //	           the WebRTC track
 //	input    — wall time from the host decoding an InputCommand off the WebRTC
-//	           DataChannel to it being written to the nxbt daemon socket (covers
-//	           the coalescer/rate-limit delay)
+//	           DataChannel to it being written to the input target (nxbt
+//	           daemon socket or gateway serial port; covers the coalescer /
+//	           rate-limit delay)
 //	e2e_rtt  — application-level round trip measured by the control-channel ping
 //	           (see internal/rtc control ping handling)
 //

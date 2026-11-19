@@ -19,6 +19,7 @@
 import { SignalingClient, classifySignal, type SignalingMessage } from "./signaling";
 import { type ControlEvent, parseControlEvent } from "./control-events";
 import { dlog } from "./log";
+import { VIDEO_CHANNEL_LABEL, VIDEOFB_CHANNEL_LABEL } from "./webcodecs/protocol";
 
 export type ConnectionState =
   | "idle"
@@ -36,6 +37,11 @@ export interface WebRTCCallbacks {
   onControlOpen?: () => void;
   onInputOpen?: () => void;
   onControlMessage?: (data: string) => void;
+  /** Host-created WebCodecs video transport channels (see webcodecs/transport.ts). */
+  onVideoChannel?: (ch: RTCDataChannel) => void;
+  onVideoFbChannel?: (ch: RTCDataChannel) => void;
+  /** A fresh RTCPeerConnection was built (initial start or host recycle). */
+  onPeerCreated?: () => void;
 }
 
 export interface ViewerConnectionOptions {
@@ -63,6 +69,18 @@ function waitForGathering(pc: RTCPeerConnection, timeoutMs = 3000): Promise<void
   });
 }
 
+/** How long a "disconnected" peer may take to recover before the viewer
+ * rebuilds it. Slightly above the host's 5s grace so the host has already
+ * dropped the old session by the time the new hello arrives. */
+export const DISCONNECT_RESTART_MS = 6000;
+
+/** A random per-attempt session id for hello (see SignalingClient.hello). */
+export function newSessionNonce(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export class ViewerConnection {
   private signaling: SignalingClient;
   private cb: WebRTCCallbacks;
@@ -81,6 +99,17 @@ export class ViewerConnection {
    * start() is still awaiting (React StrictMode double-mount) cannot
    * resurrect itself and keep polling/answering as a zombie. */
   private closed = false;
+  /** Signals are handled one at a time: handleOffer spans several awaits,
+   * and a second offer (or a candidate) must not interleave with it. */
+  private signalChain: Promise<void> = Promise.resolve();
+  /** Pending automatic restart after a failed/lost connection. */
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Fires if a "disconnected" peer does not recover in time. */
+  private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Consecutive restarts without reaching "connected" (drives backoff). */
+  private restartAttempts = 0;
+  private onVisibility = (): void => this.handleVisibility();
+  private onOnline = (): void => this.reconnectIfDead("network back online");
 
   constructor(opts: ViewerConnectionOptions) {
     this.signaling = opts.signaling;
@@ -136,6 +165,15 @@ export class ViewerConnection {
     }
   }
 
+  /** Forgets the session token (control revoked: the JWT is spent), so a
+   * later reconnect does not present it again. */
+  clearAuth(): void {
+    if (!this.authPayload) return;
+    const rest = { ...this.authPayload };
+    delete rest.token;
+    this.authPayload = Object.keys(rest).length > 0 ? rest : undefined;
+  }
+
   async start(): Promise<void> {
     this.setState("fetching-ice");
     const iceServers = await this.signaling.fetchIceServers();
@@ -153,13 +191,99 @@ export class ViewerConnection {
     // Begin polling for the host's offer + ICE.
     this.setState("waiting-offer");
     this.signaling.startPolling(
-      (msg) => void this.handleSignal(msg),
-      (err) => this.setState("connecting", `signaling: ${String(err)}`),
+      (msg) => {
+        this.signalChain = this.signalChain.then(() => this.handleSignal(msg));
+      },
+      (err) => this.onSignalingError(err),
     );
 
     // Announce ourselves so the host sends us a (per-viewer) offer. The host no
     // longer broadcasts a single offer to the room; it offers per viewerId.
-    void this.signaling.hello().catch((err) => dlog("webrtc", "hello failed:", err));
+    this.sayHello();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", this.onVisibility);
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.onOnline);
+    }
+  }
+
+  /** A signaling (WS/poll) error. Signaling is only needed to set up the peer
+   * connection; once media flows over WebRTC a signaling outage (network blip,
+   * backgrounded tab) does not affect it, so a connected viewer keeps its
+   * "connected" state instead of being covered by a "connecting" overlay that
+   * nothing would ever clear. */
+  private onSignalingError(err: unknown): void {
+    if (ViewerConnection.signalingErrorChangesState(this.pc?.connectionState)) {
+      this.setState("connecting", `signaling: ${String(err)}`);
+    } else {
+      dlog("webrtc", `signaling error while connected (media unaffected): ${String(err)}`);
+    }
+  }
+
+  /** Whether a signaling error should change the viewer's connection state. */
+  static signalingErrorChangesState(pcState: RTCPeerConnectionState | undefined): boolean {
+    return pcState !== "connected";
+  }
+
+  /** Sends a hello with a fresh session nonce, so the host (re)offers us. */
+  private sayHello(): void {
+    void this.signaling.hello(newSessionNonce()).catch((err) => dlog("webrtc", "hello failed:", err));
+  }
+
+  /** Delay before the next automatic restart: 1s, 2s, 4s, ... capped at 10s. */
+  static restartDelayMs(attempt: number): number {
+    return Math.min(1000 * 2 ** attempt, 10_000);
+  }
+
+  private clearTimer(name: "restartTimer" | "disconnectTimer"): void {
+    const t = this[name];
+    if (t) clearTimeout(t);
+    this[name] = null;
+  }
+
+  private scheduleRestart(reason: string): void {
+    if (this.closed || this.restartTimer) return;
+    const delay = ViewerConnection.restartDelayMs(this.restartAttempts);
+    dlog("webrtc", `restart in ${delay}ms (${reason})`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      this.restartPeer(reason);
+    }, delay);
+  }
+
+  /** Throws away the current peer connection and asks the host for a new one.
+   * Used when the connection failed (e.g. the tab was backgrounded long enough
+   * for ICE to time out); without it the viewer would wait forever. */
+  private restartPeer(reason: string): void {
+    if (this.closed) return;
+    this.clearTimer("restartTimer");
+    this.clearTimer("disconnectTimer");
+    this.restartAttempts++;
+    dlog("webrtc", `restarting peer connection: ${reason}`);
+    this.pc?.close();
+    this.createPeer();
+    this.setState("waiting-offer", `reconnecting: ${reason}`);
+    this.sayHello();
+  }
+
+  /** Coming back to the tab: if the connection died meanwhile, reconnect now
+   * instead of waiting out the backoff. */
+  private handleVisibility(): void {
+    if (document.visibilityState !== "visible") return;
+    this.reconnectIfDead("tab visible");
+  }
+
+  /** Tab visible again or network back (e.g. Wi-Fi ↔ mobile switch): a dead
+   * connection is rebuilt right away instead of waiting for ICE to time out
+   * and the backoff to elapse. A healthy one is left alone. */
+  private reconnectIfDead(why: string): void {
+    if (this.closed) return;
+    const st = this.pc?.connectionState;
+    if (st === "failed" || st === "disconnected" || st === "closed") {
+      this.restartAttempts = 0;
+      this.restartPeer(`${why}, connection ${st}`);
+    }
   }
 
   /** (Re)build the RTCPeerConnection. Called once from start() and again when
@@ -172,6 +296,10 @@ export class ViewerConnection {
     this.inputChannel = null;
     this.controlChannel = null;
     this.pendingCandidates = [];
+    this.cb.onPeerCreated?.();
+    // Audio and video arrive in separate streams (so the browser does not
+    // lip-sync them); gather them into one for a single media element.
+    const remoteStream = new MediaStream();
 
     pc.ontrack = (ev) => {
       dlog("webrtc", `ontrack kind=${ev.track.kind} streams=${ev.streams.length}`);
@@ -188,7 +316,8 @@ export class ViewerConnection {
       } catch {
         /* unsupported: ignore */
       }
-      if (ev.streams[0]) this.cb.onTrack?.(ev.streams[0]);
+      remoteStream.addTrack(ev.track);
+      this.cb.onTrack?.(remoteStream);
     };
 
     pc.ondatachannel = (ev) => {
@@ -196,6 +325,8 @@ export class ViewerConnection {
       dlog("webrtc", `ondatachannel label=${ch.label}`);
       if (ch.label === "control") this.attachControlChannel(ch);
       else if (ch.label === "input") this.attachInputChannel(ch);
+      else if (ch.label === VIDEO_CHANNEL_LABEL) this.cb.onVideoChannel?.(ch);
+      else if (ch.label === VIDEOFB_CHANNEL_LABEL) this.cb.onVideoFbChannel?.(ch);
     };
 
     pc.oniceconnectionstatechange = () => {
@@ -216,15 +347,29 @@ export class ViewerConnection {
 
     pc.onconnectionstatechange = () => {
       dlog("webrtc", `connectionState → ${pc.connectionState}`);
+      if (pc !== this.pc) return; // a replaced connection winding down
       switch (pc.connectionState) {
         case "connected":
+          this.restartAttempts = 0;
+          this.clearTimer("disconnectTimer");
           this.setState("connected");
           break;
         case "failed":
           this.setState("failed", "peer connection failed");
+          this.scheduleRestart("peer connection failed");
           break;
         case "disconnected":
           this.setState("connecting", "disconnected, retrying");
+          // "disconnected" often heals by itself; give it a few seconds (the
+          // host waits 5s too) before rebuilding.
+          if (!this.disconnectTimer) {
+            this.disconnectTimer = setTimeout(() => {
+              this.disconnectTimer = null;
+              if (this.pc === pc && pc.connectionState !== "connected") {
+                this.restartPeer("still disconnected");
+              }
+            }, DISCONNECT_RESTART_MS);
+          }
           break;
         case "closed":
           this.setState("closed");
@@ -267,12 +412,20 @@ export class ViewerConnection {
       // answers are ours; ignore.
     } catch (err) {
       dlog("webrtc", `handling ${kind} failed:`, err);
+      if (this.closed) return; // torn down mid-handshake: not a failure
       this.setState("failed", `handling ${kind}: ${String(err)}`);
+      this.scheduleRestart(`handling ${kind} failed`);
     }
   }
 
   private async handleOffer(offer: RTCSessionDescriptionInit, ts?: string): Promise<void> {
     if (!this.pc) return;
+    if (!this.remoteSet && ts && this.appliedOfferTs && ts <= this.appliedOfferTs) {
+      // After restartPeer: an offer no newer than the one the dead connection
+      // used belongs to the old host session; wait for the fresh one.
+      dlog("webrtc", `stale offer ignored after restart (ts=${ts} applied=${this.appliedOfferTs})`);
+      return;
+    }
     if (this.remoteSet) {
       // Both timestamps come from the Worker's clock, so a lexicographic
       // ISO-8601 comparison is safe (same trick as the host's stale-answer
@@ -287,30 +440,42 @@ export class ViewerConnection {
       this.pc.close();
       this.createPeer();
     }
+    // Pin the connection this offer applies to. close() or restartPeer() can
+    // replace this.pc during any await below; the rest of the handshake then
+    // belongs to a dead connection and is abandoned.
+    const pc = this.pc;
+    if (!pc) return;
+    const gone = () => this.closed || this.pc !== pc;
     this.setState("connecting");
-    await this.pc.setRemoteDescription(offer);
+    await pc.setRemoteDescription(offer);
+    if (gone()) return;
     this.remoteSet = true;
     this.appliedOfferTs = ts ?? null;
     dlog("webrtc", "remote offer applied");
 
     // Flush any candidates that arrived before the remote description.
-    for (const c of this.pendingCandidates) {
+    const pending = this.pendingCandidates;
+    this.pendingCandidates = [];
+    for (const c of pending) {
       try {
-        await this.pc.addIceCandidate(c);
+        await pc.addIceCandidate(c);
       } catch {
         /* ignore */
       }
+      if (gone()) return;
     }
-    this.pendingCandidates = [];
 
-    const answer = await this.pc.createAnswer();
-    await this.pc.setLocalDescription(answer);
+    const answer = await pc.createAnswer();
+    if (gone()) return;
+    await pc.setLocalDescription(answer);
+    if (gone()) return;
     // The host stops polling once it has applied our answer (non-trickle), so
     // wait for ICE gathering to finish and send the complete SDP.
     const t0 = performance.now();
-    await waitForGathering(this.pc);
-    dlog("webrtc", `ice gathering: ${this.pc.iceGatheringState} after ${Math.round(performance.now() - t0)}ms`);
-    const local = this.pc.localDescription ?? answer;
+    await waitForGathering(pc);
+    if (gone()) return;
+    dlog("webrtc", `ice gathering: ${pc.iceGatheringState} after ${Math.round(performance.now() - t0)}ms`);
+    const local = pc.localDescription ?? answer;
     await this.pushWithAuth({ type: local.type, sdp: local.sdp });
     dlog("webrtc", `answer pushed (${local.sdp?.length ?? 0} bytes)`);
   }
@@ -330,7 +495,7 @@ export class ViewerConnection {
 
   private attachControlChannel(ch: RTCDataChannel): void {
     this.controlChannel = ch;
-    ch.onopen = () => {
+    const onOpen = () => {
       dlog("webrtc", "control channel open");
       // The host's session gate authorizes viewers via a control-channel auth
       // message ({"kind":"auth","token":...}), not via signaling payloads.
@@ -346,6 +511,9 @@ export class ViewerConnection {
       }
       this.cb.onControlOpen?.();
     };
+    // A channel can already be open by the time ondatachannel hands it over.
+    if (ch.readyState === "open") onOpen();
+    else ch.onopen = onOpen;
     ch.onmessage = (ev) => {
       const dataStr = String(ev.data);
       dlog("control", dataStr);
@@ -358,15 +526,25 @@ export class ViewerConnection {
   private attachInputChannel(ch: RTCDataChannel): void {
     this.inputChannel = ch;
     ch.binaryType = "arraybuffer";
-    ch.onopen = () => {
+    const onOpen = () => {
       dlog("webrtc", "input channel open");
       this.cb.onInputOpen?.();
     };
+    if (ch.readyState === "open") onOpen();
+    else ch.onopen = onOpen;
   }
 
   close(): void {
     dlog("webrtc", "close()");
     this.closed = true;
+    this.clearTimer("restartTimer");
+    this.clearTimer("disconnectTimer");
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.onVisibility);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.onOnline);
+    }
     this.signaling.stop();
     this.inputChannel?.close();
     this.controlChannel?.close();

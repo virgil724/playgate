@@ -154,8 +154,8 @@ framed by scanning for `\n`.
 #### `input` — controller state snapshot
 
 Sent by Go to forward the current controller state. Sent at up to 120 Hz
-(configurable via `WithRateHz`); the coalescer drops intermediate frames when
-the daemon cannot keep up.
+(configurable via `WithRateHz`); above that rate the coalescer drops
+intermediate stick positions but still delivers every button change, in order.
 
 ```json
 {"type":"input","buttons":1,"lx":0.5,"ly":-0.5,"rx":0.0,"ry":0.0}
@@ -252,6 +252,12 @@ Each event is a UTF-8 JSON object sent as a text message.
 | `idle_kicked` | Viewer removed for inactivity                             | `0`                 | `0`              |
 | `queued`      | Viewer accepted but must wait for current session to end  | `0`                 | ≥ 1              |
 | `tick`        | Periodic countdown (every `TickInterval`, default 1 s)   | Counting down       | `0`              |
+| `open`        | Once per connection when the host has `session.enabled: false` (no input gating) | absent | absent |
+
+`open` is sent as just `{"kind":"open"}` as soon as the control channel opens.
+It is addressed to whoever receives it: the viewer may send controller input
+without redeeming a token for the life of that connection. No other session
+events follow on an ungated host.
 
 ### Frontend recommended behaviour
 
@@ -260,6 +266,7 @@ Each event is a UTF-8 JSON object sent as a text message.
 - On `tick`: update the countdown display.
 - On `expired` / `idle_kicked`: disable controller input; show a message.
 - On `queued`: show "You are #N in queue" using `queue_position`.
+- On `open`: activate controller input and hide the token prompt.
 
 **Important:** the T6 module SHOULD send each event only to the viewer
 identified by `viewer_id`. Events for other viewers may be safely forwarded
@@ -347,3 +354,16 @@ function decodeSDP(b64) {
   return new RTCSessionDescription(JSON.parse(atob(b64.trim())));
 }
 ```
+
+---
+
+## 7. WebCodecs video transport (optional)
+
+Source: `internal/rtc/videofrag.go`, `videofb.go`, `videosend.go`, `videochan.go`
+
+When `webrtc.video_transport` is `webcodecs` or `auto`, the host also opens an
+unreliable `"video"` DataChannel (28-byte-header Annex-B fragments) and a reliable
+`"videofb"` channel (viewer feedback), and the viewer selects the sink with
+`{"kind":"video_transport","use":"webcodecs|track"}` on the `control` channel.
+The full wire format, feedback messages and fallback rules are specified in
+[`webcodecs-transport.md`](webcodecs-transport.md).

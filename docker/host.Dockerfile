@@ -64,6 +64,109 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # Copy nxbt-daemon Python source
 COPY playgate-host/nxbt-daemon/ /out/nxbt-daemon/
 
+# ── Stage 1b: builder-libav (cgo + FFmpeg dev libs, NATIVE per platform) ─────
+# Used only by `--target host-libav`; BuildKit skips it for the default target.
+# No --platform=$BUILDPLATFORM here: cgo links the target arch's FFmpeg libs, so
+# each platform is built natively (QEMU for the foreign arch under buildx).
+#
+# FFmpeg version pinning: base is debian:trixie (FFmpeg 7.1: libavcodec61,
+# libavformat61, libavutil59, libswscale8, libswresample5, libavfilter10,
+# libavdevice61) so this image matches the CI libav jobs, which run in a
+# debian:trixie container. go-astiav must be a release for FFmpeg 7.x (see
+# go.mod). Debian bookworm ships FFmpeg 5.1 and is not used for libav.
+FROM debian:trixie AS builder-libav
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      git \
+      gcc \
+      libc6-dev \
+      pkg-config \
+      libavcodec-dev \
+      libavformat-dev \
+      libavutil-dev \
+      libswscale-dev \
+      libavfilter-dev \
+      libavdevice-dev \
+      libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go toolchain from the official image (multi-arch; resolves to the native arch)
+COPY --from=golang:1.25-trixie /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
+
+WORKDIR /src
+COPY playgate-host/go.mod playgate-host/go.sum ./playgate-host/
+RUN go -C playgate-host mod download
+COPY playgate-host/ ./playgate-host/
+
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go -C playgate-host build \
+      -tags libav \
+      -trimpath \
+      -ldflags "-s -w \
+        -X main.Version=${VERSION} \
+        -X main.Commit=${COMMIT} \
+        -X main.BuildDate=${BUILD_DATE}" \
+      -o /out/playgate-host \
+      ./cmd/host
+
+COPY playgate-host/nxbt-daemon/ /out/nxbt-daemon/
+
+# ── Stage 1c: host-libav runtime (target: host-libav) ────────────────────────
+# Build: docker buildx build --platform linux/amd64,linux/arm64 \
+#          --target host-libav -f docker/host.Dockerfile -t ...:libav --push .
+# Same contents as `runtime` plus the FFmpeg 7.1 shared libs the libav binary
+# links against (the ffmpeg CLI is kept for encoder.backend: cli).
+FROM debian:trixie AS host-libav
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      ffmpeg \
+      libavcodec61 \
+      libavformat61 \
+      libavutil59 \
+      libswscale8 \
+      libavfilter10 \
+      libavdevice61 \
+      libswresample5 \
+      bluez \
+      bluetooth \
+      git \
+      python3 \
+      python3-pip \
+      python3-dbus \
+      python3-gi \
+      dbus \
+      v4l-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --break-system-packages --no-deps \
+      "git+https://github.com/hannahbee91/nuxbt.git@v3.3.6"
+
+COPY --from=builder-libav /out/playgate-host /usr/local/bin/playgate-host
+COPY --from=builder-libav /out/nxbt-daemon   /opt/playgate/nxbt-daemon
+
+RUN mkdir -p /run/nxbt /etc/playgate
+COPY playgate-host/config.example.yaml /etc/playgate/config.example.yaml
+COPY docker/host-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# NOTE: `runtime` below stays the LAST stage so a plain `docker build` (no
+# --target) keeps producing the default pure-Go image.
+
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
 # debian:bookworm-slim gives a known-good base with apt.
 # We install:

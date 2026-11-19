@@ -93,7 +93,7 @@ func TestLibX264Args(t *testing.T) {
 	if !hasPair(args, "-preset", "ultrafast") || !hasPair(args, "-tune", "zerolatency") {
 		t.Error("libx264 should keep x264 preset/tune")
 	}
-	if !hasPair(args, "-b:v", "5000000") || !hasPair(args, "-maxrate", "5000000") || !hasPair(args, "-bufsize", "2500000") {
+	if !hasPair(args, "-b:v", "5000000") || !hasPair(args, "-maxrate", "5000000") || !hasPair(args, "-bufsize", "333332") {
 		t.Errorf("rate control not applied; args: %s", strings.Join(args, " "))
 	}
 	if !hasPair(args, "-g", "30") || !hasPair(args, "-keyint_min", "30") || !hasPair(args, "-bf", "0") {
@@ -120,6 +120,9 @@ func TestV4L2M2MArgs(t *testing.T) {
 	}
 	if !hasPair(args, "-g", "30") || !hasPair(args, "-bf", "0") {
 		t.Error("GOP/no-B-frame flags missing")
+	}
+	if !hasPair(args, "-profile:v", "578") {
+		t.Error("v4l2m2m should request Constrained Baseline (578)")
 	}
 }
 
@@ -156,6 +159,9 @@ func TestVAAPIArgs(t *testing.T) {
 	if hasFlag(args, "-tune") {
 		t.Error("vaapi must not emit x264 -tune")
 	}
+	if !hasPair(args, "-profile:v", "constrained_baseline") {
+		t.Error("vaapi should request Constrained Baseline")
+	}
 }
 
 // TestNVENCArgs is the NVIDIA snapshot: nvenc-specific preset/tune (p1/ll), CBR,
@@ -171,6 +177,9 @@ func TestNVENCArgs(t *testing.T) {
 	}
 	if hasPair(args, "-tune", "zerolatency") || hasPair(args, "-preset", "ultrafast") {
 		t.Error("nvenc must NOT use x264 preset/tune values")
+	}
+	if !hasPair(args, "-profile:v", "baseline") {
+		t.Error("nvenc should request baseline")
 	}
 	if !hasPair(args, "-rc", "cbr") || !hasPair(args, "-zerolatency", "1") {
 		t.Error("nvenc low-latency rate control missing")

@@ -12,11 +12,36 @@ capture:
                         # NV12 is half the bandwidth, so many USB cards offer 60fps in NV12)
   format: YUYV          # YUYV | NV12 | MJPEG — must be a format the card lists at this resolution
 
+# Diagnostics: ffmpeg test picture (frame counter + live controller input).
+# To try it, set capture.source: testsrc and input.target: overlay:
+#   capture:
+#     source: testsrc          # needs ffmpeg (encoder.ffmpeg_path); emits NV12
+#     width: 1280
+#     height: 720
+#     fps: 30
+#     testsrc:
+#       font_file: C:/Windows/Fonts/consola.ttf   # optional; Windows usually needs it
+#   input:
+#     target: overlay          # writes pressed buttons/sticks/seq to overlay.text_file
+#   overlay:
+#     text_file: playgate-overlay.txt   # shared by testsrc (reads) and overlay target (writes)
+
 # H.264 encoder (T3: ffmpeg subprocess; T13: hardware codec selection).
 encoder:
   bitrate: 6000000      # bits per second (ABR start bitrate when abr.enabled)
   preset: ultrafast     # x264 preset (libx264 only; favour latency over size)
-  keyframe_interval: 60 # GOP size in frames
+  # gop_seconds: keyframe interval in seconds; GOP frames = round(capture.fps * gop_seconds).
+  # Unset picks a backend default: 3 for backend libav (cheap PLI-driven keyframes), 2 for cli.
+  # gop_seconds: 2
+  # keyframe_debounce_ms: minimum spacing between viewer-triggered ForceKeyframe calls (RTCP PLI,
+  # WebCodecs keyframe requests, new viewers). Unset: 150 for libav, 1000 for cli. With the cli
+  # backend RTCP PLI is not wired at all (a forced IDR restarts ffmpeg). Supersedes
+  # webrtc.video_keyframe_min_interval_ms.
+  # keyframe_debounce_ms: 150
+  # keyframe_interval: 60 # optional explicit GOP in frames; when > 0 it overrides gop_seconds
+  # intra_refresh: false # libx264 only: rolling intra refresh instead of periodic IDR frames (no
+  #                       keyframe bitrate spikes; loss heals within one GOP-sized refresh period).
+  #                       A new viewer triggers one encoder restart to get its first IDR.
   ffmpeg_path: ffmpeg   # path to the ffmpeg binary
   # H.264 encoder (T13). Default libx264 (software) keeps the original behaviour.
   #   libx264        software / CPU (default, always available)
@@ -28,6 +53,9 @@ encoder:
   # libx264 (it never silently downgrades).
   codec: libx264
   vaapi_device: /dev/dri/renderD128   # DRM render node (h264_vaapi only)
+  # Encoder implementation: cli (ffmpeg subprocess, default) | libav (in-process
+  # libav; only in binaries built with CGO_ENABLED=1 -tags libav).
+  backend: cli
 
 # Audio capture (ALSA -> Opus). Sent on its own WebRTC track alongside the video;
 # the browser resynchronises A/V from each track's RTP timestamps. Disabled by
@@ -40,18 +68,27 @@ audio:
   bitrate: 128000            # Opus bitrate (bits/sec)
   # ffmpeg_path:             # optional; defaults to encoder.ffmpeg_path
 
-# Adaptive bitrate (T14). When enabled the host samples WebRTC stats (packet
-# loss, RTT) and adjusts the encoder bitrate within [min_bitrate, max_bitrate]
+# Adaptive bitrate. When enabled, one host-level loop samples WebRTC stats (loss,
+# RTT) and adjusts the shared encoder bitrate within [min_bitrate, max_bitrate]
 # using AIMD: loss above loss_threshold -> multiplicative decrease; a sustained
-# clean link -> additive increase. Changes are debounced by cooldown_seconds and
-# applied by restarting the ffmpeg subprocess (keyframe gating hides the blip).
+# clean link -> additive increase. With several viewers the one holding control
+# decides, otherwise the worst viewer; with no viewers the bitrate is held.
+# Timing depends on the encoder backend: with a live-bitrate backend
+# (encoder.backend: libav) changes apply on the next frame, so cooldown is 500ms
+# and the sample interval defaults to 500ms. With the CLI backend every change
+# restarts ffmpeg, so cooldown_seconds / sample_interval_ms apply (keyframe
+# gating hides the blip).
 # Disabled by default: the encoder runs at the fixed encoder.bitrate.
 abr:
   enabled: false
   min_bitrate: 1000000    # floor (bits/sec) — bad network degrades to this, never stalls
   max_bitrate: 8000000    # ceiling (bits/sec)
   loss_threshold: 0.05    # packet-loss fraction (0..1) that triggers a decrease
-  sample_interval_ms: 2000 # how often WebRTC stats are sampled
+  # WebCodecs viewers (webrtc.video_transport) are covered too: their loss comes
+  # from FRAME_REPORTs, and queueing (SCTP RTT well above its recent minimum, or
+  # the video send queue filling up) also triggers a decrease below the loss
+  # threshold. Needs enabled: true.
+  sample_interval_ms: 0   # how often stats are sampled; 0 = 500ms on libav, 2000ms on cli
   cooldown_seconds: 10    # minimum time between two bitrate changes
 
 # Pion WebRTC peer connection (T4). Static ICE servers; used as-is when
@@ -59,12 +96,41 @@ abr:
 webrtc:
   ice_servers:
     - stun:stun.l.google.com:19302
+  # Video transport (docs/webcodecs-transport.md). NOT the twitch bot's token
+  # delivery mode.
+  #   track:     RTP H.264 track only (default)
+  #   webcodecs: Annex-B fragments over an unreliable DataChannel; the RTP
+  #              track stays negotiated as a fallback
+  #   auto:      like webcodecs, but each viewer chooses (starts on the track)
+  video_transport: track
+  video_fragment_bytes: 1200        # DataChannel message size, 600-1400
+  video_buffer_max_bytes: 262144    # drop a whole frame above this BufferedAmount
+  video_idr_pace_ms: 8              # spread large IDRs over this many ms
+  video_fec: "off"                  # off | xor | rs (parity only to viewers that advertise it)
+  video_fec_ratio: 0.1              # parity fragments per data fragment, 0-1
+  # Google Congestion Control (TWCC) as the ABR input instead of AIMD loss/RTT.
+  # Requires encoder.backend: libav (the cli backend restarts ffmpeg per change)
+  # and abr.enabled. Target is clamped to abr.min/max_bitrate, smoothed, and
+  # applied only on >=5% changes. Viewers on the webcodecs transport send no
+  # TWCC and are ignored; if none have an estimate, AIMD is used. The encoder
+  # gets 85% of the estimate (headroom for audio, RTX and packet overhead).
+  gcc: false
+  # video_keyframe_min_interval_ms: legacy alias of encoder.keyframe_debounce_ms (used only when
+  # that is unset). Prefer encoder.keyframe_debounce_ms.
 
 # Controller input target (T5).
 input:
-  target: nxbt                    # nxbt (production, Linux) | log (dev, any OS)
-  socket_path: /run/nxbt/nxbt.sock
-  rate_hz: 120                    # max commands/second forwarded; 0 disables limiting
+  # nxbt (Bluetooth via the nxbt daemon, Linux) | gateway (Switch 2 gateway over
+  # USB serial, any OS) | log (dev, any OS) | overlay (testsrc picture)
+  target: nxbt
+  socket_path: /run/nxbt/nxbt.sock  # nxbt only
+  rate_hz: 120                    # nxbt only: max commands/second forwarded; 0 disables limiting
+  # Switch 2 gateway (ESP32-C6 emulating a Pro Controller 2; see
+  # docs/switch2-gateway.md). Pair it with the console first, then plug it in.
+  gateway:
+    port: auto                    # auto = the single ESP32 USB Serial/JTAG port; or COM5, /dev/ttyACM0
+    rate_hz: 150                  # spaces button edges past the gateway's 5-6 ms report throttle (90 for fixed-100Hz firmware)
+    keepalive_ms: 40              # re-send a held state (neutral is sent once); the gateway neutralises after 100 ms of silence
   # disabled_buttons drops specific buttons so they are never sent to the Switch.
   # disabled_buttons:
   #   - home

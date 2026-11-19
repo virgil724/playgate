@@ -105,7 +105,8 @@ a {
   justify-content: center;
   min-height: 0;
 }
-.video-wrap video {
+.video-wrap video,
+.video-wrap canvas {
   max-width: 100%;
   max-height: 100%;
   width: 100%;
@@ -370,8 +371,100 @@ textarea {
   font-size: 13px;
 }
 
+/* Fullscreen (the whole room, see RoomPage): fill the screen with the page
+ * background and keep the panels below the video reachable by scrolling. */
+.room:fullscreen {
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+/* ---------- Phone layouts ----------
+ * .room is a full-height flex column and .video-wrap takes what is left. On a
+ * phone the virtual gamepad is taller than that, so the video used to collapse
+ * to zero height (and the fixed-height page could not scroll to it). */
+
+/* Narrow screens: keep the two gamepad clusters side by side, a bit smaller,
+ * and drop the keyboard legend (no keyboard on a phone). */
 @media (max-width: 600px) {
   .gamepad {
-    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 8px;
+  }
+  .gamepad .stick {
+    width: 96px;
+    height: 96px;
+  }
+  .gamepad .gp-btn:not(.gp-small) {
+    width: 48px;
+    height: 48px;
+  }
+  .gamepad .legend {
+    display: none;
+  }
+}
+
+/* Portrait phone: the video always keeps a 16:9 box; the gamepad sits below
+ * it and the page scrolls if both do not fit. */
+@media (orientation: portrait) and (max-width: 900px) {
+  .room {
+    height: auto;
+    min-height: 100%;
+  }
+  .video-wrap {
+    flex: none;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+  }
+}
+
+/* Landscape phone: like a handheld, the first screen is
+ *   [left cluster] [video] [right cluster]
+ * and everything else (status, stats, token box, logs) follows below it. The
+ * .gamepad wrapper uses display: contents so its two clusters become items of
+ * the .room grid and can sit in the video's row; nothing overlaps. */
+@media (orientation: landscape) and (max-height: 600px) {
+  .room {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    height: auto;
+    min-height: 100%;
+  }
+  .room > * {
+    grid-column: 1 / -1;
+  }
+  .room > .video-wrap {
+    grid-column: 2;
+    grid-row: 1;
+    height: 100dvh;
+  }
+  .gamepad {
+    display: contents;
+  }
+  .gamepad .pad-cluster {
+    grid-row: 1;
+    align-self: center;
+    padding: 4px 8px;
+    gap: 4px;
+  }
+  .gamepad .pad-cluster:first-child {
+    grid-column: 1;
+  }
+  .gamepad .pad-cluster:nth-child(2) {
+    grid-column: 3;
+  }
+  /* Sized so a whole cluster fits a phone's landscape height (~380px). */
+  .gamepad .stick {
+    width: 80px;
+    height: 80px;
+  }
+  .gamepad .gp-btn:not(.gp-small) {
+    width: 42px;
+    height: 42px;
+  }
+  .gamepad .gp-small {
+    height: 30px;
+  }
+  .gamepad .legend {
+    display: none;
   }
 }

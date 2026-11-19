@@ -157,10 +157,12 @@ export class SignalingClient {
     }
   }
 
-  /** Announce this viewer to the host so it sends us an offer. Idempotent on the
-   *  host side (a repeat hello for an existing session is ignored). */
-  async hello(): Promise<void> {
-    await this.push({ kind: "hello" });
+  /** Announce this viewer to the host so it sends us an offer. `session` is a
+   *  per-attempt nonce: a repeat hello with the same nonce is ignored by the
+   *  host, a new nonce makes it drop our old session and offer a fresh one
+   *  (used when the viewer rebuilds a failed peer connection). */
+  async hello(session?: string): Promise<void> {
+    await this.push(session ? { kind: "hello", session } : { kind: "hello" });
   }
 
   /**

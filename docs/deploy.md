@@ -193,6 +193,11 @@ See `docker/compose.example.yaml` for a full Compose example.
 
 ## 3. playgate-host (Raspberry Pi / Linux capture machine)
 
+> **Switch 2 with the ESP32-C6 gateway?** Set `input.target: gateway` and plug
+> the gateway in over USB; nuxbt, BlueZ and the nxbt daemon are not needed.
+> See [switch2-gateway.md](switch2-gateway.md). The rest of this section
+> (capture, encoder, signaling) applies unchanged.
+
 ### Option A — One-click install script (recommended)
 
 The script handles everything: system packages, BlueZ reconfiguration, nuxbt
@@ -335,6 +340,78 @@ scp playgate-host/config.example.yaml pi@raspberrypi:/etc/playgate/config.yaml
 sudo /usr/bin/python3 /opt/playgate/nxbt-daemon/nxbtd.py &
 sudo playgate-host -config /etc/playgate/config.yaml
 ```
+
+### libav build (optional, in-process encoder)
+
+The default host binary is pure Go (`CGO_ENABLED=0`) and shells out to the
+`ffmpeg` CLI. The optional **libav** build (`-tags libav`, cgo + go-astiav)
+encodes in-process, enabling live bitrate changes and cheap keyframes. Select it
+at runtime with `encoder.backend: libav` (default is `cli`); a non-libav binary
+rejects `libav` with an explicit error.
+
+Because it uses cgo it **cannot be cross-compiled**: build each arch natively
+(amd64 on an amd64 Linux host, arm64 on an arm64 host such as a Pi), or let Docker
+buildx do it per platform (QEMU for the foreign arch).
+
+FFmpeg version: CI and the Docker image both use **Debian trixie = FFmpeg 7.1**
+(libavcodec61 / libavformat61 / libavutil59 / libswscale8 / libswresample5 /
+libavfilter10 / libavdevice61). go-astiav v0.39.0 targets the FFmpeg 7.x C API
+(its README says n7.0; 7.1 has the same library majors) and is used with the
+7.1 libs. Debian bookworm (5.1) and Ubuntu 24.04 (6.1) are too old. The binary
+links FFmpeg dynamically, so the target machine needs the matching runtime libs.
+
+```bash
+# Native build (Debian 13 trixie or another FFmpeg 7.1 distro); dev packages needed once:
+sudo apt-get install -y gcc pkg-config libavcodec-dev libavformat-dev \
+  libavutil-dev libswscale-dev libavfilter-dev libavdevice-dev libswresample-dev
+make build-libav-amd64      # on amd64  -> dist/playgate-host-libav-linux-amd64
+make build-libav-arm64      # on arm64  -> dist/playgate-host-libav-linux-arm64
+
+# Docker (multi-arch, each platform built natively under buildx/QEMU):
+docker buildx build --platform linux/amd64,linux/arm64 \
+  --target host-libav -f docker/host.Dockerfile \
+  -t ghcr.io/playgate/playgate-host:libav --push .
+# or: make docker-host-libav REGISTRY=ghcr.io/your-org/playgate
+```
+
+#### Fully static libav release (primary distributable, manual)
+
+The dynamic build above needs FFmpeg 7.1 runtime libs on the target, which
+Raspberry Pi OS bookworm (FFmpeg 5.1) and Ubuntu 24.04 (6.1) do not have. For a
+self-contained binary, run the manually triggered **release-libav-static**
+workflow; it is separate from `ci.yml` / `release.yml`, which stay pure-Go:
+
+```bash
+gh workflow run release-libav-static.yml -f tag=v0.1.0   # tag must already have a release
+# optional: -f ffmpeg_version=7.1.5  -f ref=<git ref of source to build>
+```
+
+It builds on native amd64 and arm64 runners inside Alpine (musl): x264 and
+FFmpeg 7.1.x from source as static libs (cached per arch/version/script hash),
+then `CGO_ENABLED=1 go build -tags libav,netgo,osusergo` with
+`-linkmode external -extldflags "-static"`. It runs the libav tests, checks
+`file`/`ldd` report a static binary, smoke-runs it on `debian:bookworm-slim`, and
+uploads `playgate-host-libav-static-linux-<arch>`, a `.sha256`, and a
+`.BUILDINFO.txt` (exact FFmpeg/x264 versions, source SHA256s, configure lines)
+to the release. The same steps run locally via `scripts/build-ffmpeg-static.sh`
+and `scripts/build-host-libav-static.sh` in an `alpine:3.20` container.
+
+| Feature | Static build |
+|---------|--------------|
+| libx264 software encode | yes (statically linked, GPL) |
+| `h264_v4l2m2m` (Pi 4 hardware encoder) | compiled in (needs kernel V4L2 M2M device; untested on hardware) |
+| NVENC (`h264_nvenc`) | **not available** - NVENC `dlopen()`s the NVIDIA driver at runtime, which a static musl binary cannot do (and a glibc driver cannot be loaded into a musl process). Use the dynamic glibc libav build or the CLI backend for NVENC. |
+| VAAPI | **not available** - needs dynamic libva/driver. Use the dynamic build. |
+
+**GPL notice.** Statically linking x264 and building FFmpeg with `--enable-gpl`
+makes the distributed static binary a GPL work (not just a program that happens
+to call GPL libraries). Anyone you give the binary to must be offered the
+corresponding source: the playgate-host source at the release tag, the
+unmodified FFmpeg and x264 sources named in `.BUILDINFO.txt`, and the build
+scripts above. Keep that file attached to the release and link it from
+distribution pages. If GPL is unacceptable, build FFmpeg with OpenH264 (BSD,
+software H.264) plus NVENC (no `--enable-gpl`, no libx264) instead; that
+variant is not produced by the workflow today.
 
 ---
 

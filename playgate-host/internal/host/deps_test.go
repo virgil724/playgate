@@ -34,9 +34,6 @@ func TestLatencyTapRecordsAndForwards(t *testing.T) {
 		t.Fatal("tap did not forward the frame")
 	}
 
-	if tap.lastEnterTime().IsZero() {
-		t.Error("tap did not record the enter time")
-	}
 	deadline := time.Now().Add(time.Second)
 	for mc.Capture.Snapshot().Count == 0 {
 		if time.Now().After(deadline) {
@@ -93,5 +90,56 @@ func TestBuildDepsSyntheticLog(t *testing.T) {
 	}
 	if deps.Session != nil {
 		t.Error("session should be nil when gating disabled")
+	}
+}
+
+// TestEncoderInputFormatFollowsSource guards against the encoder being set up
+// for capture.format while a generated source emits a fixed format: testsrc
+// with the default YUYV config used to drop every frame.
+func TestEncoderInputFormatFollowsSource(t *testing.T) {
+	cases := []struct {
+		source, format string
+		want           core.PixelFormat
+	}{
+		{config.CaptureTestSrc, "YUYV", core.PixelFormatNV12},
+		{config.CaptureSynthetic, "NV12", core.PixelFormatYUYV},
+		{config.CaptureV4L2, "NV12", core.PixelFormatNV12},
+		{config.CaptureV4L2, "YUYV", core.PixelFormatYUYV},
+	}
+	for _, c := range cases {
+		cfg := config.Default()
+		cfg.Capture.Source = c.source
+		cfg.Capture.Format = c.format
+		got, err := encoderInputFormat(cfg)
+		if err != nil || got != c.want {
+			t.Errorf("source=%s format=%s: got %v, %v; want %v", c.source, c.format, got, err, c.want)
+		}
+	}
+}
+
+func TestBuildDepsLibavBackendErrorsInDefaultBuild(t *testing.T) {
+	cfg := config.Default()
+	cfg.Capture.Source = config.CaptureSynthetic
+	cfg.Input.Target = config.InputLog
+	cfg.Encoder.Backend = config.BackendLibav
+	if _, err := buildDeps(discardLogger(), cfg, metrics.NewCollector()); err == nil {
+		t.Skip("libav backend available in this build")
+	}
+}
+
+func TestEncoderWrapperCaps(t *testing.T) {
+	cfg := config.Default()
+	cfg.Capture.Source = config.CaptureSynthetic
+	cfg.Input.Target = config.InputLog
+	deps, err := buildDeps(discardLogger(), cfg, metrics.NewCollector())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ew, ok := deps.Encoder.(*encoderWrapper)
+	if !ok {
+		t.Fatalf("encoder is %T", deps.Encoder)
+	}
+	if c := ew.Caps(); c.LiveBitrate || c.CheapKeyframe {
+		t.Errorf("cli caps = %+v", c)
 	}
 }

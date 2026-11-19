@@ -7,6 +7,13 @@ import {
 } from "./control-events";
 
 describe("parseControlEvent", () => {
+  it("parses the open-room event", () => {
+    const ev = parseControlEvent('{"kind":"open"}');
+    expect(ev?.kind).toBe("open");
+    expect(ev?.viewerId).toBe("");
+    expect(describeEvent(ev!)).toMatch(/no token/i);
+  });
+
   it("parses a granted event from JSON string", () => {
     const ev = parseControlEvent(
       JSON.stringify({

@@ -16,7 +16,7 @@ func TestControlPingEcho(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	host, err := NewPeer(Config{ICEServers: nil})
+	host, err := NewPeer(Config{LoopbackOnly: true, ICEServers: nil})
 	if err != nil {
 		t.Fatalf("NewPeer: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestControlPingEcho(t *testing.T) {
 		}
 	})
 
-	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	browser, err := NewLoopbackPeerConnection()
 	if err != nil {
 		t.Fatalf("browser pc: %v", err)
 	}

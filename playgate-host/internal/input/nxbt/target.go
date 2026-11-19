@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/playgate/playgate-host/internal/core"
+	"github.com/playgate/playgate-host/internal/input/coalesce"
 	"github.com/playgate/playgate-host/internal/metrics"
 )
 
@@ -47,7 +48,7 @@ type Target struct {
 	// status channel is owned by Target; closed when Run exits.
 	statusCh chan core.TargetStatus
 
-	coalescer *coalescer
+	coalescer *coalesce.Coalescer
 
 	// latency, when non-nil, records the time from a command being decoded off
 	// the WebRTC DataChannel (cmd.Timestamp) to it being written to the daemon
@@ -107,7 +108,7 @@ func New(log *slog.Logger, socketPath string, opts ...Option) *Target {
 	for _, o := range opts {
 		o(t)
 	}
-	t.coalescer = newCoalescer(t.rateHz)
+	t.coalescer = coalesce.New(t.rateHz)
 	return t
 }
 
@@ -128,7 +129,7 @@ func (t *Target) Start(_ context.Context) error { return nil }
 // (it will be sent once reconnected, subject to the rate limit).
 // Returns ErrNotConnected if the coalescer cannot be reached.
 func (t *Target) Send(cmd core.InputCommand) error {
-	t.coalescer.push(cmd)
+	t.coalescer.Push(cmd)
 	return nil
 }
 
@@ -231,13 +232,13 @@ func (t *Target) runSession(ctx context.Context, conn net.Conn) error {
 	// the loop sleeps until the next notify.
 	flush := func() error {
 		for {
-			if cmd, ok := t.coalescer.poll(); ok {
+			if cmd, ok := t.coalescer.Poll(); ok {
 				if err := t.writeInput(conn, cmd); err != nil {
 					return fmt.Errorf("write input: %w", err)
 				}
 				continue
 			}
-			switch d := t.coalescer.untilReady(); {
+			switch d := t.coalescer.UntilReady(); {
 			case d < 0:
 				return nil // nothing pending; wait for the next notify
 			case d == 0:
@@ -272,7 +273,7 @@ func (t *Target) runSession(ctx context.Context, conn net.Conn) error {
 				t.log.Warn("inbound parse error", "err", err)
 			}
 
-		case <-t.coalescer.notifyC():
+		case <-t.coalescer.NotifyC():
 			if err := flush(); err != nil {
 				return err
 			}

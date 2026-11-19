@@ -10,6 +10,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/playgate/playgate-host/internal/config"
+	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/metrics"
 	"github.com/playgate/playgate-host/internal/rtc"
 	"github.com/playgate/playgate-host/internal/signaling"
@@ -39,11 +40,25 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			poll = 500 * time.Millisecond
 		}
 
+		// Viewer keyframe requests (WebCodecs transport) share one coalescer since
+		// every viewer shares the single encoder.
+		var kf *keyframeCoalescer
+		if k, ok := enc.(interface{ ForceKeyframe() }); ok {
+			// One knob: encoder.keyframe_debounce_ms (legacy alias
+			// webrtc.video_keyframe_min_interval_ms; backend default 150ms libav,
+			// 1s cli). See config.Config.KeyframeDebounce.
+			kf = newKeyframeCoalescer(cfg.KeyframeDebounce(), k.ForceKeyframe)
+			defer kf.Stop()
+		}
+
 		cm := &connManager{
+			kf:      kf,
 			log:    log.With("module", "conn-manager"),
 			cfg:    cfg,
 			mc:     mc,
 			enc:    enc,
+			forceKey: keyframeForcer(cfg, enc),
+			cheapKey: cheapKeyframe(enc),
 			client:  client,
 			router:  router,
 			arouter: arouter,
@@ -51,8 +66,28 @@ func makeSignalingConnect(log *slog.Logger, cfg config.Config, mc *metrics.Colle
 			ice:     ice,
 			poll:    poll,
 		}
+		cm.abrReg = startHostABR(ctx, log, cfg, enc, cm.sink)
 		return cm.loop(ctx)
 	}
+}
+
+// keyframeForcer returns the encoder's ForceKeyframe when intra-refresh is
+// enabled (late joiners need an IDR there), otherwise nil.
+func keyframeForcer(cfg config.Config, enc BitrateController) func() {
+	if !cfg.Encoder.IntraRefresh {
+		return nil
+	}
+	if k, ok := enc.(interface{ ForceKeyframe() }); ok {
+		return k.ForceKeyframe
+	}
+	return nil
+}
+
+// cheapKeyframe reports whether enc can force a keyframe without disturbing
+// other viewers (core.EncoderCaps.CheapKeyframe, true for the libav backend).
+func cheapKeyframe(enc BitrateController) bool {
+	c, ok := enc.(interface{ Caps() core.EncoderCaps })
+	return ok && c.Caps().CheapKeyframe
 }
 
 // resolveICEServers fetches TURN credentials when enabled, falling back to the
@@ -88,16 +123,29 @@ func resolveICEServers(ctx context.Context, log *slog.Logger, cfg config.Config,
 
 // connManager reads the merged viewer feed and runs one peer per viewer.
 type connManager struct {
+	// startViewer runs one viewer session; nil means runViewer. Tests inject a
+	// stub so session bookkeeping can be checked without real peers.
+	startViewer func(ctx context.Context, id string, sess *viewerSession)
+
 	log     *slog.Logger
 	cfg     config.Config
 	mc      *metrics.Collector
 	enc     BitrateController // ABR target; unused in multi-viewer (see runViewer)
+	// forceKey, when non-nil, requests a fresh keyframe from the encoder. Set only
+	// in intra-refresh mode, where no periodic IDR exists for late joiners.
+	forceKey func()
+	kf      *keyframeCoalescer // coalesced ForceKeyframe; nil if the encoder cannot
+	// cheapKey is the encoder's Caps().CheapKeyframe: RTCP PLI/FIR and new-viewer
+	// joins are then routed to kf. Otherwise (cli backend) they are not.
+	cheapKey bool
 	client  *signaling.Client
 	router  *VideoRouter
 	arouter *AudioRouter // nil when audio is disabled
 	sink    *inputSink
 	ice     []webrtc.ICEServer
 	poll    time.Duration
+
+	abrReg *viewerStatsRegistry // host-level ABR input; nil when ABR is disabled
 
 	mu       sync.Mutex
 	sessions map[string]*viewerSession // keyed by viewerId
@@ -108,6 +156,14 @@ type viewerSession struct {
 	mu       sync.Mutex
 	peer     *rtc.Peer
 	answered bool
+
+	// nonce is the viewer's per-attempt session id from its hello ("" for
+	// viewers that do not send one). A hello with a different nonce means the
+	// viewer rebuilt its RTCPeerConnection (e.g. after the tab was backgrounded
+	// and the connection failed), so this session is replaced.
+	nonce string
+	// cancel ends this session's runViewer.
+	cancel context.CancelFunc
 }
 
 func (s *viewerSession) setPeer(p *rtc.Peer) {
@@ -124,6 +180,8 @@ type viewerEnvelope struct {
 	Type     string `json:"type"`
 	SDP      string `json:"sdp"`
 	ViewerID string `json:"viewerId"`
+	// Session is the viewer's per-attempt nonce on hello (see viewerSession.nonce).
+	Session string `json:"session"`
 }
 
 // viewerOffer is the host→viewer offer payload; To carries the target viewerId
@@ -226,6 +284,15 @@ func (c *connManager) handleFeedMessage(ctx context.Context, m signaling.Message
 	}
 	c.mu.Lock()
 	sess, ok := c.sessions[env.ViewerID]
+	if ok && env.Kind == "hello" && env.Session != "" && env.Session != sess.nonce {
+		// The viewer rebuilt its peer connection: drop the old session (its
+		// runViewer tears down the old peer) and start a fresh one below. A
+		// repeated hello with the same nonce is a duplicate and is ignored.
+		c.log.Info("viewer restarted its connection; replacing session", "viewer", env.ViewerID)
+		sess.cancel()
+		delete(c.sessions, env.ViewerID)
+		ok = false
+	}
 	if !ok {
 		// Only a hello starts a session; stray answers for unknown viewers (e.g.
 		// from a dead session) are ignored.
@@ -233,10 +300,15 @@ func (c *connManager) handleFeedMessage(ctx context.Context, m signaling.Message
 			c.mu.Unlock()
 			return
 		}
-		sess = &viewerSession{}
+		sctx, cancel := context.WithCancel(ctx)
+		sess = &viewerSession{nonce: env.Session, cancel: cancel}
 		c.sessions[env.ViewerID] = sess
 		c.mu.Unlock()
-		go c.runViewer(ctx, env.ViewerID, sess)
+		start := c.startViewer
+		if start == nil {
+			start = c.runViewer
+		}
+		go start(sctx, env.ViewerID, sess)
 		return
 	}
 	c.mu.Unlock()
@@ -263,36 +335,91 @@ func (c *connManager) applyAnswer(sess *viewerSession, env viewerEnvelope) {
 		SDP:  env.SDP,
 	}); err != nil {
 		c.log.Warn("set remote answer failed", "err", err)
+		sess.mu.Lock()
+		sess.answered = false // let the real answer through
+		sess.mu.Unlock()
+	}
+}
+
+// pliHandler returns the RTCP PLI/FIR callback: the shared coalescer when the
+// encoder has cheap keyframes, otherwise nil (not wired).
+func (c *connManager) pliHandler() func() {
+	if c.cheapKey && c.kf != nil {
+		return c.kf.Request
+	}
+	return nil
+}
+
+// requestJoinKeyframe asks for one keyframe for a newly joined viewer. With
+// cheap keyframes it goes through the coalescer (which also covers the
+// intra-refresh late-joiner case, so it never fires twice); otherwise only
+// intra-refresh mode forces one, since no periodic IDR exists there.
+func (c *connManager) requestJoinKeyframe() {
+	switch {
+	case c.cheapKey && c.kf != nil:
+		c.kf.Request()
+	case c.forceKey != nil:
+		c.forceKey()
 	}
 }
 
 // runViewer builds the peer for one viewer, registers it with the routers, sends
 // the offer, and waits for that viewer to disconnect, then cleans up.
 //
-// NOTE: we intentionally do NOT wire OnKeyframeRequest to the encoder — an
-// on-demand IDR means restarting ffmpeg (new SPS/PPS, PTS reset), which disrupts
-// every other viewer. A late joiner instead waits for the next scheduled GOP
-// keyframe (per-peer gating in rtc.Peer.WriteSample).
+// Keyframe policy: OnKeyframeRequest (RTCP PLI/FIR) is wired to the shared,
+// coalesced ForceKeyframe only when the encoder reports Caps().CheapKeyframe
+// (libav backend: in-process IDR, no disruption to other viewers). With the cli
+// backend an on-demand IDR means restarting ffmpeg (new SPS/PPS, PTS reset),
+// which disrupts every viewer, so PLI is deliberately NOT wired there and a
+// late joiner waits for the next scheduled GOP keyframe (per-peer gating in
+// rtc.Peer.WriteSample).
 //
-// ABR is intentionally not run per viewer: it drives the single shared encoder
-// bitrate, so N viewers would fight over it. Multi-viewer runs at fixed bitrate.
+// ABR is not run per viewer (N viewers would fight over the single shared
+// encoder). One host-level loop (startHostABR) aggregates the viewers
+// registered here; see abr_multi.go.
 func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSession) {
 	log := c.log.With("viewer", id)
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer func() {
 		c.mu.Lock()
-		delete(c.sessions, id)
+		// Only remove our own entry: a restarted viewer may already have a
+		// newer session under the same id.
+		if c.sessions[id] == sess {
+			delete(c.sessions, id)
+		}
 		c.mu.Unlock()
 	}()
 
-	peer, err := rtc.NewPeer(rtc.Config{ICEServers: c.ice, Logger: log, EnableAudio: c.arouter != nil})
+	rcfg := rtc.Config{
+		ICEServers:          c.ice,
+		Logger:              log,
+		EnableAudio:         c.arouter != nil,
+		VideoTransport:      c.cfg.WebRTC.VideoTransport,
+		VideoFragmentBytes:  c.cfg.WebRTC.VideoFragmentBytes,
+		VideoBufferMaxBytes: c.cfg.WebRTC.VideoBufferMaxBytes,
+		VideoIDRPaceMS:      c.cfg.WebRTC.VideoIDRPaceMS,
+		EnableGCC:           c.cfg.WebRTC.GCC,
+		VideoFEC:            c.cfg.WebRTC.VideoFEC,
+		VideoFECRatio:       c.cfg.WebRTC.VideoFECRatio,
+	}
+	if rcfg.EnableGCC {
+		rcfg.GCCInitialBitrate, rcfg.GCCMinBitrate, rcfg.GCCMaxBitrate = gccBounds(c.cfg)
+	}
+	if c.kf != nil {
+		rcfg.OnVideoKeyframeRequest = c.kf.Request
+	}
+	rcfg.OnKeyframeRequest = c.pliHandler()
+	peer, err := rtc.NewPeer(rcfg)
 	if err != nil {
 		log.Warn("create peer failed", "err", err)
 		return
 	}
 	defer peer.Close()
-	sess.setPeer(peer)
+	if c.abrReg != nil {
+		c.abrReg.Register(id, peer)
+		defer c.abrReg.Unregister(id, peer)
+	}
 
 	c.router.AddSink(peer)
 	defer c.router.RemoveSink(peer)
@@ -308,6 +435,9 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		log.Warn("create offer failed", "err", err)
 		return
 	}
+	// Only now can an answer apply: one arriving earlier (a stale answer from
+	// the viewer's previous attempt) would fail and use up the single slot.
+	sess.setPeer(peer)
 	if err := c.client.PostMessage(sctx, viewerOffer{
 		Type: offer.Type.String(),
 		SDP:  offer.SDP,
@@ -318,7 +448,10 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 	}
 	log.Info("offer posted to viewer; awaiting answer")
 
-	c.awaitDisconnect(sctx, peer)
+	// Ask for the join IDR only once media can flow: one produced while ICE/DTLS
+	// is still connecting is dropped, and with intra-refresh (cli) nothing else
+	// would ever give this viewer a keyframe.
+	awaitPeerEnd(sctx, peer.ConnState(), disconnectGrace, c.requestJoinKeyframe)
 	log.Info("viewer disconnected")
 }
 
@@ -329,6 +462,11 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 	sendControl := func(b []byte) error { return peer.SendControl(b) }
 
 	if !c.sink.SessionEnabled() {
+		peer.OnControlOpen(func() {
+			if err := peer.SendControl(openRoomEvent); err != nil {
+				c.log.Debug("open-room event send failed", "err", err)
+			}
+		})
 		go c.sink.HandleCommands(ctx, peer.Commands(), sendControl)
 		return
 	}
@@ -371,22 +509,38 @@ func (c *connManager) wireInput(ctx context.Context, peer *rtc.Peer) {
 // The server caps its own wait at 25s; we ask for exactly 25s.
 const longPollWait = 25 * time.Second
 
-// awaitDisconnect blocks until the peer reaches a terminal connection state or
-// ctx is cancelled.
-func (c *connManager) awaitDisconnect(ctx context.Context, peer *rtc.Peer) {
+// disconnectGrace is how long a "disconnected" peer may take to recover before
+// the host gives up on it. WebRTC's disconnected state is transient (consent
+// checks missed, e.g. while the viewer's tab is backgrounded) and often heals.
+const disconnectGrace = 5 * time.Second
+
+// awaitPeerEnd blocks until the peer reaches a terminal connection state
+// (failed/closed, or disconnected for longer than grace) or ctx is cancelled.
+// onConnected (may be nil) runs each time the state becomes connected.
+func awaitPeerEnd(ctx context.Context, states <-chan webrtc.PeerConnectionState, grace time.Duration, onConnected func()) {
+	var graceC <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case s, ok := <-peer.ConnState():
+		case <-graceC:
+			return
+		case s, ok := <-states:
 			if !ok {
 				return
 			}
 			switch s {
-			case webrtc.PeerConnectionStateFailed,
-				webrtc.PeerConnectionStateClosed,
-				webrtc.PeerConnectionStateDisconnected:
+			case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 				return
+			case webrtc.PeerConnectionStateDisconnected:
+				if graceC == nil {
+					graceC = time.After(grace)
+				}
+			case webrtc.PeerConnectionStateConnected:
+				graceC = nil // recovered
+				if onConnected != nil {
+					onConnected()
+				}
 			}
 		}
 	}

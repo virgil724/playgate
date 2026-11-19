@@ -9,15 +9,35 @@ import (
 
 	"github.com/playgate/playgate-host/internal/audio/opus"
 	"github.com/playgate/playgate-host/internal/capture/synthetic"
+	"github.com/playgate/playgate-host/internal/capture/testsrc"
 	"github.com/playgate/playgate-host/internal/capture/v4l2"
 	"github.com/playgate/playgate-host/internal/config"
 	"github.com/playgate/playgate-host/internal/core"
+	"github.com/playgate/playgate-host/internal/encoder"
 	"github.com/playgate/playgate-host/internal/encoder/ffmpeg"
+	"github.com/playgate/playgate-host/internal/input/gateway"
 	"github.com/playgate/playgate-host/internal/input/logtarget"
 	"github.com/playgate/playgate-host/internal/input/nxbt"
+	"github.com/playgate/playgate-host/internal/input/overlay"
 	"github.com/playgate/playgate-host/internal/metrics"
 	"github.com/playgate/playgate-host/internal/session"
 )
+
+// encoderInputFormat returns the pixel format the capture source actually
+// emits, which the encoder must be configured for. The generated sources have a
+// fixed format (synthetic: YUYV, testsrc: NV12) regardless of capture.format;
+// only real devices honour the configured format. A mismatch makes the encoder
+// drop every frame as "format mismatch".
+func encoderInputFormat(cfg config.Config) (core.PixelFormat, error) {
+	switch cfg.Capture.Source {
+	case config.CaptureSynthetic:
+		return core.PixelFormatYUYV, nil
+	case config.CaptureTestSrc, config.CaptureDShow:
+		return core.PixelFormatNV12, nil
+	default:
+		return v4l2.ParsePixelFormat(cfg.Capture.Format)
+	}
+}
 
 // buildDeps constructs the real pipeline modules from cfg, inserting latency
 // taps between capture→encoder→router and wiring a real signaling-backed
@@ -33,7 +53,7 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	tap := newLatencyTap(log, mc, capture.Frames())
 
 	// --- encoder ---
-	pixfmt, err := v4l2.ParsePixelFormat(cfg.Capture.Format)
+	pixfmt, err := encoderInputFormat(cfg)
 	if err != nil {
 		return Deps{}, fmt.Errorf("host: capture format: %w", err)
 	}
@@ -41,7 +61,13 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	encOpts.FFmpegPath = cfg.Encoder.FFmpegPath
 	encOpts.Bitrate = cfg.Encoder.Bitrate
 	encOpts.Preset = cfg.Encoder.Preset
-	encOpts.GOPSize = cfg.Encoder.KeyframeInterval
+	encOpts.GOPSize = cfg.Encoder.GOPFrames(cfg.Capture.FPS)
+	encOpts.IntraRefresh = cfg.Encoder.IntraRefresh
+	// The host's keyframe coalescer already spaces requests by
+	// KeyframeDebounce and fires its deferred request right at the window end.
+	// The encoder's own guard (for direct callers) is set a little shorter so it
+	// never swallows that deferred request by a clock hair.
+	encOpts.ForceKeyframeDebounce = cfg.KeyframeDebounce() * 9 / 10
 
 	// T13: select the configured codec (libx264 / v4l2m2m / vaapi / nvenc).
 	codec, err := ffmpeg.CodecFromName(cfg.EncoderCodecKind(), cfg.Encoder.VAAPIDevice)
@@ -54,7 +80,7 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	// actionable error (no silent downgrade) if the chosen codec is missing.
 	detectCodec(log, cfg.Encoder.FFmpegPath, cfg.EncoderCodecKind())
 
-	enc, err := ffmpeg.New(log, encOpts, tap.out())
+	enc, err := encoder.New(cfg.EncoderBackendKind(), log, encOpts, tap.out())
 	if err != nil {
 		return Deps{}, fmt.Errorf("host: build encoder: %w", err)
 	}
@@ -106,6 +132,7 @@ func buildAudio(log *slog.Logger, cfg config.Config) AudioSource {
 		SampleRate: cfg.Audio.SampleRate,
 		Channels:   cfg.Audio.Channels,
 		Bitrate:    cfg.Audio.Bitrate,
+		Format:     cfg.Audio.Format,
 	})
 }
 
@@ -139,6 +166,23 @@ func buildCapture(log *slog.Logger, cfg config.Config) (core.CaptureSource, erro
 			Height: cfg.Capture.Height,
 			FPS:    cfg.Capture.FPS,
 		})
+	case config.CaptureTestSrc:
+		return testsrc.New(log, testsrc.Config{
+			FFmpegPath: cfg.Encoder.FFmpegPath,
+			Width:      cfg.Capture.Width,
+			Height:     cfg.Capture.Height,
+			FPS:        cfg.Capture.FPS,
+			FontFile:   cfg.Capture.TestSrc.FontFile,
+			TextFile:   cfg.Overlay.TextFile,
+		})
+	case config.CaptureDShow:
+		return testsrc.New(log, testsrc.Config{
+			FFmpegPath:  cfg.Encoder.FFmpegPath,
+			Width:       cfg.Capture.Width,
+			Height:      cfg.Capture.Height,
+			FPS:         cfg.Capture.FPS,
+			DShowDevice: cfg.Capture.Device,
+		})
 	case config.CaptureV4L2:
 		pixfmt, err := v4l2.ParsePixelFormat(cfg.Capture.Format)
 		if err != nil {
@@ -162,11 +206,21 @@ func buildInput(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (cor
 	case config.InputLog:
 		// Sample ~one log line per second at 60 Hz.
 		return logtarget.New(log, 60), nil
+	case config.InputOverlay:
+		return overlay.New(log, cfg.Overlay.TextFile)
 	case config.InputNXBT:
 		return nxbt.New(log, cfg.Input.SocketPath,
 			nxbt.WithRateHz(cfg.Input.RateHz),
 			nxbt.WithLatencyHistogram(mc.Input),
 			nxbt.WithDaemonHistogram(mc.DaemonApply),
+		), nil
+	case config.InputGateway:
+		g := cfg.Input.Gateway
+		return gateway.New(log, g.Port,
+			gateway.WithRateHz(g.RateHz),
+			gateway.WithKeepalive(time.Duration(g.KeepaliveMS)*time.Millisecond),
+			gateway.WithLatencyHistogram(mc.Input),
+			gateway.WithApplyHistogram(mc.DaemonApply),
 		), nil
 	default:
 		return nil, fmt.Errorf("host: unknown input target %q", cfg.InputTargetKind())
@@ -189,16 +243,12 @@ func buildSession(cfg config.Config) (*session.Manager, error) {
 // --- latency tap ---------------------------------------------------------
 
 // latencyTap forwards frames from capture to the encoder, recording for each
-// frame how long it waited in the capture buffer (capture stage) and the time it
-// entered the encoder (so the encode stage can be computed when a packet emerges).
+// frame how long it waited in the capture buffer (capture stage).
 type latencyTap struct {
 	log     *slog.Logger
 	metrics *metrics.Collector
 	in      <-chan core.VideoFrame
 	outCh   chan core.VideoFrame
-
-	mu        sync.Mutex
-	lastEnter time.Time // wall time the most recent frame was handed to the encoder
 }
 
 func newLatencyTap(log *slog.Logger, mc *metrics.Collector, in <-chan core.VideoFrame) *latencyTap {
@@ -212,14 +262,7 @@ func newLatencyTap(log *slog.Logger, mc *metrics.Collector, in <-chan core.Video
 
 func (t *latencyTap) out() <-chan core.VideoFrame { return t.outCh }
 
-// lastEnterTime returns the wall time the most recent frame entered the encoder.
-func (t *latencyTap) lastEnterTime() time.Time {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.lastEnter
-}
-
-// run forwards frames, recording capture-stage latency and the enter time.
+// run forwards frames, recording capture-stage latency.
 func (t *latencyTap) run(ctx context.Context) {
 	defer close(t.outCh)
 	for {
@@ -233,9 +276,6 @@ func (t *latencyTap) run(ctx context.Context) {
 			if t.metrics != nil && !frame.Timestamp.IsZero() {
 				t.metrics.Capture.Observe(time.Since(frame.Timestamp))
 			}
-			t.mu.Lock()
-			t.lastEnter = time.Now()
-			t.mu.Unlock()
 			select {
 			case t.outCh <- frame:
 			case <-ctx.Done():
@@ -249,19 +289,19 @@ func (t *latencyTap) run(ctx context.Context) {
 
 // encoderWrapper bundles the capture-source Run, the latency tap Run, and the
 // real ffmpeg encoder Run into a single core.Module-style unit, and instruments
-// the encode stage by timing packets against the latency tap's last enter time.
+// the encode stage from each packet's EncodeStart.
 // It exposes the encoder's packet output (re-tapped) as Packets.
 type encoderWrapper struct {
 	log     *slog.Logger
 	metrics *metrics.Collector
 	capture core.CaptureSource
 	tap     *latencyTap
-	enc     *ffmpeg.Encoder
+	enc     core.VideoEncoder
 
 	outCh chan core.EncodedPacket
 }
 
-func newEncoderWrapper(log *slog.Logger, mc *metrics.Collector, capture core.CaptureSource, tap *latencyTap, enc *ffmpeg.Encoder) *encoderWrapper {
+func newEncoderWrapper(log *slog.Logger, mc *metrics.Collector, capture core.CaptureSource, tap *latencyTap, enc core.VideoEncoder) *encoderWrapper {
 	return &encoderWrapper{
 		log:     log,
 		metrics: mc,
@@ -277,6 +317,9 @@ func (w *encoderWrapper) Name() string { return "encoder" }
 
 // Packets returns the instrumented encoded-packet output.
 func (w *encoderWrapper) Packets() <-chan core.EncodedPacket { return w.outCh }
+
+// Caps reports the underlying encoder backend's capabilities.
+func (w *encoderWrapper) Caps() core.EncoderCaps { return w.enc.Caps() }
 
 // SetBitrate forwards an ABR bitrate decision to the underlying ffmpeg encoder,
 // which restarts the subprocess to apply it (T14).
@@ -299,8 +342,7 @@ func (w *encoderWrapper) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); _ = w.enc.Run(ctx) }()
 
 	// Re-tap the encoder's packets to record encode-stage latency: the time from
-	// the most recent frame entering the encoder to the packet emerging. This is
-	// an approximation (frames and packets are not 1:1) but gives a useful p50/p95.
+	// a frame being handed to ffmpeg to its packet emerging.
 	encPackets := w.enc.Packets()
 	for {
 		select {
@@ -317,10 +359,8 @@ func (w *encoderWrapper) Run(ctx context.Context) error {
 				wg.Wait()
 				return nil
 			}
-			if w.metrics != nil {
-				if enter := w.tap.lastEnterTime(); !enter.IsZero() {
-					w.metrics.Encode.Observe(time.Since(enter))
-				}
+			if w.metrics != nil && !pkt.EncodeStart.IsZero() {
+				w.metrics.Encode.Observe(time.Since(pkt.EncodeStart))
 			}
 			select {
 			case w.outCh <- pkt:

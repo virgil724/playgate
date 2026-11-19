@@ -1,4 +1,7 @@
 name = "playgate-signaling"
+# Pin the account: the logged-in user can reach more than one Cloudflare account,
+# and wrangler refuses (or picks wrong) without this in non-interactive runs.
+account_id = "7e7a410f89278981245b8dd3cb3c6342"
 main = "src/index.ts"
 compatibility_date = "2024-05-29"
 compatibility_flags = ["nodejs_compat"]

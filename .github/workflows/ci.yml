@@ -156,4 +156,46 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -f docker/server.Dockerfile .
       - run: docker build -f docker/host.Dockerfile .
+      # The default build stops at the last stage (runtime); build the cgo
+      # libav image explicitly so its stages are exercised too.
+      - run: docker build -f docker/host.Dockerfile --target host-libav .
       - run: docker build -f docker/twitch-bot.Dockerfile .
+
+  # cgo + FFmpeg (libav encoder). Native runners per arch: cgo cannot
+  # cross-compile. The job runs inside debian:trixie (FFmpeg 7.1), matching the
+  # host-libav Docker target (debian:trixie); the container is the runner's
+  # native arch, so arm64 runners pull the arm64 image.
+  host-libav:
+    name: playgate-host libav (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    defaults:
+      run:
+        working-directory: playgate-host
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      # Container is minimal and runs as root (no sudo): install git (checkout),
+      # a C toolchain and the FFmpeg 7.1 dev libs before anything else.
+      - name: Install FFmpeg dev libs
+        working-directory: /
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git gcc libc6-dev pkg-config \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libavfilter-dev libavdevice-dev libswresample-dev
+          pkg-config --modversion libavcodec
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: playgate-host/go.mod
+          cache-dependency-path: playgate-host/go.sum
+      - run: go vet -tags libav ./...
+      - run: go test -tags libav -count=1 ./internal/encoder/libav/...

@@ -34,6 +34,7 @@ WEB_DIR   := playgate-web
 
 .PHONY: all clean test \
         host-linux-arm64 host-linux-amd64 \
+        build-libav-amd64 build-libav-arm64 docker-host-libav \
         server-linux-amd64 server-linux-arm64 \
         web docker docker-host docker-server
 
@@ -61,6 +62,37 @@ host-linux-amd64: $(DIST)
 	    -ldflags "$(LDFLAGS)" \
 	    -o ../$(DIST)/playgate-host-linux-amd64 \
 	    ./cmd/host
+
+# ── Host binaries with the in-process libav encoder (cgo) ────────────────────
+# Build tag `libav` => internal/encoder/libav (go-astiav, links FFmpeg libs via
+# pkg-config). This is a NATIVE build: cgo cannot cross-compile here, so run
+# build-libav-amd64 on an amd64 Linux box and build-libav-arm64 on an arm64
+# Linux box (e.g. Raspberry Pi, arm64 runner), or use
+# `docker buildx build --target host-libav` which builds each platform natively
+# (QEMU for the foreign one).
+# Requires: gcc, pkg-config, libavcodec-dev libavformat-dev libavutil-dev
+#           libswscale-dev libavfilter-dev libavdevice-dev libswresample-dev
+# FFmpeg major must match go-astiav (FFmpeg 7.1 on Debian trixie; see
+# docker/host.Dockerfile).
+
+define BUILD_LIBAV
+	@echo "==> host linux/$(1) (libav, native cgo)"
+	@test "$$(go env GOHOSTOS)/$$(go env GOHOSTARCH)" = "linux/$(1)" || \
+	  { echo "build-libav-$(1) must run natively on linux/$(1) (cgo, no cross-compile)"; exit 1; }
+	CGO_ENABLED=1 GOOS=linux GOARCH=$(1) \
+	  go -C $(HOST_DIR) build \
+	    -tags libav \
+	    -trimpath \
+	    -ldflags "$(LDFLAGS)" \
+	    -o ../$(DIST)/playgate-host-libav-linux-$(1) \
+	    ./cmd/host
+endef
+
+build-libav-amd64: $(DIST)
+	$(call BUILD_LIBAV,amd64)
+
+build-libav-arm64: $(DIST)
+	$(call BUILD_LIBAV,arm64)
 
 # ── Server binaries ──────────────────────────────────────────────────────────
 # modernc.org/sqlite is pure Go (no CGO); static binary works with scratch image.
@@ -116,6 +148,17 @@ docker-host:
 	  --file docker/host.Dockerfile \
 	  --tag $(REGISTRY)/playgate-host:$(TAG) \
 	  --tag $(REGISTRY)/playgate-host:latest \
+	  --push \
+	  .
+
+# libav variant (FFmpeg libs in the image); pushes :<tag>-libav
+docker-host-libav:
+	@echo "==> docker buildx host-libav ($(PLATFORMS))"
+	docker buildx build \
+	  --platform $(PLATFORMS) \
+	  --target host-libav \
+	  --file docker/host.Dockerfile \
+	  --tag $(REGISTRY)/playgate-host:$(TAG)-libav \
 	  --push \
 	  .
 

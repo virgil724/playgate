@@ -73,6 +73,9 @@ services:
     devices:
       # V4L2 capture card — adjust to your capture device node
       - /dev/video0:/dev/video0
+      # Switch 2 gateway (input.target: gateway) — its USB serial port. With
+      # the gateway, privileged, the dbus mount and nxbt-run are not needed.
+      # - /dev/ttyACM0:/dev/ttyACM0
     volumes:
       # DBus socket: nuxbt talks to bluetoothd through the host dbus
       - /var/run/dbus:/var/run/dbus

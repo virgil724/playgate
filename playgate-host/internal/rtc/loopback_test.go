@@ -26,7 +26,7 @@ func TestLoopback(t *testing.T) {
 
 	// Host side: our Peer. Use the same default STUN config but ICE will complete
 	// over host candidates on loopback.
-	host, err := NewPeer(Config{
+	host, err := NewPeer(Config{LoopbackOnly: true, 
 		ICEServers:    nil, // host-local candidates suffice in-process
 		CommandBuffer: 8,
 		now:           func() time.Time { return fixedNow },
@@ -37,7 +37,7 @@ func TestLoopback(t *testing.T) {
 	defer host.Close()
 
 	// Browser side: a plain PeerConnection (answerer).
-	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	browser, err := NewLoopbackPeerConnection()
 	if err != nil {
 		t.Fatalf("browser pc: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestLoopback(t *testing.T) {
 // TestAudioTrackGating verifies the Opus track is created only when EnableAudio
 // is set, and that WriteAudioSample is a safe no-op on a video-only peer.
 func TestAudioTrackGating(t *testing.T) {
-	videoOnly, err := NewPeer(Config{ICEServers: nil})
+	videoOnly, err := NewPeer(Config{LoopbackOnly: true, ICEServers: nil})
 	if err != nil {
 		t.Fatalf("NewPeer (video-only): %v", err)
 	}
@@ -185,7 +185,7 @@ func TestAudioTrackGating(t *testing.T) {
 		t.Fatalf("WriteAudioSample on video-only peer should be a no-op, got %v", err)
 	}
 
-	withAudio, err := NewPeer(Config{ICEServers: nil, EnableAudio: true})
+	withAudio, err := NewPeer(Config{LoopbackOnly: true, ICEServers: nil, EnableAudio: true})
 	if err != nil {
 		t.Fatalf("NewPeer (audio): %v", err)
 	}
@@ -202,13 +202,13 @@ func TestLoopbackAudio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	host, err := NewPeer(Config{ICEServers: nil, EnableAudio: true})
+	host, err := NewPeer(Config{LoopbackOnly: true, ICEServers: nil, EnableAudio: true})
 	if err != nil {
 		t.Fatalf("NewPeer: %v", err)
 	}
 	defer host.Close()
 
-	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	browser, err := NewLoopbackPeerConnection()
 	if err != nil {
 		t.Fatalf("browser pc: %v", err)
 	}
@@ -285,11 +285,14 @@ func TestLoopbackAudio(t *testing.T) {
 
 // TestKeyframeGating verifies WriteSample drops packets until the first keyframe.
 func TestKeyframeGating(t *testing.T) {
-	p, err := NewPeer(Config{ICEServers: nil})
+	p, err := NewPeer(Config{LoopbackOnly: true, ICEServers: nil})
 	if err != nil {
 		t.Fatalf("NewPeer: %v", err)
 	}
 	defer p.Close()
+	p.vmu.Lock()
+	p.mediaUp = true // as if connected; gating only applies to a live peer
+	p.vmu.Unlock()
 
 	// Delta before any keyframe: dropped, no error, seenKeyframe stays false.
 	if err := p.WriteSample(core.EncodedPacket{Data: []byte{0}, IsKeyframe: false}, DefaultSampleDuration); err != nil {

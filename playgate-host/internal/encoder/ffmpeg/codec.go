@@ -62,16 +62,36 @@ type hwInitArgs interface {
 }
 
 // rateControlArgs returns the bitrate flags shared by every codec: a hard target
-// + maxrate with a small bufsize for low latency. Centralised so every codec
-// applies the same low-latency rate-control discipline (and so ABR bitrate
-// changes are honoured identically).
+// + maxrate with a very small VBV buffer (about two frames' worth of bits:
+// bitrate/fps*2). The VBV size bounds how large any single frame, notably an
+// IDR, can be: a smaller buffer means smaller IDR spikes, fewer packets burst
+// onto the wire at once and lower end-to-end latency, at some cost in quality
+// on complex scenes. Centralised so every codec applies the same low-latency
+// rate-control discipline (and so ABR bitrate changes are honoured identically).
 func rateControlArgs(o Options) []string {
 	br := strconv.Itoa(o.Bitrate)
 	return []string{
 		"-b:v", br,
 		"-maxrate", br,
-		"-bufsize", strconv.Itoa(o.Bitrate / 2), // small buffer = low latency
+		"-bufsize", strconv.Itoa(vbvBufsize(o.Bitrate, o.FPS)),
 	}
+}
+
+// minBufsize is the floor for -bufsize in bits, so absurdly low bitrates or
+// high frame rates never yield a buffer encoders reject or choke on.
+const minBufsize = 10_000
+
+// vbvBufsize returns the VBV buffer size in bits: bitrate/fps*2 (about two
+// frames). fps <= 0 is treated as 30.
+func vbvBufsize(bitrate, fps int) int {
+	if fps <= 0 {
+		fps = 30
+	}
+	b := bitrate / fps * 2
+	if b < minBufsize {
+		b = minBufsize
+	}
+	return b
 }
 
 // gopArgs returns the GOP / no-B-frame flags shared by every codec. Short GOP +
@@ -104,7 +124,10 @@ func (V4L2M2M) OutputArgs(o Options) []string {
 	// the encoder converts. No preset/tune: those are x264-only.
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
-	args = append(args, "-pix_fmt", "yuv420p")
+	// 578 = Constrained Baseline (profile_idc 66 + constraint_set1), matching the
+	// profile-level-id the rtc layer negotiates. This encoder takes the generic
+	// numeric -profile only.
+	args = append(args, "-profile:v", "578", "-pix_fmt", "yuv420p")
 	return args
 }
 
@@ -141,8 +164,9 @@ func (VAAPI) OutputArgs(o Options) []string {
 	args := []string{"-c:v", CodecVAAPI}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)
-	// VA-API low-latency: CBR rate control mode 2, no look-ahead.
-	args = append(args, "-rc_mode", "CBR")
+	// VA-API low-latency: CBR rate control mode 2, no look-ahead. Constrained
+	// Baseline matches the profile-level-id the rtc layer negotiates.
+	args = append(args, "-rc_mode", "CBR", "-profile:v", "constrained_baseline")
 	return args
 }
 
@@ -167,6 +191,9 @@ func (NVENC) OutputArgs(o Options) []string {
 		"-rc", "cbr", // constant bitrate for predictable bandwidth
 		"-zerolatency", "1",
 		"-delay", "0",
+		// nvenc's baseline is Constrained Baseline, matching the profile-level-id
+		// the rtc layer negotiates.
+		"-profile:v", "baseline",
 	}
 	args = append(args, rateControlArgs(o)...)
 	args = append(args, gopArgs(o)...)

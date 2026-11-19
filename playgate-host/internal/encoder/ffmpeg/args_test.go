@@ -72,9 +72,12 @@ func TestBuildArgsYUYV(t *testing.T) {
 		t.Error("output should be yuv420p for decoder compatibility")
 	}
 
-	// Output container: raw h264 annex-b on pipe:1.
-	if !hasPair(args, "-f", "h264") {
-		t.Error("output format should be h264")
+	// Output container: FLV (length-framed access units) on pipe:1.
+	if !hasPair(args, "-f", "flv") {
+		t.Error("output format should be flv")
+	}
+	if !hasPair(args, "-flush_packets", "1") {
+		t.Error("output must be flushed per packet")
 	}
 	if args[len(args)-1] != "pipe:1" {
 		t.Errorf("last arg should be pipe:1, got %q", args[len(args)-1])
@@ -146,8 +149,9 @@ func TestBuildArgsZeroLatencyDefaults(t *testing.T) {
 	if !hasPair(args, "-bf", "0") {
 		t.Error("default should disable B-frames")
 	}
-	if !hasFlag(args, "-fflags") || !hasPair(args, "-fflags", "nobuffer") {
-		t.Error("default should set -fflags nobuffer")
+	// nobuffer makes ffmpeg discard the first frame (see BuildArgs).
+	if hasFlag(args, "-fflags") {
+		t.Error("default must not set -fflags nobuffer")
 	}
 }
 
@@ -173,12 +177,47 @@ func TestLibX264Name(t *testing.T) {
 	}
 }
 
-// TestBufsizeIsHalfBitrate documents the low-latency rate-control choice.
-func TestBufsizeIsHalfBitrate(t *testing.T) {
+// TestBufsizeIsTwoFrames documents the low-latency rate-control choice.
+func TestBufsizeIsTwoFrames(t *testing.T) {
 	o := DefaultOptions(1280, 720, 30, core.PixelFormatYUYV)
 	o.Bitrate = 6_000_000
 	args := (LibX264{}).OutputArgs(o.normalise())
-	if !hasPair(args, "-bufsize", "3000000") {
-		t.Errorf("bufsize should be half of bitrate; args: %s", strings.Join(args, " "))
+	if !hasPair(args, "-bufsize", "400000") {
+		t.Errorf("bufsize should be bitrate/fps*2; args: %s", strings.Join(args, " "))
+	}
+}
+
+func TestVBVBufsizeGuards(t *testing.T) {
+	if got := vbvBufsize(6_000_000, 60); got != 200_000 {
+		t.Errorf("60fps bufsize = %d, want 200000", got)
+	}
+	if got := vbvBufsize(6_000_000, 0); got != 400_000 {
+		t.Errorf("fps<=0 should be treated as 30, got %d", got)
+	}
+	if got := vbvBufsize(100_000, 60); got != minBufsize {
+		t.Errorf("tiny bitrate should clamp to %d, got %d", minBufsize, got)
+	}
+}
+
+func TestIntraRefreshArgs(t *testing.T) {
+	o := DefaultOptions(1280, 720, 30, core.PixelFormatYUYV)
+	args, err := BuildArgs(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFlag(args, "-intra-refresh") {
+		t.Error("-intra-refresh present while disabled")
+	}
+	o.IntraRefresh = true
+	args, err = BuildArgs(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPair(args, "-intra-refresh", "1") {
+		t.Errorf("missing -intra-refresh 1: %v", args)
+	}
+	o.Codec = NVENC{}
+	if _, err := BuildArgs(o); err == nil {
+		t.Error("intra refresh with non-libx264 codec must be rejected")
 	}
 }
