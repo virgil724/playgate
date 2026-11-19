@@ -32,7 +32,7 @@ func encoderInputFormat(cfg config.Config) (core.PixelFormat, error) {
 	switch cfg.Capture.Source {
 	case config.CaptureSynthetic:
 		return core.PixelFormatYUYV, nil
-	case config.CaptureTestSrc:
+	case config.CaptureTestSrc, config.CaptureDShow:
 		return core.PixelFormatNV12, nil
 	default:
 		return v4l2.ParsePixelFormat(cfg.Capture.Format)
@@ -132,6 +132,7 @@ func buildAudio(log *slog.Logger, cfg config.Config) AudioSource {
 		SampleRate: cfg.Audio.SampleRate,
 		Channels:   cfg.Audio.Channels,
 		Bitrate:    cfg.Audio.Bitrate,
+		Format:     cfg.Audio.Format,
 	})
 }
 
@@ -173,6 +174,14 @@ func buildCapture(log *slog.Logger, cfg config.Config) (core.CaptureSource, erro
 			FPS:        cfg.Capture.FPS,
 			FontFile:   cfg.Capture.TestSrc.FontFile,
 			TextFile:   cfg.Overlay.TextFile,
+		})
+	case config.CaptureDShow:
+		return testsrc.New(log, testsrc.Config{
+			FFmpegPath:  cfg.Encoder.FFmpegPath,
+			Width:       cfg.Capture.Width,
+			Height:      cfg.Capture.Height,
+			FPS:         cfg.Capture.FPS,
+			DShowDevice: cfg.Capture.Device,
 		})
 	case config.CaptureV4L2:
 		pixfmt, err := v4l2.ParsePixelFormat(cfg.Capture.Format)

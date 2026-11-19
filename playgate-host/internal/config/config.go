@@ -34,6 +34,9 @@ const (
 	// CaptureTestSrc runs ffmpeg's lavfi testsrc2 with frame-counter and
 	// input-overlay text burned in (dev/diagnostics; needs ffmpeg).
 	CaptureTestSrc = "testsrc"
+	// CaptureDShow reads capture.device through ffmpeg's DirectShow input
+	// (a capture card on Windows; needs ffmpeg).
+	CaptureDShow = "dshow"
 )
 
 // Input target kinds.
@@ -203,8 +206,13 @@ const (
 type AudioConfig struct {
 	// Enabled turns on audio capture and adds an Opus track to each viewer peer.
 	Enabled bool `yaml:"enabled"`
-	// Device is the ALSA capture device, e.g. "default" or "hw:CARD=MS2109,DEV=0".
+	// Device is the capture device: an ALSA device on Linux, e.g. "default" or
+	// "hw:CARD=MS2109,DEV=0", or a DirectShow audio device name on Windows,
+	// e.g. "HDMI (Live Gamer Ultra-Audio)".
 	Device string `yaml:"device"`
+	// Format is the ffmpeg audio input: "alsa" or "dshow". Empty picks by OS
+	// (dshow on Windows, alsa elsewhere).
+	Format string `yaml:"format"`
 	// SampleRate / Channels describe the ALSA capture format. Opus output is always
 	// 48 kHz stereo on the wire.
 	SampleRate int `yaml:"sample_rate"`
@@ -471,9 +479,13 @@ func Load(path string) (Config, error) {
 // intentionally light for T1; downstream modules add their own checks.
 func (c Config) Validate() error {
 	switch c.Capture.Source {
-	case "", CaptureV4L2, CaptureSynthetic, CaptureTestSrc:
+	case "", CaptureV4L2, CaptureSynthetic, CaptureTestSrc, CaptureDShow:
 	default:
-		return fmt.Errorf("capture source must be %q, %q or %q, got %q", CaptureV4L2, CaptureSynthetic, CaptureTestSrc, c.Capture.Source)
+		return fmt.Errorf("capture source must be %q, %q, %q or %q, got %q",
+			CaptureV4L2, CaptureDShow, CaptureSynthetic, CaptureTestSrc, c.Capture.Source)
+	}
+	if c.Capture.Source == CaptureDShow && c.Capture.Device == "" {
+		return fmt.Errorf("capture.device must name the DirectShow video device for source %q", CaptureDShow)
 	}
 	if c.Capture.Width <= 0 || c.Capture.Height <= 0 {
 		return fmt.Errorf("capture resolution must be positive, got %dx%d", c.Capture.Width, c.Capture.Height)
@@ -536,6 +548,11 @@ func (c Config) Validate() error {
 	if c.Audio.Enabled {
 		if c.Audio.Device == "" {
 			return fmt.Errorf("audio.enabled requires a device")
+		}
+		switch c.Audio.Format {
+		case "", "alsa", "dshow":
+		default:
+			return fmt.Errorf("audio format must be \"alsa\" or \"dshow\", got %q", c.Audio.Format)
 		}
 		if c.Audio.SampleRate <= 0 || c.Audio.Channels <= 0 {
 			return fmt.Errorf("audio sample_rate and channels must be positive when enabled (sample_rate=%d channels=%d)", c.Audio.SampleRate, c.Audio.Channels)

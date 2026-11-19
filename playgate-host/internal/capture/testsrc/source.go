@@ -6,6 +6,10 @@
 // ffmpeg writes raw NV12 frames to stdout; Source slices them into
 // core.VideoFrame values. It needs an ffmpeg binary but no capture hardware.
 //
+// With Config.DShowDevice set, the same pipeline captures a real device
+// through ffmpeg's DirectShow input instead (capture.source: dshow), which is
+// how a capture card is read on Windows; no overlays are drawn then.
+//
 // Ownership: Source owns the frames and errs channels. Run is the sole writer
 // and closes both exactly once on exit, per the core channel contract.
 package testsrc
@@ -45,6 +49,16 @@ type Config struct {
 	FontFile string
 	// TextFile is the file drawtext reloads for the input overlay.
 	TextFile string
+	// DShowDevice, when set, captures this DirectShow video device (e.g.
+	// "Live Gamer Ultra-Video") instead of generating a test picture.
+	DShowDevice string
+}
+
+func (c Config) kind() string {
+	if c.DShowDevice != "" {
+		return "dshow"
+	}
+	return "testsrc"
 }
 
 // Validate checks the config.
@@ -54,6 +68,12 @@ func (c Config) Validate() error {
 	}
 	if c.FPS <= 0 {
 		return fmt.Errorf("testsrc capture: fps must be positive, got %d", c.FPS)
+	}
+	if c.DShowDevice != "" {
+		if strings.ContainsRune(c.DShowDevice, '"') {
+			return errors.New("dshow capture: device name must not contain quotes")
+		}
+		return nil
 	}
 	if c.TextFile == "" {
 		return errors.New("testsrc capture: overlay text file must be set")
@@ -77,6 +97,18 @@ func EscapeFilterPath(p string) string {
 // already be absolute.
 func BuildArgs(c Config, textFile string) []string {
 	size := fmt.Sprintf("%dx%d", c.Width, c.Height)
+	if c.DShowDevice != "" {
+		// Ask the device for NV12 directly so ffmpeg only copies frames; a
+		// small real-time buffer keeps a stalled reader from queueing seconds
+		// of old video.
+		return []string{
+			"-hide_banner", "-nostdin", "-loglevel", "warning",
+			"-f", "dshow", "-rtbufsize", "16M",
+			"-video_size", size, "-framerate", strconv.Itoa(c.FPS), "-pixel_format", "nv12",
+			"-i", "video=" + c.DShowDevice,
+			"-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1",
+		}
+	}
 	fontOpt := ""
 	if c.FontFile != "" {
 		fontOpt = "fontfile='" + EscapeFilterPath(c.FontFile) + "':"
@@ -131,7 +163,7 @@ func New(log *slog.Logger, cfg Config) (*Source, error) {
 		return nil, fmt.Errorf("testsrc capture: %w", err)
 	}
 	return &Source{
-		log:    log.With("module", "capture", "source", "testsrc"),
+		log:    log.With("module", "capture", "source", cfg.kind()),
 		cfg:    cfg,
 		text:   abs,
 		frames: make(chan core.VideoFrame, frameBufferSize),
@@ -152,7 +184,12 @@ func (s *Source) Errors() <-chan error { return s.errs }
 // sure the overlay text file exists (drawtext fails if it does not).
 func (s *Source) Start(_ context.Context) error {
 	if _, err := exec.LookPath(s.cfg.FFmpegPath); err != nil {
-		return fmt.Errorf("testsrc capture: ffmpeg not found: %w", err)
+		return fmt.Errorf("%s capture: ffmpeg not found: %w", s.cfg.kind(), err)
+	}
+	if s.cfg.DShowDevice != "" {
+		s.log.Info("dshow capture started", "device", s.cfg.DShowDevice,
+			"width", s.cfg.Width, "height", s.cfg.Height, "fps", s.cfg.FPS)
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(s.text), 0o755); err != nil {
 		return fmt.Errorf("testsrc capture: %w", err)
@@ -171,7 +208,7 @@ func (s *Source) Start(_ context.Context) error {
 func (s *Source) Run(ctx context.Context) error {
 	defer close(s.frames)
 	defer close(s.errs)
-	defer s.log.Info("testsrc capture stopped")
+	defer s.log.Info("capture stopped")
 
 	cmd := exec.CommandContext(ctx, s.cfg.FFmpegPath, BuildArgs(s.cfg, s.text)...)
 	var stderr tailBuffer
@@ -181,7 +218,7 @@ func (s *Source) Run(ctx context.Context) error {
 		return err
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("testsrc capture: start ffmpeg: %w", err)
+		return fmt.Errorf("%s capture: start ffmpeg: %w", s.cfg.kind(), err)
 	}
 
 	frameSize := s.cfg.Width * s.cfg.Height * 3 / 2
@@ -203,7 +240,7 @@ func (s *Source) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	err = fmt.Errorf("testsrc capture: ffmpeg exited (read: %v, wait: %v): %s", readErr, waitErr, strings.TrimSpace(stderr.String()))
+	err = fmt.Errorf("%s capture: ffmpeg exited (read: %v, wait: %v): %s", s.cfg.kind(), readErr, waitErr, strings.TrimSpace(stderr.String()))
 	select {
 	case s.errs <- err:
 	default:
