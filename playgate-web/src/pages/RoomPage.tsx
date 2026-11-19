@@ -481,17 +481,26 @@ export function RoomPage() {
     return () => clearInterval(id);
   }, [padName, currentInputState]);
   useEffect(() => {
-    const refresh = () => {
+    const refresh = (logWhenNone: boolean) => {
       const pads = navigator.getGamepads?.() ?? [];
       const gp = pads.find((p) => p?.connected) ?? null;
       setPadName(gp ? gp.id.slice(0, 32) : null);
-      dlog("page", gp ? `gamepad connected: ${gp.id}` : "gamepad disconnected");
+      if (gp) {
+        dlog("page", `gamepad connected: ${gp.id}`);
+      } else if (logWhenNone) {
+        dlog("page", "gamepad disconnected");
+      }
     };
-    window.addEventListener("gamepadconnected", refresh);
-    window.addEventListener("gamepaddisconnected", refresh);
+    const onEvent = () => refresh(true);
+    // Detect a gamepad that was already connected before this page loaded so
+    // the 4 ms polling timer above starts immediately instead of waiting for
+    // a future gamepadconnected event.
+    refresh(false);
+    window.addEventListener("gamepadconnected", onEvent);
+    window.addEventListener("gamepaddisconnected", onEvent);
     return () => {
-      window.removeEventListener("gamepadconnected", refresh);
-      window.removeEventListener("gamepaddisconnected", refresh);
+      window.removeEventListener("gamepadconnected", onEvent);
+      window.removeEventListener("gamepaddisconnected", onEvent);
     };
   }, []);
 
