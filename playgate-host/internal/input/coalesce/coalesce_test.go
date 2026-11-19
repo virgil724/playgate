@@ -1,4 +1,4 @@
-package nxbt
+package coalesce
 
 import (
 	"testing"
@@ -8,14 +8,14 @@ import (
 )
 
 // drain polls every command out of c, waiting out the rate limit between them.
-func drain(c *coalescer) []core.InputCommand {
+func drain(c *Coalescer) []core.InputCommand {
 	var out []core.InputCommand
 	for {
-		if cmd, ok := c.poll(); ok {
+		if cmd, ok := c.Poll(); ok {
 			out = append(out, cmd)
 			continue
 		}
-		d := c.untilReady()
+		d := c.UntilReady()
 		if d < 0 {
 			return out
 		}
@@ -26,14 +26,14 @@ func drain(c *coalescer) []core.InputCommand {
 // A press and its release arriving inside one rate interval must both reach the
 // daemon; the release must not overwrite the unsent press.
 func TestCoalescerKeepsTapInsideOneInterval(t *testing.T) {
-	c := newCoalescer(50) // 20 ms interval
-	c.push(core.InputCommand{})
-	if _, ok := c.poll(); !ok {
+	c := New(50) // 20 ms interval
+	c.Push(core.InputCommand{})
+	if _, ok := c.Poll(); !ok {
 		t.Fatal("first command should be sendable immediately")
 	}
 
-	c.push(core.InputCommand{Buttons: core.ButtonA})
-	c.push(core.InputCommand{})
+	c.Push(core.InputCommand{Buttons: core.ButtonA})
+	c.Push(core.InputCommand{})
 
 	got := drain(c)
 	if len(got) != 2 || got[0].Buttons != core.ButtonA || got[1].Buttons != 0 {
@@ -44,13 +44,13 @@ func TestCoalescerKeepsTapInsideOneInterval(t *testing.T) {
 // Two taps of the same button inside one interval keep the release between
 // them: pending [A, 0] plus a new A must not turn into [A, A].
 func TestCoalescerKeepsReleaseBetweenRepeatedPresses(t *testing.T) {
-	c := newCoalescer(50)
-	c.push(core.InputCommand{})
-	c.poll()
+	c := New(50)
+	c.Push(core.InputCommand{})
+	c.Poll()
 
-	c.push(core.InputCommand{Buttons: core.ButtonA})
-	c.push(core.InputCommand{})
-	c.push(core.InputCommand{Buttons: core.ButtonA})
+	c.Push(core.InputCommand{Buttons: core.ButtonA})
+	c.Push(core.InputCommand{})
+	c.Push(core.InputCommand{Buttons: core.ButtonA})
 
 	got := drain(c)
 	if len(got) != 3 || got[0].Buttons != core.ButtonA || got[1].Buttons != 0 || got[2].Buttons != core.ButtonA {
@@ -60,12 +60,12 @@ func TestCoalescerKeepsReleaseBetweenRepeatedPresses(t *testing.T) {
 
 // Stick-only updates still coalesce to the latest position.
 func TestCoalescerCoalescesStickUpdates(t *testing.T) {
-	c := newCoalescer(50)
-	c.push(core.InputCommand{})
-	c.poll()
+	c := New(50)
+	c.Push(core.InputCommand{})
+	c.Poll()
 
 	for i := 1; i <= 10; i++ {
-		c.push(core.InputCommand{LX: float32(i) / 10})
+		c.Push(core.InputCommand{LX: float32(i) / 10})
 	}
 	got := drain(c)
 	if len(got) != 1 || got[0].LX != 1 {
@@ -76,12 +76,12 @@ func TestCoalescerCoalescesStickUpdates(t *testing.T) {
 // A press arriving while a stick-only update is waiting replaces that update
 // (its stick position is newer anyway) rather than queueing behind it.
 func TestCoalescerPressNotQueuedBehindStickUpdate(t *testing.T) {
-	c := newCoalescer(50)
-	c.push(core.InputCommand{})
-	c.poll()
+	c := New(50)
+	c.Push(core.InputCommand{})
+	c.Poll()
 
-	c.push(core.InputCommand{LX: 0.5})
-	c.push(core.InputCommand{LX: 0.6, Buttons: core.ButtonA})
+	c.Push(core.InputCommand{LX: 0.5})
+	c.Push(core.InputCommand{LX: 0.6, Buttons: core.ButtonA})
 
 	got := drain(c)
 	if len(got) != 1 || got[0].Buttons != core.ButtonA || got[0].LX != 0.6 {
@@ -91,12 +91,12 @@ func TestCoalescerPressNotQueuedBehindStickUpdate(t *testing.T) {
 
 // The queue is bounded: a burst of distinct button states keeps only the newest.
 func TestCoalescerBoundsQueuedEdges(t *testing.T) {
-	c := newCoalescer(50)
-	c.push(core.InputCommand{})
-	c.poll()
+	c := New(50)
+	c.Push(core.InputCommand{})
+	c.Poll()
 
 	for i := 1; i <= 20; i++ {
-		c.push(core.InputCommand{Buttons: uint32(i)})
+		c.Push(core.InputCommand{Buttons: uint32(i)})
 	}
 	got := drain(c)
 	if len(got) != maxPendingEdges || got[len(got)-1].Buttons != 20 {
