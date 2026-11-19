@@ -189,7 +189,9 @@ export class VideoTransportController {
     });
     this.pipeline = pipeline;
     this.startRttPoll();
-    void pipeline.start().catch((err) => this.fallback(`pipeline start failed: ${String(err)}`));
+    void pipeline.start().catch((err) => {
+      if (gen === this.generation) this.fallback(`pipeline start failed: ${String(err)}`);
+    });
   }
 
   private startRttPoll(): void {

@@ -216,6 +216,7 @@ export class Reassembler {
   /** Forces "drop deltas until KEY" (decoder error, backlog reset). */
   requireKey(): void {
     this.needKey = true;
+    this.gaps.clear(); // the deltas they stand for are abandoned
     for (const [id, s] of this.slots) if (!s.key) this.slots.delete(id);
   }
 
@@ -340,6 +341,10 @@ export class Reassembler {
         if (s.key) continue;
         t = s.completeMs + this.keyFrameTimeoutMs();
       } else if (next !== null && s.frameId === next) continue;
+      // With NACK a later complete frame waits for the gap's own deadline
+      // (nextNackDeadline), not the reorder window; scheduling that window
+      // here would fire poll() in a 0 ms loop once it has passed.
+      else if (this.nackOn) continue;
       else t = s.completeMs + this.reorderWaitMs();
       if (best === null || t < best) best = t;
     }
@@ -364,9 +369,14 @@ export class Reassembler {
       if (s.completeMs !== null || s.nacks >= max) continue;
       take(s.nacks === 0 ? s.firstMs + this.o.nackDelayMs!() : s.lastNackMs + this.retryMs());
     }
-    for (const g of this.gaps.values()) {
+    // Gaps are only NACKed while deltas are deliverable (see nackScan), and
+    // process() only declares the gap at `next` lost; a deadline for any other
+    // gap would keep poll() spinning without changing anything.
+    if (this.needKey) return best;
+    const next = this.nextId();
+    for (const [id, g] of this.gaps) {
       if (g.nacks < max) take(g.nacks === 0 ? g.noticedMs + this.o.nackDelayMs!() : g.lastNackMs + this.retryMs());
-      take(g.noticedMs + this.frameTimeoutMs());
+      if (id === next) take(g.noticedMs + this.frameTimeoutMs());
     }
     return best;
   }
@@ -385,7 +395,9 @@ export class Reassembler {
     const retry = this.retryMs();
     for (const s of this.slots.values()) {
       if (s.completeMs !== null || s.nacks >= max) continue;
-      if (s.count + s.parityCount >= s.k) continue; // recovery will finish it
+      // No "parity will finish it" skip: RS recovers as soon as count + parity
+      // reaches k (so such a slot is already complete), and XOR cannot when two
+      // fragments of one group are missing.
       if (now - (s.nacks === 0 ? s.firstMs : s.lastNackMs) < (s.nacks === 0 ? delay : retry)) continue;
       const missing: number[] = [];
       for (let i = 0; i < s.k; i++) if (!s.have[i]) missing.push(i);
@@ -404,6 +416,7 @@ export class Reassembler {
         }
       }
     }
+    if (this.needKey) return; // lose()/requireKey() cleared the gaps
     for (const [id, g] of this.gaps) {
       if (this.lastId !== null && serialDiff32(id, this.lastId) <= 0) {
         this.gaps.delete(id);

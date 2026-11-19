@@ -71,6 +71,13 @@ export function HostPage() {
     if (apiKey) void refreshRooms();
   }, [apiKey, refreshRooms]);
 
+  // Codes and tokens shown belong to one room; drop them when it changes so
+  // the previous room's codes are never shown (or copied) under the new one.
+  useEffect(() => {
+    setIssuedCodes([]);
+    setTokens([]);
+  }, [selected]);
+
   // Poll selected room status + tokens every 3s.
   useEffect(() => {
     if (!authed || !selected) return;
@@ -97,6 +104,8 @@ export function HostPage() {
     setAuthed(false);
     setRooms([]);
     setSelected(null);
+    setTokens([]);
+    setIssuedCodes([]);
   };
 
   const register = async () => {
@@ -186,8 +195,11 @@ export function HostPage() {
     URL.revokeObjectURL(url);
   };
 
-  const copy = (text: string) => {
-    void navigator.clipboard?.writeText(text);
+  // navigator.clipboard is missing outside secure contexts (plain-HTTP LAN
+  // access), and writeText rejects without permission; neither may throw.
+  const copy = (text: string): Promise<boolean> => {
+    const w = navigator.clipboard?.writeText(text);
+    return w ? w.then(() => true, () => false) : Promise.resolve(false);
   };
 
   // ---- Not logged in ----
@@ -199,6 +211,8 @@ export function HostPage() {
           <strong>Sign in with your API key</strong>
           <div className="row" style={{ marginTop: 8 }}>
             <input
+              type="password"
+              autoComplete="off"
               placeholder="host API key"
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
@@ -254,7 +268,8 @@ export function HostPage() {
           <button onClick={() => setShowKey((v) => !v)}>{showKey ? "Hide" : "Show"}</button>
           <button
             onClick={() => {
-              void navigator.clipboard.writeText(apiKey).then(() => {
+              void copy(apiKey).then((ok) => {
+                if (!ok) return;
                 setKeyCopied(true);
                 setTimeout(() => setKeyCopied(false), 1500);
               });

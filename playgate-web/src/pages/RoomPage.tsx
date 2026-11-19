@@ -236,7 +236,9 @@ export function RoomPage() {
       setQueuePos(null);
       // The session is over and the JWT is spent — drop it so the redeem
       // panel reappears and the viewer can enter a fresh code without
-      // reloading the page. The connection itself stays up (view-only).
+      // reloading the page. The connection itself stays up (view-only), and
+      // must not present the spent token again when it reconnects.
+      connRef.current?.clearAuth();
       setSession(null);
     }
   }, []);
@@ -247,6 +249,11 @@ export function RoomPage() {
   // the connection we just closed.
   useEffect(() => {
     if (!roomId) return;
+    // A new room starts with no control; the host re-sends "open" or
+    // "granted" if this one has it.
+    setOpenRoom(false);
+    grantedRef.current = false;
+    setGranted(false);
     const sess = sessionRef.current;
     dlog("page", `starting connection room=${roomId} ${sess ? "with session token" : "view-only (no token)"}`);
     const signaling = new SignalingClient({

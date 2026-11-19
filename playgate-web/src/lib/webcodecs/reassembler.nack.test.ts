@@ -84,6 +84,28 @@ describe("Reassembler FRAG_NACK", () => {
     expect(losses.map((l) => l.lostId)).toEqual([2]);
   });
 
+  it("never schedules a deadline that is already past while waiting on a gap", () => {
+    const { r, whole } = setup();
+    whole(1, 15, 0, true);
+    whole(3, 15, 32); // gap at 2, noticed at 32
+    for (const t of [40, 42, 60, 82, 100]) {
+      r.poll(t);
+      const d = r.nextDeadline();
+      expect(d === null || d > t).toBe(true);
+    }
+    expect(r.nextDeadline()).toBe(132); // the gap's loss deadline
+  });
+
+  it("stops NACKing gaps once a keyframe is required", () => {
+    const { r, nacks, whole } = setup();
+    whole(1, 15, 0, true);
+    whole(3, 15, 32);
+    r.requireKey();
+    for (let t = 33; t <= 200; t++) r.poll(t);
+    expect(nacks).toEqual([]);
+    expect(r.nextDeadline()).toBeNull();
+  });
+
   it("schedules a poll for the NACK deadline", () => {
     const { r, whole } = setup();
     whole(1, 15, 0, true);
