@@ -165,3 +165,18 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 - 電腦 Chrome 的分頁要在前景。同一個設定下，分頁不在前景時量到 79～114ms。
 - 手機在交替量測之前，有兩輪新版量到 211 和 146ms，原因沒查到。當時逐段拆開量：網路、host 送出佇列、手機解碼和顯示都正常，但加總只有約 100ms。之後的交替量測很穩定（89～97ms）。推測是 Wi-Fi 狀況，或頁面剛載入時的狀態，需要再觀察。
 - 手機頁面剛載入的頭幾十秒，量測區的雜訊偶爾會很高，兩個版本都會。腳本現在會自動重試校正。
+
+## 輸入端：Switch 2 gateway（待實機量測）
+
+`input.target: gateway` 透過 USB serial 驅動 ESP32-C6 gateway，接法見 `docs/switch2-gateway.md`。目前只有單元測試，還沒有實機數字。
+
+拆成兩段來看：
+
+- **host 內部**：metrics 的 `input` 段，從 DataChannel 解出指令到寫進 serial。主要是限速的等待，`rate_hz: 90` 最多約 11ms。
+- **gateway 裝置內**：metrics 的 `daemon` 段，取自 gateway status 回報的 `last_receive_to_submit_us`。README 實測 5–7ms，不含 BLE 空中傳輸。
+
+端到端量法：
+- 擷取卡拍 Switch 2 畫面，挑一個按下就有明顯變化的畫面，例如主選單游標移動。
+- 用 `scripts/latency/` 的像素偵測，在游標區域量「網頁按下 → 畫面變化」。
+- 結果減掉「只看影像」的延遲，就是輸入路徑的成本。
+- 再換成 `input.target: nxbt` 用同樣方法量一次，兩者對比。

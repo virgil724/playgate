@@ -120,9 +120,17 @@ webrtc:
 
 # Controller input target (T5).
 input:
-  target: nxbt                    # nxbt (production, Linux) | log (dev, any OS)
-  socket_path: /run/nxbt/nxbt.sock
-  rate_hz: 120                    # max commands/second forwarded; 0 disables limiting
+  # nxbt (Bluetooth via the nxbt daemon, Linux) | gateway (Switch 2 gateway over
+  # USB serial, any OS) | log (dev, any OS) | overlay (testsrc picture)
+  target: nxbt
+  socket_path: /run/nxbt/nxbt.sock  # nxbt only
+  rate_hz: 120                    # nxbt only: max commands/second forwarded; 0 disables limiting
+  # Switch 2 gateway (ESP32-C6 emulating a Pro Controller 2; see
+  # docs/switch2-gateway.md). Pair it with the console first, then plug it in.
+  gateway:
+    port: auto                    # auto = the single ESP32 USB Serial/JTAG port; or COM5, /dev/ttyACM0
+    rate_hz: 90                   # spaces button edges past the gateway's 100 Hz report tick
+    keepalive_ms: 40              # re-send a held state; the gateway neutralises after 100 ms of silence
   # disabled_buttons drops specific buttons so they are never sent to the Switch.
   # disabled_buttons:
   #   - home

@@ -63,6 +63,26 @@ func TestValidateCodec(t *testing.T) {
 	}
 }
 
+func TestValidateGatewayInput(t *testing.T) {
+	cfg := Default()
+	cfg.Input.Target = InputGateway
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("gateway defaults should validate: %v", err)
+	}
+	if cfg.Input.Gateway.Port != "auto" || cfg.Input.Gateway.RateHz != 90 || cfg.Input.Gateway.KeepaliveMS != 40 {
+		t.Errorf("gateway defaults = %+v", cfg.Input.Gateway)
+	}
+	cfg.Input.Gateway.KeepaliveMS = 100
+	if err := cfg.Validate(); err == nil {
+		t.Error("keepalive_ms 100 must be rejected (gateway times out at 100ms)")
+	}
+	cfg.Input.Gateway.KeepaliveMS = 40
+	cfg.Input.Gateway.RateHz = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("negative rate_hz must be rejected")
+	}
+}
+
 func TestValidateIntraRefresh(t *testing.T) {
 	cfg := Default()
 	cfg.Encoder.IntraRefresh = true

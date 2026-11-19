@@ -193,6 +193,11 @@ See `docker/compose.example.yaml` for a full Compose example.
 
 ## 3. playgate-host (Raspberry Pi / Linux capture machine)
 
+> **Switch 2 with the ESP32-C6 gateway?** Set `input.target: gateway` and plug
+> the gateway in over USB; nuxbt, BlueZ and the nxbt daemon are not needed.
+> See [switch2-gateway.md](switch2-gateway.md). The rest of this section
+> (capture, encoder, signaling) applies unchanged.
+
 ### Option A — One-click install script (recommended)
 
 The script handles everything: system packages, BlueZ reconfiguration, nuxbt

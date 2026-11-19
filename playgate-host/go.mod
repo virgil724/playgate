@@ -8,10 +8,13 @@ require (
 	github.com/pion/interceptor v0.1.45
 	github.com/pion/rtcp v1.2.16
 	github.com/pion/webrtc/v4 v4.2.15
+	go.bug.st/serial v1.6.4
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+require github.com/creack/goselect v0.1.2 // indirect
 
 require (
 	github.com/asticode/go-astikit v0.42.0 // indirect

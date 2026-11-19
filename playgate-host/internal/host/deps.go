@@ -15,6 +15,7 @@ import (
 	"github.com/playgate/playgate-host/internal/core"
 	"github.com/playgate/playgate-host/internal/encoder"
 	"github.com/playgate/playgate-host/internal/encoder/ffmpeg"
+	"github.com/playgate/playgate-host/internal/input/gateway"
 	"github.com/playgate/playgate-host/internal/input/logtarget"
 	"github.com/playgate/playgate-host/internal/input/nxbt"
 	"github.com/playgate/playgate-host/internal/input/overlay"
@@ -203,6 +204,14 @@ func buildInput(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (cor
 			nxbt.WithRateHz(cfg.Input.RateHz),
 			nxbt.WithLatencyHistogram(mc.Input),
 			nxbt.WithDaemonHistogram(mc.DaemonApply),
+		), nil
+	case config.InputGateway:
+		g := cfg.Input.Gateway
+		return gateway.New(log, g.Port,
+			gateway.WithRateHz(g.RateHz),
+			gateway.WithKeepalive(time.Duration(g.KeepaliveMS)*time.Millisecond),
+			gateway.WithLatencyHistogram(mc.Input),
+			gateway.WithApplyHistogram(mc.DaemonApply),
 		), nil
 	default:
 		return nil, fmt.Errorf("host: unknown input target %q", cfg.InputTargetKind())

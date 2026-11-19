@@ -45,6 +45,9 @@ const (
 	// InputOverlay writes the received controller state to overlay.text_file,
 	// which the testsrc capture source burns into the picture.
 	InputOverlay = "overlay"
+	// InputGateway drives the PlayGate Switch 2 gateway (ESP32-C6) over USB
+	// serial; see input.gateway.
+	InputGateway = "gateway"
 )
 
 // CaptureConfig configures the video capture source (T2: v4l2 / synthetic).
@@ -293,6 +296,21 @@ type InputConfig struct {
 	// DisabledButtons is a list of button names (e.g. "home", "capture", "plus")
 	// that will be silently dropped before forwarding to the target.
 	DisabledButtons []string `yaml:"disabled_buttons"`
+	// Gateway configures the Switch 2 gateway target (target: gateway).
+	Gateway GatewayConfig `yaml:"gateway"`
+}
+
+// GatewayConfig configures the PlayGate Switch 2 gateway input target.
+type GatewayConfig struct {
+	// Port is the serial port, e.g. "COM5" or "/dev/ttyACM0". "auto" (the
+	// default) picks the single Espressif USB Serial/JTAG port present.
+	Port string `yaml:"port"`
+	// RateHz spaces queued button edges; the default 90 keeps two edges out of
+	// one 100 Hz gateway report. 0 disables limiting.
+	RateHz int `yaml:"rate_hz"`
+	// KeepaliveMS is how often a held state is re-sent; it must stay well
+	// below the gateway's 100 ms input timeout.
+	KeepaliveMS int `yaml:"keepalive_ms"`
 }
 
 // SessionConfig configures the single-controller session gate (T9). When no
@@ -404,6 +422,7 @@ func Default() Config {
 			Target:     InputNXBT,
 			SocketPath: "/run/nxbt/nxbt.sock",
 			RateHz:     120,
+			Gateway:    GatewayConfig{Port: "auto", RateHz: 90, KeepaliveMS: 40},
 		},
 		Session: SessionConfig{
 			Enabled:            false,
@@ -535,9 +554,18 @@ func (c Config) Validate() error {
 		}
 	}
 	switch c.Input.Target {
-	case "", InputNXBT, InputLog, InputOverlay:
+	case "", InputNXBT, InputLog, InputOverlay, InputGateway:
 	default:
-		return fmt.Errorf("input target must be %q, %q or %q, got %q", InputNXBT, InputLog, InputOverlay, c.Input.Target)
+		return fmt.Errorf("input target must be %q, %q, %q or %q, got %q",
+			InputNXBT, InputGateway, InputLog, InputOverlay, c.Input.Target)
+	}
+	if c.Input.Target == InputGateway {
+		if c.Input.Gateway.RateHz < 0 {
+			return fmt.Errorf("input.gateway.rate_hz must be >= 0, got %d", c.Input.Gateway.RateHz)
+		}
+		if k := c.Input.Gateway.KeepaliveMS; k < 0 || k >= 100 {
+			return fmt.Errorf("input.gateway.keepalive_ms must be in [0,100) (the gateway neutralises after 100ms of silence), got %d", k)
+		}
 	}
 	if (c.Input.Target == InputOverlay || c.Capture.Source == CaptureTestSrc) && c.Overlay.TextFile == "" {
 		return fmt.Errorf("overlay.text_file must be set when using the overlay input target or testsrc capture")
