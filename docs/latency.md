@@ -264,13 +264,18 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 - 影像 `dshow`（`internal/capture/testsrc/source.go`）：加上 `-fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0`，`-rtbufsize` 依解析度縮為約 3 張（720p 為 `4M`）。
 - 音訊 `dshow`/Opus/Ogg（`internal/audio/opus/source.go`）：加上同樣的低延遲參數，並將 `audio_buffer_size`、`frame_duration`、`page_duration` 從 20ms 降至 **10ms**。
 
-| 項目（桌機 Chrome，剛重啟，n=30） | 修正前 | 修正後 | 改善 |
-|---|---|---|---|
-| 影像 p50（clean p50） | 156ms（157ms） | **126ms（133ms）** | **−24～30ms** |
-| 影像 p90 / max | 174 / 181ms | **137 / 148ms** | −37 / −33ms |
-| 聲音 p50（解碼端） | 250ms | **194ms** | **−56ms** |
-| 聲音 p90 / max | 263 / 274ms | **203 / 211ms** | −60 / −63ms |
-| 音畫差（音 − 影，clean p50） | +93ms | **+60ms** | **−33ms** |
+| 觀眾 | 項目（剛重啟，n=30） | 修正前 | 修正後（`8c4e115`） | 改善 |
+|---|---|---|---|---|
+| 桌機 Chrome | 影像 p50（clean p50） | 156ms（157ms） | **126ms（133ms）** | **−24～30ms** |
+| 桌機 Chrome | 影像 p90 / max | 174 / 181ms | **137 / 148ms** | −37 / −33ms |
+| 桌機 Chrome | 聲音 p50（解碼端） | 250ms | **194ms** | **−56ms** |
+| 桌機 Chrome | 聲音 p90 / max | 263 / 274ms | **203 / 211ms** | −60 / −63ms |
+| 桌機 Chrome | 音畫差（音 − 影，clean p50） | +93ms | **+60ms** | **−33ms** |
+| Pixel 10 Pro（Wi-Fi） | 影像 p50（clean p50） | 195ms（201ms） | **171ms（176ms）** | **−24～25ms** |
+| Pixel 10 Pro（Wi-Fi） | 影像 p90 / max | 241 / 295ms | **251 / 311ms** | +10 / +16ms（Wi-Fi 抖動） |
+| Pixel 10 Pro（Wi-Fi） | 聲音 p50（解碼端） | 350ms（前 5 次 263ms） | **279ms（前 5 次 247ms）** | **−71ms** |
+| Pixel 10 Pro（Wi-Fi） | 聲音 p90 / max | 370 / 375ms | **338 / 348ms** | −32 / −27ms |
+| Pixel 10 Pro（Wi-Fi） | 音畫差（音 − 影，p50） | +156ms | **+109ms（clean ~+92ms）** | **−47ms** |
 
 
 
