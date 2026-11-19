@@ -66,13 +66,27 @@ func TestWorseSampleRanksCongestionFirst(t *testing.T) {
 
 func TestRegistryRegisterUnregister(t *testing.T) {
 	r := newViewerStatsRegistry(nil)
-	r.Register("a", constStats{smp(0.1, time.Millisecond)})
+	src := &constStats{smp(0.1, time.Millisecond)}
+	r.Register("a", src)
 	if !r.Stats().Valid {
 		t.Fatal("expected valid with one viewer")
 	}
-	r.Unregister("a")
+	r.Unregister("a", src)
 	if r.Stats().Valid {
 		t.Fatal("expected invalid after unregister")
+	}
+}
+
+// A reconnecting viewer registers its new peer under the same id before the
+// old session unregisters; the stale Unregister must leave the new one alone.
+func TestRegistryStaleUnregisterKeepsNewPeer(t *testing.T) {
+	r := newViewerStatsRegistry(nil)
+	old, cur := &constStats{smp(0.1, time.Millisecond)}, &constStats{smp(0.1, time.Millisecond)}
+	r.Register("a", old)
+	r.Register("a", cur)
+	r.Unregister("a", old)
+	if !r.Stats().Valid {
+		t.Fatal("stale Unregister removed the reconnected viewer")
 	}
 }
 

@@ -80,9 +80,14 @@ func (r *viewerStatsRegistry) Register(id string, s StatsSource) {
 	r.mu.Unlock()
 }
 
-func (r *viewerStatsRegistry) Unregister(id string) {
+// Unregister removes id only while it still maps to s: a viewer that
+// reconnects registers its new peer under the same id before the old session's
+// deferred Unregister runs, and that must not drop the new peer.
+func (r *viewerStatsRegistry) Unregister(id string, s StatsSource) {
 	r.mu.Lock()
-	delete(r.viewers, id)
+	if cur, ok := r.viewers[id]; ok && cur == s {
+		delete(r.viewers, id)
+	}
 	r.mu.Unlock()
 }
 

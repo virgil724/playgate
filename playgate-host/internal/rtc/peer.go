@@ -613,7 +613,11 @@ func (p *Peer) wireConnState() {
 		if !p.mediaUp {
 			p.seenKeyframe = false // start again on an IDR after reconnecting
 		}
+		up := p.mediaUp
 		p.vmu.Unlock()
+		if p.vs != nil {
+			p.vs.setLinkUp(up)
+		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.closed {

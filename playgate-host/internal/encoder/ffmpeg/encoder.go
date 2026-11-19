@@ -273,10 +273,16 @@ func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err
 
 	var wg sync.WaitGroup
 	wg.Add(3)
+	// pipes tracks the stdout/stderr readers. os/exec forbids calling Wait
+	// before reads from StdoutPipe/StderrPipe complete (Wait closes them), so
+	// Wait runs only after both readers have hit EOF or stopped.
+	var pipes sync.WaitGroup
+	pipes.Add(2)
 
 	// Drain stderr so ffmpeg never blocks on a full stderr pipe; log lines.
 	go func() {
 		defer wg.Done()
+		defer pipes.Done()
 		sc := bufio.NewScanner(stderr)
 		for sc.Scan() {
 			e.log.Warn("ffmpeg", "msg", sc.Text())
@@ -295,6 +301,7 @@ func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err
 	readErr := make(chan error, 1)
 	go func() {
 		defer wg.Done()
+		defer pipes.Done()
 		err := e.readPackets(runCtx, stdout)
 		if err != nil && runCtx.Err() == nil {
 			e.log.Warn("ffmpeg output unreadable; stopping ffmpeg", "err", err)
@@ -305,7 +312,10 @@ func (e *Encoder) runSubprocess(ctx context.Context) (restartRequested bool, err
 
 	// Wait for ffmpeg to exit or the context to end.
 	waitErr := make(chan error, 1)
-	go func() { waitErr <- cmd.Wait() }()
+	go func() {
+		pipes.Wait()
+		waitErr <- cmd.Wait()
+	}()
 
 	select {
 	case <-ctx.Done():

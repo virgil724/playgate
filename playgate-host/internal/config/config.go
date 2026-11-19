@@ -225,7 +225,8 @@ type ABRConfig struct {
 	// decreases the bitrate. e.g. 0.05 = 5%.
 	LossThreshold float64 `yaml:"loss_threshold"`
 	// SampleIntervalMS is how often WebRTC stats are sampled and fed to the
-	// controller. 0 uses a 2s default.
+	// controller. 0 picks by backend: 500ms with a live-bitrate encoder
+	// (libav), 2s otherwise.
 	SampleIntervalMS int `yaml:"sample_interval_ms"`
 	// CooldownSeconds is the minimum time between two bitrate changes (debounces
 	// the encoder restart). 0 uses a 10s default.
@@ -386,7 +387,7 @@ func Default() Config {
 			MinBitrate:       1_000_000,
 			MaxBitrate:       8_000_000,
 			LossThreshold:    0.05,
-			SampleIntervalMS: 2000,
+			SampleIntervalMS: 0, // by backend, see abrTimings
 			CooldownSeconds:  10,
 		},
 		WebRTC: WebRTCConfig{

@@ -57,6 +57,11 @@ type videoSenderConfig struct {
 	FECRatio float64
 	// SendAck delivers a control-channel JSON message. May be nil.
 	SendAck func([]byte)
+	// OnSwitchToTrack runs under the sender lock just before the active sink
+	// flips to the RTP track, so the peer can re-arm its keyframe gate before
+	// any frame is routed there. It must not call back into the sender. May be
+	// nil.
+	OnSwitchToTrack func()
 }
 
 // videoSender implements the host side of the WebCodecs transport for one
@@ -76,6 +81,7 @@ type videoSender struct {
 	helloCaps   uint8
 	helloMaxFEC uint8
 	needsKey    bool
+	linkDown    bool // peer connection not connected (see setLinkUp)
 	bumpPending bool // epoch++ at the next IDR sent
 	epoch       uint16
 	frameID     uint32
@@ -195,6 +201,19 @@ func (s *videoSender) setChannel(dc dcSender) {
 	s.mu.Unlock()
 }
 
+// setLinkUp tracks the peer connection state. While it is not connected the
+// DataChannel can still report open, so frames are held back here; the viewer
+// resumes on the next IDR and stale frames are not kept for retransmission.
+func (s *videoSender) setLinkUp(up bool) {
+	s.mu.Lock()
+	s.linkDown = !up
+	if !up {
+		s.needsKey = true
+		s.sent = s.sent[:0]
+	}
+	s.mu.Unlock()
+}
+
 // onChannelOpen marks the viewer as needing a keyframe (section 3.4).
 func (s *videoSender) onChannelOpen() {
 	s.mu.Lock()
@@ -235,8 +254,17 @@ func (s *videoSender) switchTo(use string) (active string, toTrack bool) {
 	if allowed && (use == VideoTransportTrack || use == VideoTransportWebCodecs) {
 		target = use
 	}
+	if target == VideoTransportWebCodecs && s.hello && s.helloCaps&CapWebCodecsH264 == 0 {
+		target = s.active // the viewer said it cannot decode H.264 there
+	}
 	changed := target != s.active
 	if changed {
+		if target == VideoTransportTrack {
+			if s.cfg.OnSwitchToTrack != nil {
+				s.cfg.OnSwitchToTrack()
+			}
+			s.sent = s.sent[:0] // nothing left to retransmit on the channel
+		}
 		s.active = target
 		s.needsKey = true
 		s.bumpPending = true
@@ -346,8 +374,7 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 	defer s.sendMu.Unlock()
 
 	s.mu.Lock()
-	if s.active != VideoTransportWebCodecs || !s.hello || s.dc == nil ||
-		s.dc.ReadyState() != webrtc.DataChannelStateOpen {
+	if !s.sendableLocked() {
 		s.mu.Unlock()
 		return nil
 	}
@@ -373,6 +400,8 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 
 	au := pkt.Data
 	flags := uint8(0)
+	var prevIDREp uint16
+	var prevHaveIDR bool
 	if pkt.IsKeyframe {
 		flags |= FlagKey
 		ps, hasSPS, hasPPS := paramSets(au)
@@ -400,6 +429,7 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 		// Cleared before sending so a KEYFRAME_REQUEST racing with this IDR's
 		// send re-arms needsKey instead of being overwritten afterwards.
 		s.needsKey = false
+		prevIDREp, prevHaveIDR = s.lastIDREp, s.haveIDR
 		s.lastIDREp = s.epoch
 		s.haveIDR = true
 	}
@@ -421,12 +451,20 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 			scheme = fecScheme
 		}
 	}
-	msgs, err := FragmentFrameFEC(meta, au, s.stride, scheme, m)
-	if err != nil {
+	// An IDR that did not go out must not make the viewer's keyframe requests
+	// for the previous epoch look stale.
+	unsent := func() {
 		s.mu.Lock()
 		s.needsKey = true
 		s.framesDropped++
+		if pkt.IsKeyframe && s.lastIDREp == meta.Epoch {
+			s.lastIDREp, s.haveIDR = prevIDREp, prevHaveIDR
+		}
 		s.mu.Unlock()
+	}
+	msgs, err := FragmentFrameFEC(meta, au, s.stride, scheme, m)
+	if err != nil {
+		unsent()
 		s.log.Warn("cannot fragment frame", "err", err)
 		s.wantKey()
 		return nil
@@ -442,10 +480,7 @@ func (s *videoSender) writeFrame(pkt core.EncodedPacket) error {
 			time.Sleep(gap)
 		}
 		if err := dc.Send(m); err != nil {
-			s.mu.Lock()
-			s.needsKey = true
-			s.framesDropped++
-			s.mu.Unlock()
+			unsent()
 			s.log.Debug("video fragment send failed", "err", err)
 			s.wantKey()
 			return nil
@@ -472,12 +507,27 @@ func (s *videoSender) rememberLocked(f sentFrame) {
 	}
 }
 
+// sendableLocked reports whether frames may go out on the channel now.
+// Caller holds s.mu.
+func (s *videoSender) sendableLocked() bool {
+	return s.active == VideoTransportWebCodecs && s.hello && !s.linkDown && s.dc != nil &&
+		s.dc.ReadyState() == webrtc.DataChannelStateOpen
+}
+
+// retransmitMaxFragments caps the fragments one FRAG_NACK can pull back out.
+// An empty index list asks for the whole frame, which for an IDR can be
+// hundreds of fragments; past this many the viewer is better served by the
+// keyframe request it falls back to.
+const retransmitMaxFragments = 64
+
 // retransmit resends the fragments a FRAG_NACK asks for, if the frame is
-// still kept and the channel is not backed up.
+// still kept and the channel is not backed up. Each index is sent at most once
+// per request, at most retransmitMaxTimes per fragment and retransmitMaxFragments
+// per request, and sending stops as soon as the channel backs up.
 func (s *videoSender) retransmit(n FragNack) {
 	s.mu.Lock()
 	dc := s.dc
-	if dc == nil || dc.BufferedAmount() > s.cfg.BufferMax {
+	if !s.sendableLocked() || dc.BufferedAmount() > s.cfg.BufferMax {
 		s.mu.Unlock()
 		return
 	}
@@ -487,7 +537,12 @@ func (s *videoSender) retransmit(n FragNack) {
 		if f.epoch != n.Epoch || f.frameID != n.FrameID {
 			continue
 		}
+		seen := make(map[int]bool, len(n.Indices))
 		want := func(j int) {
+			if len(out) >= retransmitMaxFragments || seen[j] {
+				return
+			}
+			seen[j] = true
 			if j < len(f.msgs) && f.resent[j] < retransmitMaxTimes {
 				f.resent[j]++
 				out = append(out, f.msgs[j])
@@ -504,12 +559,19 @@ func (s *videoSender) retransmit(n FragNack) {
 		}
 		break
 	}
-	s.retransmits += uint64(len(out))
 	s.mu.Unlock()
+	sent := 0
 	for _, m := range out {
+		if dc.BufferedAmount() > s.cfg.BufferMax {
+			break
+		}
 		if err := dc.Send(m); err != nil {
 			s.log.Debug("video retransmit failed", "err", err)
-			return
+			break
 		}
+		sent++
 	}
+	s.mu.Lock()
+	s.retransmits += uint64(sent)
+	s.mu.Unlock()
 }

@@ -41,6 +41,23 @@ func TestCoalescerKeepsTapInsideOneInterval(t *testing.T) {
 	}
 }
 
+// Two taps of the same button inside one interval keep the release between
+// them: pending [A, 0] plus a new A must not turn into [A, A].
+func TestCoalescerKeepsReleaseBetweenRepeatedPresses(t *testing.T) {
+	c := newCoalescer(50)
+	c.push(core.InputCommand{})
+	c.poll()
+
+	c.push(core.InputCommand{Buttons: core.ButtonA})
+	c.push(core.InputCommand{})
+	c.push(core.InputCommand{Buttons: core.ButtonA})
+
+	got := drain(c)
+	if len(got) != 3 || got[0].Buttons != core.ButtonA || got[1].Buttons != 0 || got[2].Buttons != core.ButtonA {
+		t.Fatalf("got %+v, want press, release, press", got)
+	}
+}
+
 // Stick-only updates still coalesce to the latest position.
 func TestCoalescerCoalescesStickUpdates(t *testing.T) {
 	c := newCoalescer(50)

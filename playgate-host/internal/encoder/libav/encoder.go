@@ -308,14 +308,19 @@ func (e *Encoder) Run(ctx context.Context) error {
 	defer e.release()
 	defer e.log.Info("encoder stopped")
 
+	// The reader gets its own context so an encode error (ctx still live, input
+	// still open) can stop it; otherwise the deferred wait below would block
+	// forever and skip release/close.
+	readCtx, cancelRead := context.WithCancel(ctx)
 	queue := make(chan core.VideoFrame, frameQueueSize)
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		defer close(queue)
-		e.readFrames(ctx, queue)
+		e.readFrames(readCtx, queue)
 	}()
 	defer func() { <-readerDone }()
+	defer cancelRead() // runs before the wait above (LIFO)
 
 	e.log.Info("libav encoder running", "bitrate", e.curRate, "gop", e.opts.GOPSize,
 		"size", fmt.Sprintf("%dx%d", e.opts.Width, e.opts.Height))

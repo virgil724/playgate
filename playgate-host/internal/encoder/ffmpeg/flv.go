@@ -28,6 +28,7 @@ import (
 
 const (
 	flvHeaderMinSize  = 9
+	flvHeaderMaxSize  = 1024 // the spec header is 9 bytes; anything far larger is corrupt
 	flvTagHeaderSize  = 11
 	flvPrevTagSize    = 4
 	flvTagVideo       = 9
@@ -81,7 +82,13 @@ func (d *FLVDemuxer) Push(chunk []byte) ([]accessUnit, error) {
 		if string(d.buf[:3]) != "FLV" {
 			return nil, errFLVSync
 		}
-		headerSize := int(binary.BigEndian.Uint32(d.buf[5:9]))
+		// Bounded before converting: on 32-bit an int conversion of a corrupt
+		// size could go negative, and a huge one would buffer without limit.
+		rawHeader := binary.BigEndian.Uint32(d.buf[5:9])
+		if rawHeader > flvHeaderMaxSize {
+			return nil, errFLVSync
+		}
+		headerSize := int(rawHeader)
 		if headerSize < flvHeaderMinSize {
 			return nil, errFLVSync
 		}
@@ -207,7 +214,7 @@ func (d *FLVDemuxer) accessUnit(body []byte) (accessUnit, bool, error) {
 				l = l<<8 | int(b)
 			}
 			pos += d.nalLenSize
-			if l > len(body)-pos {
+			if l < 0 || l > len(body)-pos { // l < 0: 4-byte length overflowed a 32-bit int
 				return accessUnit{}, false, errors.New("encoder: NAL unit overruns FLV tag")
 			}
 			if l > 0 {

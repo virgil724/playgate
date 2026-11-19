@@ -88,7 +88,7 @@ abr:
   # from FRAME_REPORTs, and queueing (SCTP RTT well above its recent minimum, or
   # the video send queue filling up) also triggers a decrease below the loss
   # threshold. Needs enabled: true.
-  sample_interval_ms: 2000 # how often WebRTC stats are sampled
+  sample_interval_ms: 0   # how often stats are sampled; 0 = 500ms on libav, 2000ms on cli
   cooldown_seconds: 10    # minimum time between two bitrate changes
 
 # Pion WebRTC peer connection (T4). Static ICE servers; used as-is when

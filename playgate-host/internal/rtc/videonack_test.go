@@ -72,3 +72,57 @@ func TestRetransmitOnFragNack(t *testing.T) {
 		t.Fatalf("unknown frame / epoch: got %d messages", len(got))
 	}
 }
+
+// TestRetransmitGuards checks duplicate indices are resent once, a sender
+// that switched to the RTP track resends nothing, and a link that went down
+// drops the retransmit cache.
+func TestRetransmitGuards(t *testing.T) {
+	dc := &fakeDC{state: webrtc.DataChannelStateOpen}
+	s := newVideoSender(videoSenderConfig{Mode: VideoTransportAuto, BufferMax: 1 << 20, IDRPaceMS: -1})
+	s.setChannel(dc)
+	s.handleFeedback(helloMsg(CapWebCodecsH264 | CapFragNack))
+	s.switchTo(VideoTransportWebCodecs)
+	_ = s.writeFrame(pkt(testAU(3000, true), 0, true))
+	sent := dc.take()
+	h, _, err := ParseVideoHeader(sent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.handleFeedback(fragNackMsg(h.Epoch, h.FrameID, 2, 2))
+	if got := dc.take(); len(got) != 1 {
+		t.Fatalf("duplicate index: got %d messages, want 1", len(got))
+	}
+
+	s.setLinkUp(false)
+	s.setLinkUp(true)
+	s.handleFeedback(fragNackMsg(h.Epoch, h.FrameID, 0))
+	if got := dc.take(); len(got) != 0 {
+		t.Fatalf("after link down: got %d messages, want 0", len(got))
+	}
+
+	_ = s.writeFrame(pkt(testAU(3000, true), 0, true))
+	h2, _, _ := ParseVideoHeader(dc.take()[0])
+	var gateReset bool
+	s.cfg.OnSwitchToTrack = func() { gateReset = true }
+	s.switchTo(VideoTransportTrack)
+	if !gateReset {
+		t.Error("OnSwitchToTrack not called")
+	}
+	dc.take() // ack goes through SendAck, not dc; drain anyway
+	s.handleFeedback(fragNackMsg(h2.Epoch, h2.FrameID, 0))
+	if got := dc.take(); len(got) != 0 {
+		t.Fatalf("track mode: got %d messages, want 0", len(got))
+	}
+}
+
+// TestSwitchToWebCodecsNeedsH264Cap checks auto mode refuses a webcodecs switch
+// from a viewer whose HELLO lacks H.264 support.
+func TestSwitchToWebCodecsNeedsH264Cap(t *testing.T) {
+	s := newVideoSender(videoSenderConfig{Mode: VideoTransportAuto})
+	s.setChannel(&fakeDC{state: webrtc.DataChannelStateOpen})
+	s.handleFeedback(helloMsg(0))
+	if got, _ := s.switchTo(VideoTransportWebCodecs); got != VideoTransportTrack {
+		t.Fatalf("active = %q, want track", got)
+	}
+}

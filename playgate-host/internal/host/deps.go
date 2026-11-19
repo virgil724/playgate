@@ -62,7 +62,11 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	encOpts.Preset = cfg.Encoder.Preset
 	encOpts.GOPSize = cfg.Encoder.GOPFrames(cfg.Capture.FPS)
 	encOpts.IntraRefresh = cfg.Encoder.IntraRefresh
-	encOpts.ForceKeyframeDebounce = cfg.KeyframeDebounce()
+	// The host's keyframe coalescer already spaces requests by
+	// KeyframeDebounce and fires its deferred request right at the window end.
+	// The encoder's own guard (for direct callers) is set a little shorter so it
+	// never swallows that deferred request by a clock hair.
+	encOpts.ForceKeyframeDebounce = cfg.KeyframeDebounce() * 9 / 10
 
 	// T13: select the configured codec (libx264 / v4l2m2m / vaapi / nvenc).
 	codec, err := ffmpeg.CodecFromName(cfg.EncoderCodecKind(), cfg.Encoder.VAAPIDevice)

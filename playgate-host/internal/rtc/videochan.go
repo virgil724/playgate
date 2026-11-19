@@ -40,6 +40,12 @@ func (p *Peer) setupVideoChannels() error {
 		FECRatio:      p.cfg.VideoFECRatio,
 		Log:           p.log,
 		WantKeyframe:  p.cfg.OnVideoKeyframeRequest,
+		OnSwitchToTrack: func() {
+			// Re-arm the RTP keyframe gate so the track starts on the next IDR.
+			p.vmu.Lock()
+			p.seenKeyframe = false
+			p.vmu.Unlock()
+		},
 		SendAck: func(b []byte) {
 			if err := p.SendControl(b); err != nil {
 				p.log.Debug("video_transport ack failed", "err", err)
@@ -90,11 +96,5 @@ func (p *Peer) handleVideoTransport(data []byte) {
 		_ = p.SendControl([]byte(`{"kind":"video_transport","active":"track"}`))
 		return
 	}
-	_, toTrack := p.vs.switchTo(msg.Use)
-	if toTrack {
-		// Re-arm the RTP keyframe gate so the track starts on the next IDR.
-		p.vmu.Lock()
-		p.seenKeyframe = false
-		p.vmu.Unlock()
-	}
+	p.vs.switchTo(msg.Use) // OnSwitchToTrack re-arms the RTP keyframe gate
 }

@@ -335,6 +335,9 @@ func (c *connManager) applyAnswer(sess *viewerSession, env viewerEnvelope) {
 		SDP:  env.SDP,
 	}); err != nil {
 		c.log.Warn("set remote answer failed", "err", err)
+		sess.mu.Lock()
+		sess.answered = false // let the real answer through
+		sess.mu.Unlock()
 	}
 }
 
@@ -413,10 +416,9 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		return
 	}
 	defer peer.Close()
-	sess.setPeer(peer)
 	if c.abrReg != nil {
 		c.abrReg.Register(id, peer)
-		defer c.abrReg.Unregister(id)
+		defer c.abrReg.Unregister(id, peer)
 	}
 
 	c.router.AddSink(peer)
@@ -433,6 +435,9 @@ func (c *connManager) runViewer(ctx context.Context, id string, sess *viewerSess
 		log.Warn("create offer failed", "err", err)
 		return
 	}
+	// Only now can an answer apply: one arriving earlier (a stale answer from
+	// the viewer's previous attempt) would fail and use up the single slot.
+	sess.setPeer(peer)
 	if err := c.client.PostMessage(sctx, viewerOffer{
 		Type: offer.Type.String(),
 		SDP:  offer.SDP,

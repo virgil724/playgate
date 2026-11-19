@@ -18,6 +18,7 @@ type keyframeCoalescer struct {
 	mu      sync.Mutex
 	last    time.Time
 	pending *time.Timer
+	stopped bool
 }
 
 func newKeyframeCoalescer(minInterval time.Duration, fire func()) *keyframeCoalescer {
@@ -30,8 +31,8 @@ func (c *keyframeCoalescer) Request() {
 		return
 	}
 	c.mu.Lock()
-	if c.pending != nil {
-		c.mu.Unlock() // the armed timer already covers this request
+	if c.stopped || c.pending != nil {
+		c.mu.Unlock() // stopped, or the armed timer already covers this request
 		return
 	}
 	now := c.now()
@@ -44,6 +45,11 @@ func (c *keyframeCoalescer) Request() {
 	}
 	c.pending = time.AfterFunc(wait, func() {
 		c.mu.Lock()
+		if c.stopped {
+			// Stop raced with this timer firing: timer.Stop returned false.
+			c.mu.Unlock()
+			return
+		}
 		c.pending = nil
 		c.last = c.now()
 		c.mu.Unlock()
@@ -52,12 +58,13 @@ func (c *keyframeCoalescer) Request() {
 	c.mu.Unlock()
 }
 
-// Stop cancels a pending deferred request.
+// Stop cancels a pending deferred request and ignores later ones.
 func (c *keyframeCoalescer) Stop() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
+	c.stopped = true
 	if c.pending != nil {
 		c.pending.Stop()
 		c.pending = nil

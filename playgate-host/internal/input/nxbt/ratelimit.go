@@ -65,16 +65,16 @@ func (c *coalescer) notifyC() <-chan struct{} { return c.notify }
 
 // push queues cmd. It replaces the newest queued command when that command
 // holds no button change the consumer still needs to see: either it has the
-// same buttons as cmd, or the same buttons as the last command sent (it is only
-// a stick update, which cmd supersedes). Otherwise cmd is appended. Push is
+// same buttons as cmd, or the same buttons as the command before it (the queued
+// one before it, or the last one sent) so it is only a stick update, which cmd
+// supersedes. Otherwise cmd is appended. Push is
 // non-blocking and safe to call from multiple goroutines. After storing, it
 // signals notify so an idle send loop wakes; the signal is dropped if one is
 // already buffered.
 func (c *coalescer) push(cmd core.InputCommand) {
 	c.mu.Lock()
 	n := len(c.pending)
-	if n > 0 && (c.pending[n-1].Buttons == cmd.Buttons ||
-		(c.haveSent && c.pending[n-1].Buttons == c.sentButtons)) {
+	if n > 0 && (c.pending[n-1].Buttons == cmd.Buttons || c.stickOnlyLocked(n-1)) {
 		c.pending[n-1] = cmd
 	} else {
 		if n == maxPendingEdges {
@@ -88,6 +88,18 @@ func (c *coalescer) push(cmd core.InputCommand) {
 	case c.notify <- struct{}{}:
 	default:
 	}
+}
+
+// stickOnlyLocked reports whether pending[i] carries no button edge: its buttons
+// match the command delivered just before it. Comparing the newest entry with
+// sentButtons alone is wrong once two entries are queued: with sent=0 and
+// pending [A, 0], the release would look stick-only and a new A would overwrite
+// it. Caller holds mu.
+func (c *coalescer) stickOnlyLocked(i int) bool {
+	if i > 0 {
+		return c.pending[i].Buttons == c.pending[i-1].Buttons
+	}
+	return c.haveSent && c.pending[i].Buttons == c.sentButtons
 }
 
 // poll returns the oldest pending command if the rate-limit interval has
