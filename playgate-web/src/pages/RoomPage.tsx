@@ -40,6 +40,9 @@ export function RoomPage() {
   const { roomId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Audio plays from its own element. The <video> is hidden in WebCodecs mode,
+  // and Chrome pauses a hidden muted video, which silenced the audio with it.
+  const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // `?transport=track|webcodecs` testing override, read once (the code-redeem
   // flow below clears the query string).
@@ -293,6 +296,19 @@ export function RoomPage() {
         onVideoFbChannel: (ch) => transport.onVideoFbChannel(ch),
         onTrack: (stream) => {
           if (videoRef.current) videoRef.current.srcObject = stream;
+          const a = audioRef.current;
+          if (a) {
+            const tracks = stream.getAudioTracks();
+            const cur = a.srcObject instanceof MediaStream ? a.srcObject.getAudioTracks() : [];
+            const same =
+              cur.length === tracks.length && cur.every((t, i) => t.id === tracks[i].id);
+            if (!same) {
+              a.srcObject = tracks.length > 0 ? new MediaStream(tracks) : null;
+            }
+            // Once the viewer unmuted (a user gesture), a reconnect's new
+            // stream may start playing right away.
+            if (!a.muted) void a.play().catch(() => {});
+          }
         },
         onControlEvent: handleControlEvent,
         onControlMessage: (data) => {
@@ -392,6 +408,8 @@ export function RoomPage() {
       transport.close();
       connection.close();
       connRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      if (audioRef.current) audioRef.current.srcObject = null;
     };
   }, [roomId, handleControlEvent]);
 
@@ -598,6 +616,7 @@ export function RoomPage() {
           muted
           style={transportMode === "webcodecs" ? { display: "none" } : undefined}
         />
+        <audio ref={audioRef} autoPlay muted />
         <canvas ref={canvasRef} style={transportMode === "webcodecs" ? undefined : { display: "none" }} />
         {showLogs && wcStats && (
           <div
@@ -642,10 +661,12 @@ export function RoomPage() {
             className="btn-primary"
             style={{ position: "absolute", right: 12, bottom: 12, zIndex: 2 }}
             onClick={() => {
-              const v = videoRef.current;
-              if (!v) return;
-              v.muted = !v.muted;
-              setAudioMuted(v.muted);
+              const a = audioRef.current;
+              if (!a) return;
+              a.muted = !a.muted;
+              setAudioMuted(a.muted);
+              // Inside the click, so autoplay policy allows it.
+              if (!a.muted) void a.play().catch((err) => dlog("page", `audio play failed: ${String(err)}`));
             }}
           >
             {audioMuted ? "🔇 開啟聲音" : "🔊 靜音"}
