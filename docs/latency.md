@@ -281,3 +281,23 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 
 
 
+
+## GC553 擷取卡本身的延遲（2026-11-21，`scripts/latency/caplat.c`）
+
+方法：
+- 電腦的 HDMI 輸出接到 GC553 的輸入（延伸桌面的 3 號螢幕，輸出 3840×2160@60）。
+- caplat 用 D3D11 flip-model swap chain 在那個螢幕上逐張畫遞增編號的條碼，用 `GetFrameStatistics` 取得每張實際開始送出的 vblank 時間（QPC）。
+- 同時用 ffmpeg dshow 讀回擷取卡畫面，解出條碼並記錄收到的時間（QPC）。
+- 延遲 = 收到 − vblank，兩邊用同一個時鐘，電腦端的合成和等 vsync 不會算進去。每輪 300–600 張。
+
+| ffmpeg 參數 | p50 | p10–p90 | 備註 |
+|---|---|---|---|
+| 舊版（只有 `-rtbufsize 16M`） | 59.4 或 76ms | 約 17ms | 每輪由啟動時決定是否多一張；8 輪裡 2 輪是 76ms |
+| `-fflags nobuffer -probesize 32 -analyzeduration 0` | 35.0ms | 0.3ms | 沒加 `-fps_mode passthrough` 時，偶爾仍會在中途積壓兩張不退 |
+| host 現行參數（上列 + `-flags low_delay` + `-fps_mode passthrough`） | **35.0ms** | **0.3ms** | 10 輪全部 35.0ms，最慢 37.8ms |
+
+- 1080p 擷取（舊參數）61ms，和 720p 同級，GC553 的縮放幾乎不花時間。
+- GC553 本身約 35ms：收完一整張畫面約 16.7ms，加上約 18ms 的處理、USB 傳輸和驅動交付。
+- 舊參數多出的 25–40ms 和約 17ms 的抖動，都是 ffmpeg 開啟裝置時預讀、輸入端緩衝造成的；這段積壓之後讀寫同速，永遠清不掉。
+- 影像擷取在 `3d9e903` 已經改用新參數；聲音的 ffmpeg 輸入（ALSA 和 dshow）原本就統一加了同一組參數。
+- 前面 2026-11-19 主選單那次 154ms 是用舊參數量的，其中 GC553 約占 59–76ms。改用新參數後，扣掉 GC553 的 35ms、輸入 5–10ms 和串流 15–25ms，Switch 主選單反應加 HDMI 約占 60–75ms。
