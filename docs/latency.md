@@ -281,3 +281,71 @@ libav、60fps、RTP 的延遲 p50 是 **241～257ms**，比 CLI、30fps、RTP �
 
 
 
+
+## GC553 擷取卡本身的延遲（2026-11-21，`scripts/latency/caplat.c`）
+
+> `scripts/latency/caplat.c` 已被 [caplat](https://github.com/virgil724/caplat) 取代（Go 寫的，支援 MF、DirectShow、ffmpeg 三種讀法，以及聲音和影音同步量測），新數字見下一節。
+
+方法：
+- 電腦的 HDMI 輸出接到 GC553 的輸入（延伸桌面的 3 號螢幕，輸出 3840×2160@60）。
+- caplat 用 D3D11 flip-model swap chain 在那個螢幕上逐張畫遞增編號的條碼，用 `GetFrameStatistics` 取得每張實際開始送出的 vblank 時間（QPC）。
+- 同時用 ffmpeg dshow 讀回擷取卡畫面，解出條碼並記錄收到的時間（QPC）。
+- 延遲 = 收到 − vblank，兩邊用同一個時鐘，電腦端的合成和等 vsync 不會算進去。每輪 300–600 張。
+
+| ffmpeg 參數 | p50 | p10–p90 | 備註 |
+|---|---|---|---|
+| 舊版（只有 `-rtbufsize 16M`） | 59.4 或 76ms | 約 17ms | 每輪由啟動時決定是否多一張；8 輪裡 2 輪是 76ms |
+| `-fflags nobuffer -probesize 32 -analyzeduration 0` | 35.0ms | 0.3ms | 沒加 `-fps_mode passthrough` 時，偶爾仍會在中途積壓兩張不退 |
+| host 現行參數（上列 + `-flags low_delay` + `-fps_mode passthrough`） | **35.0ms** | **0.3ms** | 10 輪全部 35.0ms，最慢 37.8ms |
+
+- 1080p 擷取（舊參數）61ms，和 720p 同級，GC553 的縮放幾乎不花時間。
+- GC553 本身約 35ms：收完一整張畫面約 16.7ms，加上約 18ms 的處理、USB 傳輸和驅動交付。
+- 舊參數多出的 25–40ms 和約 17ms 的抖動，都是 ffmpeg 開啟裝置時預讀、輸入端緩衝造成的；這段積壓之後讀寫同速，永遠清不掉。
+- 影像擷取在 `3d9e903` 已經改用新參數；聲音的 ffmpeg 輸入（ALSA 和 dshow）原本就統一加了同一組參數。
+- 前面 2026-11-19 主選單那次 154ms 是用舊參數量的，其中 GC553 約占 59–76ms。改用新參數後，扣掉 GC553 的 35ms、輸入 5–10ms 和串流 15–25ms，Switch 主選單反應加 HDMI 約占 60–75ms。
+
+## 程式內擷取：MF 影像 + WASAPI 聲音（2026-11-21，`feat/inprocess-capture`）
+
+Windows host 新增 `capture.source: mf` 和 `audio.format: wasapi`（需 `-tags libav`），不再開 ffmpeg 子程序讀擷取卡：影像用 Media Foundation 的 `IMFSourceReader` 直接讀 NV12，聲音用 WASAPI 讀 float32、在程式內用 libav 的 libopus 編碼。兩者都用 caplat 公開的 `capture/mf`、`capture/wasapi` 套件。
+
+### 擷取端拆解（caplat，電腦 HDMI → GC553，vblank → 程式收到）
+
+| 讀法 | 影像 p50 | p10–p90 |
+|---|---|---|
+| Media Foundation，程式內 | **18.1ms** | 0.2ms |
+| DirectShow，程式內 | 17.9ms | 0.1ms |
+| ffmpeg + DirectShow（host 舊參數） | 35.2ms | 0.3ms |
+
+- 省下來的那一張畫面來自拿掉 ffmpeg，不是 MF 比 DirectShow 快：兩種 API 程式內直接讀一樣快，是 ffmpeg 多囤了一張。
+- 選 MF 是因為它有驅動的擷取時間戳（`MFSampleExtension_DeviceTimestamp`，和 QPC 同一個時鐘）、程式碼較簡單；要支援虛擬攝影機（只有 DirectShow 介面）時再加程式內 DirectShow。
+- 聲音：WASAPI 程式內讀，驅動時間戳 → 程式收到 p50 約 1.5ms（獨佔，3ms 週期）或 9.4ms（共享，10ms 週期）；ffmpeg dshow `-audio_buffer_size 10` 是 21.6ms。
+
+### 端到端 A/B（Switch 主選單，桌機 Chrome，每輪 30 次，`scripts/latency/measure-switch-av.js`）
+
+舊 = `dshow`/`dshow`（ffmpeg），新 = `mf`/`wasapi`。GC553 中途卡死過一次、軟體重開後兩邊都慢了約一張畫面，所以只在同一個卡片狀態內比較。
+
+| 卡片狀態 | 設定 | 影像 p50 | 聲音 p50 | 音畫差 |
+|---|---|---|---|---|
+| 重開前 | 舊（3 輪） | 127 / 129 / 129 | 195 / 191 / 203 | 約 +70 |
+| 重開前 | 新，WASAPI 獨佔（2 輪） | **112 / 112** | **163 / 167** | 約 +52 |
+| 重開後 | 舊 | 145 | 195 | +50 |
+| 重開後 | 新，WASAPI 共享（2 輪） | **126 / 127** | **165 / 167** | 約 +40 |
+
+- 影像快約 17–19ms（剛好一張畫面），聲音快約 30ms，音畫差縮小 10–20ms。
+- 共享模式和獨佔模式的端到端聲音延遲一樣，獨佔的 3ms 週期在 Chrome 的 jitter buffer 之後看不出差別。
+- **GC553 卡死**：在 MF + WASAPI 獨佔下跑第 3 輪時，影像和聲音同時停止，之後 ffmpeg 也讀不到（I/O error），PnP 狀態仍顯示正常。卡死前聲音延遲已升到 360–490ms。不用拔插的復原方式（系統管理員）：`pnputil /restart-device "USB\VID_07CA&PID_0553\<序號>"`。因此 `exclusive` 在 `config.example.yaml` 標為實驗性，預設共享。
+
+### 長時間跑（MF + WASAPI 共享，31 分鐘，每 5 分鐘量一輪）
+
+| 分鐘 | 影像 p50 / p90 | 聲音 p50 / p90 | 音畫差 p50 |
+|---|---|---|---|
+| 6 | 129 / 138 | 158 / 166 | +29 |
+| 11 | 125 / 136 | 158 / 171 | +33 |
+| 16 | 128 / 140 | 163 / 175 | +35 |
+| 21 | 127 / 136 | 163 / 175 | +39 |
+| 26 | 131 / 138 | 167 / 178 | +38 |
+| 31 | 130 / 138 | 159 / 170 | +31 |
+
+- 影像、聲音都沒有漂移；舊版 ffmpeg dshow 跑 12–16 分鐘後影像多約 100ms 的問題沒有再出現。
+- 整段 0 個 WARN、0 次重開，GC553 沒有再卡死。host 編碼 p50 0.55ms、p95 1.5ms。
+- 第 6 分鐘那輪聲音有 11 次逾時：選單音效太小聲，低於偵測門檻（RMS 0.015），兩種設定都會發生，與 host 無關。

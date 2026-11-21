@@ -5,6 +5,7 @@ import (
 	"math"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -37,6 +38,10 @@ const (
 	// CaptureDShow reads capture.device through ffmpeg's DirectShow input
 	// (a capture card on Windows; needs ffmpeg).
 	CaptureDShow = "dshow"
+	// CaptureMF reads capture.device in-process with Media Foundation
+	// (a capture card on Windows; no ffmpeg). About one frame (17 ms at
+	// 60 Hz) faster than dshow, which queues an extra frame in ffmpeg.
+	CaptureMF = "mf"
 )
 
 // Input target kinds.
@@ -222,6 +227,13 @@ type AudioConfig struct {
 	// FFmpegPath overrides the ffmpeg binary used for audio capture. Empty falls
 	// back to encoder.ffmpeg_path (and then "ffmpeg").
 	FFmpegPath string `yaml:"ffmpeg_path"`
+	// Exclusive (format wasapi) opens the endpoint in WASAPI exclusive mode:
+	// 3 ms capture periods on a GC553 instead of the shared 10 ms, and no
+	// other program can use the endpoint meanwhile.
+	Exclusive bool `yaml:"exclusive"`
+	// FrameMS (format wasapi) is the Opus frame length: 2.5, 5, 10 (default)
+	// or 20 ms. Shorter frames lower latency and raise bitrate overhead.
+	FrameMS float64 `yaml:"frame_ms"`
 }
 
 // ABRConfig configures the adaptive-bitrate controller (T14). When disabled the
@@ -479,13 +491,16 @@ func Load(path string) (Config, error) {
 // intentionally light for T1; downstream modules add their own checks.
 func (c Config) Validate() error {
 	switch c.Capture.Source {
-	case "", CaptureV4L2, CaptureSynthetic, CaptureTestSrc, CaptureDShow:
+	case "", CaptureV4L2, CaptureSynthetic, CaptureTestSrc, CaptureDShow, CaptureMF:
 	default:
-		return fmt.Errorf("capture source must be %q, %q, %q or %q, got %q",
-			CaptureV4L2, CaptureDShow, CaptureSynthetic, CaptureTestSrc, c.Capture.Source)
+		return fmt.Errorf("capture source must be %q, %q, %q, %q or %q, got %q",
+			CaptureV4L2, CaptureMF, CaptureDShow, CaptureSynthetic, CaptureTestSrc, c.Capture.Source)
 	}
-	if c.Capture.Source == CaptureDShow && c.Capture.Device == "" {
-		return fmt.Errorf("capture.device must name the DirectShow video device for source %q", CaptureDShow)
+	if (c.Capture.Source == CaptureDShow || c.Capture.Source == CaptureMF) && c.Capture.Device == "" {
+		return fmt.Errorf("capture.device must name the video capture device for source %q", c.Capture.Source)
+	}
+	if c.Capture.Source == CaptureMF && runtime.GOOS != "windows" {
+		return fmt.Errorf("capture source %q is Windows only; use %q", CaptureMF, CaptureV4L2)
 	}
 	if c.Capture.Width <= 0 || c.Capture.Height <= 0 {
 		return fmt.Errorf("capture resolution must be positive, got %dx%d", c.Capture.Width, c.Capture.Height)
@@ -551,8 +566,17 @@ func (c Config) Validate() error {
 		}
 		switch c.Audio.Format {
 		case "", "alsa", "dshow":
+		case "wasapi":
+			if runtime.GOOS != "windows" {
+				return fmt.Errorf("audio format \"wasapi\" is Windows only")
+			}
 		default:
-			return fmt.Errorf("audio format must be \"alsa\" or \"dshow\", got %q", c.Audio.Format)
+			return fmt.Errorf("audio format must be \"alsa\", \"dshow\" or \"wasapi\", got %q", c.Audio.Format)
+		}
+		switch c.Audio.FrameMS {
+		case 0, 2.5, 5, 10, 20:
+		default:
+			return fmt.Errorf("audio frame_ms must be 2.5, 5, 10 or 20, got %v", c.Audio.FrameMS)
 		}
 		if c.Audio.SampleRate <= 0 || c.Audio.Channels <= 0 {
 			return fmt.Errorf("audio sample_rate and channels must be positive when enabled (sample_rate=%d channels=%d)", c.Audio.SampleRate, c.Audio.Channels)

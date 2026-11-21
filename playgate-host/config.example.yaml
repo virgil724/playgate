@@ -12,6 +12,16 @@ capture:
                         # NV12 is half the bandwidth, so many USB cards offer 60fps in NV12)
   format: YUYV          # YUYV | NV12 | MJPEG — must be a format the card lists at this resolution
 
+# Windows capture card (lowest latency): read it in-process with Media Foundation.
+#   capture:
+#     source: mf                       # Windows only, no ffmpeg; emits NV12
+#     device: Live Gamer Ultra-Video   # the camera name Windows shows for the card
+#     width: 1280
+#     height: 720
+#     fps: 60
+# source: dshow reads the same card through ffmpeg instead; on a GC553 that is
+# 35 ms after the HDMI frame instead of 18 ms (ffmpeg queues an extra frame).
+
 # Diagnostics: ffmpeg test picture (frame counter + live controller input).
 # To try it, set capture.source: testsrc and input.target: overlay:
 #   capture:
@@ -67,6 +77,12 @@ audio:
   channels: 2
   bitrate: 128000            # Opus bitrate (bits/sec)
   # ffmpeg_path:             # optional; defaults to encoder.ffmpeg_path
+  # Windows, lowest latency (needs the host built with -tags libav):
+  #   format: wasapi            # WASAPI in-process + libav Opus, no ffmpeg subprocess
+  #   device: HDMI (Live Gamer Ultra-Audio)   # the recording device's name in Windows
+  #   exclusive: false          # experimental: 3 ms periods, device ours alone. Measured no faster
+  #                             # end to end than shared mode, and the GC553 hung once under it.
+  #   frame_ms: 10              # Opus frame: 2.5 | 5 | 10 | 20; shorter = lower latency, more overhead
 
 # Adaptive bitrate. When enabled, one host-level loop samples WebRTC stats (loss,
 # RTT) and adjusts the shared encoder bitrate within [min_bitrate, max_bitrate]

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/playgate/playgate-host/internal/audio/opus"
+	"github.com/playgate/playgate-host/internal/audio/wasapi"
+	"github.com/playgate/playgate-host/internal/capture/mf"
 	"github.com/playgate/playgate-host/internal/capture/synthetic"
 	"github.com/playgate/playgate-host/internal/capture/testsrc"
 	"github.com/playgate/playgate-host/internal/capture/v4l2"
@@ -32,7 +34,7 @@ func encoderInputFormat(cfg config.Config) (core.PixelFormat, error) {
 	switch cfg.Capture.Source {
 	case config.CaptureSynthetic:
 		return core.PixelFormatYUYV, nil
-	case config.CaptureTestSrc, config.CaptureDShow:
+	case config.CaptureTestSrc, config.CaptureDShow, config.CaptureMF:
 		return core.PixelFormatNV12, nil
 	default:
 		return v4l2.ParsePixelFormat(cfg.Capture.Format)
@@ -90,7 +92,10 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 	encWrap := newEncoderWrapper(log, mc, capture, tap, enc)
 
 	// --- optional audio source (ALSA→Opus) ---
-	audioSrc := buildAudio(log, cfg)
+	audioSrc, err := buildAudio(log, cfg)
+	if err != nil {
+		return Deps{}, err
+	}
 
 	// --- input target ---
 	input, err := buildInput(log, cfg, mc)
@@ -118,9 +123,21 @@ func buildDeps(log *slog.Logger, cfg config.Config, mc *metrics.Collector) (Deps
 // a nil AudioSource (interface nil, so host.Run's nil check works — returning a
 // typed nil *opus.Source would defeat it). It falls back to the encoder's ffmpeg
 // path when audio.ffmpeg_path is unset.
-func buildAudio(log *slog.Logger, cfg config.Config) AudioSource {
+func buildAudio(log *slog.Logger, cfg config.Config) (AudioSource, error) {
 	if !cfg.Audio.Enabled {
-		return nil
+		return nil, nil
+	}
+	if cfg.Audio.Format == "wasapi" {
+		src, err := wasapi.New(log, wasapi.Config{
+			Device:    cfg.Audio.Device,
+			Bitrate:   cfg.Audio.Bitrate,
+			FrameMS:   cfg.Audio.FrameMS,
+			Exclusive: cfg.Audio.Exclusive,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return src, nil
 	}
 	ffmpegPath := cfg.Audio.FFmpegPath
 	if ffmpegPath == "" {
@@ -133,7 +150,7 @@ func buildAudio(log *slog.Logger, cfg config.Config) AudioSource {
 		Channels:   cfg.Audio.Channels,
 		Bitrate:    cfg.Audio.Bitrate,
 		Format:     cfg.Audio.Format,
-	})
+	}), nil
 }
 
 // detectCodec runs the best-effort `ffmpeg -encoders` probe and logs a clear,
@@ -182,6 +199,13 @@ func buildCapture(log *slog.Logger, cfg config.Config) (core.CaptureSource, erro
 			Height:      cfg.Capture.Height,
 			FPS:         cfg.Capture.FPS,
 			DShowDevice: cfg.Capture.Device,
+		})
+	case config.CaptureMF:
+		return mf.New(log, mf.Config{
+			Device: cfg.Capture.Device,
+			Width:  cfg.Capture.Width,
+			Height: cfg.Capture.Height,
+			FPS:    cfg.Capture.FPS,
 		})
 	case config.CaptureV4L2:
 		pixfmt, err := v4l2.ParsePixelFormat(cfg.Capture.Format)
