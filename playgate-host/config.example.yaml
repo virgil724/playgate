@@ -80,7 +80,8 @@ audio:
   # Windows, lowest latency (needs the host built with -tags libav):
   #   format: wasapi            # WASAPI in-process + libav Opus, no ffmpeg subprocess
   #   device: HDMI (Live Gamer Ultra-Audio)   # the recording device's name in Windows
-  #   exclusive: true           # 3 ms capture periods instead of 10 ms; the device is ours alone
+  #   exclusive: false          # experimental: 3 ms periods, device ours alone. Measured no faster
+  #                             # end to end than shared mode, and the GC553 hung once under it.
   #   frame_ms: 10              # Opus frame: 2.5 | 5 | 10 | 20; shorter = lower latency, more overhead
 
 # Adaptive bitrate. When enabled, one host-level loop samples WebRTC stats (loss,
